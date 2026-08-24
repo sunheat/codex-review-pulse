@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Review Pulse"
+  short_description: "Safely remediate Codex PR review threads"
+  default_prompt: "Use $codex-review-pulse to process one safe, thread-aware remediation cycle for this GitHub pull request."
