@@ -13,9 +13,10 @@ import subprocess
 import sys
 from typing import Any, Callable
 
-from checkpoint_store import checkpoint_path, load_checkpoint
+from checkpoint_store import checkpoint_path, load_checkpoint, runtime_artifact_path
 from fetch_pr_state import fetch_stable_snapshot, graphql
 from manage_pilot_install import installation_path, verify_installation
+from runner_lease import inspect_lease
 from state_model import (
     DEFAULT_CODEX_LOGINS,
     SCHEMA_VERSION,
@@ -67,6 +68,7 @@ def _checkpoint_diagnostic(
             "recovery_required": False,
             "error": None,
         }
+    state_path: Path | None = None
     try:
         checkpoint = load_checkpoint(path)
         if checkpoint is None:
@@ -334,6 +336,30 @@ def build_preflight(
             "error": f"Unable to resolve checkpoint path: {error}",
         }
     result["checkpoint"] = checkpoint_info
+    try:
+        if state_file is not None and state_path is not None:
+            lease_path = state_path.with_name(state_path.stem + ".lease.json")
+        else:
+            lease_path = runtime_artifact_path(
+                canonical_name,
+                pr_number,
+                "lease.json",
+                repository_path=repository_path,
+            )
+        lease_info = inspect_lease(
+            lease_path,
+            repository=canonical_name,
+            pr_number=pr_number,
+            now=result["generated_at"],
+        )
+    except Exception as error:
+        lease_path = None
+        lease_info = {"status": "invalid", "exists": None, "error": str(error)}
+    result["runner_lease"] = {
+        **lease_info,
+        "path": str(lease_path) if lease_path is not None else None,
+        "inspection_only": True,
+    }
 
     try:
         evaluation, next_checkpoint = evaluate_snapshot(
@@ -433,6 +459,8 @@ def build_preflight(
         blockers.append("preflight_not_running_from_verified_installation")
     if not single_runner_confirmed:
         blockers.append("single_runner_not_confirmed")
+    if lease_info["status"] in {"active", "invalid"}:
+        blockers.append("runner_lease_unavailable")
     result["blockers"] = blockers
     result["ready_for_supervised_pilot"] = not blockers
     return result

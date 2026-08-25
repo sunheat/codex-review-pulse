@@ -8,17 +8,24 @@ recovery, and PR-scoped exact resolution.
 
 ## Controlled live-pilot readiness
 
-The current release candidate adds a clean-commit, independently copied pilot
-installation and a read-only readiness command. Its next operational milestone
-is one manually supervised pilot with explicit inputs, a single confirmed
-runner, and mutation-by-mutation authorization.
+The clean-commit independent installation, read-only preflight, and first
+manually supervised live pilot are complete. The pilot processed five exact
+threads in one frozen batch and one push without widening mutation scope.
 
-This is not an unattended recurring heartbeat release.
+## Bounded recurring heartbeat readiness
+
+Version `0.3.0` adds an explicit finite run contract, a real PR-scoped lease,
+a pure next-action evaluator, deterministic server-event wait policy, durable
+failure latches, and a one-wake plan/complete interface. The next operational
+milestone is a manually observed two-to-five-wake recurring pilot on one PR.
+
+This remains a bounded pilot release, not a long-term unattended heartbeat.
 
 ## Deferred milestones
 
-- deterministic stalled-review and broader event classification;
-- connector detection and server-timestamp review triggering;
+- public-API connector and automatic-review detection bound to a head OID;
+- long-term unattended heartbeat approval and operational evidence;
+- production notification/pause integration and multi-wake recovery history;
 - Codex plugin packaging and marketplace distribution;
 - Pi portability validation;
 - generic reviewer and multi-forge support; and

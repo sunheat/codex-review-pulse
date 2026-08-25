@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 
 from checkpoint_store import checkpoint_path, load_checkpoint, save_checkpoint
+from recurring_contract import assert_mutation_authority, load_run_contract
 from state_model import (
     freeze_batch,
     record_publication_failure,
@@ -25,6 +26,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pr", required=True, type=int, help="Pull request number")
     parser.add_argument("--state-file", type=Path, help="Override the checkpoint path")
     parser.add_argument("--repository-path", default=".", help="Target worktree")
+    parser.add_argument("--run-contract", type=Path, help="Bounded recurring run contract")
+    parser.add_argument("--lease-owner-token", help="Owner token for recurring checkpoint writes")
     commands = parser.add_subparsers(dest="command", required=True)
 
     freeze = commands.add_parser("freeze")
@@ -57,6 +60,26 @@ def main() -> None:
     if checkpoint is None:
         raise RuntimeError("Checkpoint does not exist; fetch PR state before updating a batch")
     validate_checkpoint(checkpoint, args.repo, args.pr)
+    if bool(args.run_contract) != bool(args.lease_owner_token):
+        raise RuntimeError(
+            "Recurring checkpoint writes require both run contract and lease owner token"
+        )
+    if args.run_contract:
+        contract = load_run_contract(
+            args.run_contract, repository_path=args.repository_path
+        )
+        if (
+            contract["repository"] != args.repo.casefold()
+            or contract["pull_request_number"] != args.pr
+            or Path(contract["paths"]["checkpoint"]).resolve() != Path(path).resolve()
+        ):
+            raise RuntimeError("Run contract does not bind this checkpoint target")
+        assert_mutation_authority(
+            contract,
+            owner_token=args.lease_owner_token,
+            required_scope="recurring_execution",
+            runtime_script_path=__file__,
+        )
 
     if args.command == "freeze":
         requested_ids = validate_freeze_request(

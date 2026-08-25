@@ -108,11 +108,14 @@ and frozen head. This checkpoint is recovery evidence; it is not permission to
 retry a mutation or create a second commit. A failed or unfinished batch cannot
 be overwritten by a different freeze; it must be recovered first.
 
-## Limits
+## Limits and recurring extension
 
-Atomic replacement prevents torn checkpoint files but does not serialize two
-independent writers. The supervised pilot must keep one active cycle per PR;
-an unattended runner is deferred. A cold start with a pre-existing reaction
+Atomic replacement prevents torn checkpoint files but does not itself
+serialize two independent writers. The bounded recurring layer adds a separate
+PR-scoped lease and run-state file without changing this checkpoint's schema.
+See [the recurring-heartbeat design](recurring-heartbeat-readiness.md).
+
+A cold start with a pre-existing reaction
 may remain
 ambiguous until GitHub exposes a new reaction event after the epoch is
 established; the evaluator deliberately prefers a stalled non-terminal result
@@ -121,4 +124,7 @@ to attributing historical approval to a newer head.
 See [ADR 0001](../adr/0001-codex-only-thread-scope.md),
 [ADR 0002](../adr/0002-current-head-approval.md),
 [ADR 0003](../adr/0003-frozen-batch-order.md), and
-[ADR 0004](../adr/0004-current-head-review-proof.md).
+[ADR 0004](../adr/0004-current-head-review-proof.md). The recurring extension
+is governed by [ADR 0005](../adr/0005-pr-scoped-runner-lease.md),
+[ADR 0006](../adr/0006-bounded-run-contract.md), and
+[ADR 0007](../adr/0007-stalled-review-and-trigger-policy.md).

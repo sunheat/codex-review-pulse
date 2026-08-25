@@ -11,6 +11,7 @@ import sys
 from typing import Any, Callable
 
 from checkpoint_store import checkpoint_path, load_checkpoint, save_checkpoint
+from recurring_contract import assert_mutation_authority, load_run_contract
 from state_model import (
     DEFAULT_CODEX_LOGINS,
     canonical_repository,
@@ -214,6 +215,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--state-file", type=Path, help="Override the checkpoint path")
     parser.add_argument("--repository-path", default=".", help="Target worktree")
+    parser.add_argument("--run-contract", type=Path, help="Bounded recurring run contract")
+    parser.add_argument("--lease-owner-token", help="Owner token for recurring thread resolution")
     return parser.parse_args()
 
 
@@ -266,6 +269,24 @@ def main() -> None:
     checkpoint = load_checkpoint(path)
     if checkpoint is not None:
         validate_checkpoint(checkpoint, args.repo, args.pr)
+    if bool(args.run_contract) != bool(args.lease_owner_token):
+        raise RuntimeError("Recurring resolution requires both run contract and lease owner token")
+    if args.run_contract:
+        contract = load_run_contract(
+            args.run_contract, repository_path=args.repository_path
+        )
+        if (
+            contract["repository"] != args.repo.casefold()
+            or contract["pull_request_number"] != args.pr
+            or Path(contract["paths"]["checkpoint"]).resolve() != Path(path).resolve()
+        ):
+            raise RuntimeError("Run contract does not bind this checkpoint target")
+        assert_mutation_authority(
+            contract,
+            owner_token=args.lease_owner_token,
+            required_scope="resolve_threads",
+            runtime_script_path=__file__,
+        )
 
     expected_ids, reviewer_logins, expected_head_oid = select_resolution_context(
         checkpoint=checkpoint,

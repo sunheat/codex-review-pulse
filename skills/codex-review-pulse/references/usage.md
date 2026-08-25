@@ -2,9 +2,10 @@
 
 ## Release-candidate boundary
 
-The core model is complete. This version supports a controlled, manually
-supervised live pilot. It does not yet support an unattended recurring
-heartbeat, deterministic stalled-review classification, plugin packaging, or
+The core model, immutable installation, supervised preflight, and first
+supervised live pilot are complete. Version `0.3.0` supports both a supervised
+single cycle and a two-to-five-wake bounded recurring release candidate. It
+does not support indefinite unattended operation, plugin packaging, or
 validated Pi portability.
 
 Use a clean source repository and an exact release-candidate commit throughout
@@ -30,7 +31,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
 This extracts `skills/codex-review-pulse` from the named Git commit into
 `$env:USERPROFILE\.agents\skills\codex-review-pulse`. It does not copy the
 mutable working-tree files and does not create a symlink. The installed
-manifest records version `0.2.0`, the full source commit, and SHA-256 file
+manifest records version `0.3.0`, the full source commit, and SHA-256 file
 hashes.
 
 The install fails if the source is dirty, the commit is missing, the commit
@@ -42,7 +43,7 @@ explicit alternate configured location.
 
 ```powershell
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
-  --expected-version 0.2.0 `
+  --expected-version 0.3.0 `
   --expected-source-commit $commit
 ```
 
@@ -60,15 +61,17 @@ python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_prefligh
   --repo OWNER/REPO `
   --pr NUMBER `
   --repository-path C:\path\to\target-repository `
-  --expected-skill-version 0.2.0 `
+  --expected-skill-version 0.3.0 `
   --expected-source-commit $commit `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector `
   --single-runner-confirmed
 ```
 
-`--single-runner-confirmed` records operator evidence; it is not automatic
-scheduler discovery. Omitting it blocks readiness.
+`--single-runner-confirmed` remains operator evidence for the supervised mode;
+it is not automatic scheduler discovery. Preflight also inspects and reports
+the PR lease without creating, renewing, recovering, or deleting it. Omission
+of the supervised confirmation or an active/invalid lease blocks readiness.
 
 Preflight checks Python, Git, GitHub CLI, authentication, canonical repository,
 PR/head state, configured identities, targeted and non-target threads,
@@ -184,7 +187,8 @@ unverified or foreign directory.
 
 ## Deferred modes
 
-Do not start an unattended automation or Windows scheduled task from this
-release candidate. Connector detection, deterministic stalled-review handling,
+For a finite recurring pilot, follow [recurring.md](recurring.md). Do not start
+an indefinite unattended automation or Windows scheduled task. Public-API
+connector detection bound to the current head, long-term unattended approval,
 plugin packaging, Pi portability, generic reviewers/multi-forge behavior, and
 `gh-address-comments` integration remain deferred.

@@ -1,4 +1,4 @@
 interface:
   display_name: "Codex Review Pulse"
-  short_description: "Safely remediate Codex PR review threads"
-  default_prompt: "Use $codex-review-pulse to process one safe, thread-aware remediation cycle for this GitHub pull request."
+  short_description: "Run safe supervised or bounded Codex PR review cycles"
+  default_prompt: "Use $codex-review-pulse for one supervised cycle, or prepare an explicitly bounded recurring pilot for this GitHub pull request."

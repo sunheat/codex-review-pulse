@@ -2,11 +2,10 @@
 
 ## Scope
 
-This phase turns the completed core state model into a release candidate for
-one manually supervised GitHub pilot. It does not create an unattended
-heartbeat. The operator still chooses the pull request, confirms the only
-runner, grants each mutation authority, watches the cycle, and stops on any
-diagnostic or recovery condition.
+This phase turned the completed core state model into a release candidate for
+one manually supervised GitHub pilot. That pilot has now completed
+successfully. The design remains the single-cycle foundation for the bounded
+recurring extension and does not by itself create an unattended heartbeat.
 
 The release candidate adds three boundaries:
 
@@ -107,10 +106,11 @@ checkpoint. It checks and emits JSON for:
 - proof that the running preflight script is inside that verified installation;
 - the operator's explicit single-runner confirmation.
 
-The single-runner check is intentionally an operator assertion. The core model
-has atomic replacement but no interprocess lease, so the tool must not imply it
-can discover every scheduler or human session. Omitting
-`--single-runner-confirmed` blocks readiness.
+The original `--single-runner-confirmed` check is intentionally an operator
+assertion for supervised mode. Version `0.3.0` additionally makes preflight
+inspect the recurring PR lease without acquiring or changing it; recurring
+mutation authority comes only from the real lease described in
+[the recurring-heartbeat design](recurring-heartbeat-readiness.md).
 
 Preflight may compute what the next checkpoint would contain, but reports
 `checkpoint_would_change` instead of saving it. Establishing or advancing an
@@ -140,9 +140,21 @@ failure, installation drift, active recovery, unexpected identity/thread
 scope, or head advancement. Preflight success is not mutation authority and is
 not a global merge-readiness claim.
 
+## Completed pilot evidence
+
+The first supervised pilot used version `0.2.0` from source commit
+`f24c172396b0a2b35b05872c570945753bcfcbab` on `sunheat/job-hunter#2`.
+Preflight was ready, the frozen head was `b9aaad4`, five targeted threads were
+fixed and resolved exactly, Ruff/config checks and 45 tests passed, aggregate
+commit `061ee01e542c65b839473cb59db4a2ce5284787f` was pushed once, and the final
+targeted count was zero with current-head approval pending. No issue, trigger,
+merge, auto-merge, base change, force-push, recurrence, or non-target resolution
+occurred.
+
 ## Deferred after this phase
 
-The release candidate does not complete connector detection, deterministic
-stalled-review classification, plugin packaging, Pi portability, generic
-reviewer or multi-forge support, `gh-address-comments` integration, or an
-unattended recurring heartbeat. Those require later designs and validation.
+The bounded recurring phase now supplies a conservative deterministic wait
+classifier while leaving unknown connector capability unclassified. Public API
+connector detection, indefinite unattended operation, plugin packaging, Pi
+portability, generic reviewer or multi-forge support, and
+`gh-address-comments` integration remain deferred.

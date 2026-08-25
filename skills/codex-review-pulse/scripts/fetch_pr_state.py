@@ -12,6 +12,7 @@ import sys
 from typing import Any, Callable
 
 from checkpoint_store import checkpoint_path, load_checkpoint, save_checkpoint
+from recurring_contract import assert_mutation_authority, load_run_contract
 from state_model import DEFAULT_CODEX_LOGINS, evaluate_snapshot
 
 
@@ -173,6 +174,8 @@ def parse_args() -> argparse.Namespace:
         "--repository-path", default=".",
         help="Target worktree used to locate the Git common directory",
     )
+    parser.add_argument("--run-contract", type=Path, help="Bounded recurring run contract")
+    parser.add_argument("--lease-owner-token", help="Owner token for recurring checkpoint writes")
     return parser.parse_args()
 
 
@@ -296,6 +299,26 @@ def main() -> None:
         checkpoint=previous_checkpoint,
         observed_at=datetime.now(UTC).isoformat(),
     )
+    if bool(args.run_contract) != bool(args.lease_owner_token):
+        raise RuntimeError(
+            "Recurring checkpoint writes require both run contract and lease owner token"
+        )
+    if args.run_contract:
+        contract = load_run_contract(
+            args.run_contract, repository_path=args.repository_path
+        )
+        if (
+            contract["repository"] != canonical_repo.casefold()
+            or contract["pull_request_number"] != number
+            or Path(contract["paths"]["checkpoint"]).resolve() != Path(state_path).resolve()
+        ):
+            raise RuntimeError("Run contract does not bind this checkpoint target")
+        assert_mutation_authority(
+            contract,
+            owner_token=args.lease_owner_token,
+            required_scope="recurring_execution",
+            runtime_script_path=__file__,
+        )
     save_checkpoint(state_path, next_checkpoint)
 
     result = {

@@ -46,7 +46,7 @@ def which(name: str) -> str:
     return f"C:/tools/{name}.exe"
 
 
-def create_installation(root: Path, *, commit: str = EXPECTED_COMMIT, version: str = "0.2.0") -> None:
+def create_installation(root: Path, *, commit: str = EXPECTED_COMMIT, version: str = "0.3.0") -> None:
     target = installation_path(root)
     target.mkdir(parents=True)
     content = b"---\nname: codex-review-pulse\ndescription: Test.\n---\n"
@@ -137,7 +137,7 @@ def run_preflight(
         approval_logins=None,
         state_file=state_file or directory / "state.json",
         install_root=install_root,
-        expected_skill_version="0.2.0",
+        expected_skill_version="0.3.0",
         expected_source_commit=EXPECTED_COMMIT,
         single_runner_confirmed=True,
         runtime_skill_path=installation_path(install_root),
@@ -160,6 +160,8 @@ class PilotPreflightTests(unittest.TestCase):
             self.assertFalse(result["checkpoint_write_performed"])
             self.assertEqual(state_file.read_bytes(), before)
             self.assertEqual(state_file.stat().st_mtime_ns, before_mtime)
+            self.assertFalse(state_file.with_name("state.lease.json").exists())
+            self.assertTrue(result["runner_lease"]["inspection_only"])
 
     def test_mixed_head_snapshot_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
@@ -242,7 +244,7 @@ class PilotPreflightTests(unittest.TestCase):
                 approval_logins=None,
                 state_file=directory / "state.json",
                 install_root=install_root,
-                expected_skill_version="0.2.0",
+                expected_skill_version="0.3.0",
                 expected_source_commit=EXPECTED_COMMIT,
                 single_runner_confirmed=True,
                 runtime_skill_path=ROOT / "skills" / "codex-review-pulse",
@@ -273,7 +275,7 @@ class PilotPreflightTests(unittest.TestCase):
                 approval_logins=None,
                 state_file=None,
                 install_root=install_root,
-                expected_skill_version="0.2.0",
+                expected_skill_version="0.3.0",
                 expected_source_commit=EXPECTED_COMMIT,
                 single_runner_confirmed=True,
                 runtime_skill_path=installation_path(install_root),

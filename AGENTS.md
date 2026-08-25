@@ -54,10 +54,11 @@ worktree/staged-path audit. Report focused and complete results separately.
 
 ## Current phase boundary
 
-The core state model is complete. The controlled live-pilot readiness phase
-adds commit-bound approved-review evidence, a commit-pinned independent Windows
-installation, and a read-only supervised-pilot preflight. It does not add an
-unattended recurring heartbeat, connector detection, deterministic
-stalled-review classification, plugin packaging, Pi portability, generic
-reviewer/multi-forge support, or integration/reuse/vendor decisions for
-`gh-address-comments`.
+The core model, immutable Windows installation, read-only supervised preflight,
+and first supervised live pilot are complete. The current phase prepares a
+two-to-five-wake bounded recurring pilot with an explicit run contract,
+PR-scoped lease, deterministic next-action evaluator, server-event wait policy,
+and durable failure latches. It does not approve long-term unattended
+operation, infer unknown connector capability, package a plugin, validate Pi,
+add generic reviewer/multi-forge support, or decide integration/reuse/vendor
+policy for `gh-address-comments`.

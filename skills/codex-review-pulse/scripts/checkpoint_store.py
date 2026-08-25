@@ -43,6 +43,32 @@ def checkpoint_path(
     return git_common_directory(repository_path) / "codex-review-pulse" / f"{digest}.json"
 
 
+def runtime_key_digest(repository: str, pr_number: int) -> str:
+    """Return the repository/PR key shared by all runtime artifacts."""
+    if pr_number < 1:
+        raise ValueError("Pull request number must be positive")
+    key = f"{canonical_repository(repository)}#{pr_number}"
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
+
+
+def runtime_artifact_path(
+    repository: str,
+    pr_number: int,
+    suffix: str,
+    *,
+    repository_path: str | Path = ".",
+) -> Path:
+    """Locate a PR-scoped runtime artifact under the Git common directory."""
+    if not suffix or any(character in suffix for character in "/\\"):
+        raise ValueError("Runtime artifact suffix must be one path component")
+    digest = runtime_key_digest(repository, pr_number)
+    return (
+        git_common_directory(repository_path)
+        / "codex-review-pulse"
+        / f"{digest}.{suffix}"
+    )
+
+
 def load_checkpoint(path: str | Path) -> dict[str, Any] | None:
     checkpoint = Path(path)
     if not checkpoint.exists():

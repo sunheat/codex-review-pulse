@@ -11,8 +11,9 @@ framework.
 
 ## Current release-candidate scope
 
-The core state model is complete. The current release candidate adds the
-controls needed for a first manually supervised live pilot:
+The core state model, immutable installation, supervised preflight, and first
+supervised live pilot are complete. The current release candidate prepares a
+two-to-five-wake bounded recurring pilot on one PR:
 
 - a `codex-review-pulse` Agent Skill with a frozen-batch remediation protocol;
 - authoritative GitHub GraphQL retrieval of PR metadata, reviews, inline review
@@ -30,18 +31,36 @@ controls needed for a first manually supervised live pilot:
   source commit, and file hashes; and
 - a structured read-only preflight for dependencies, authentication, PR state,
   thread scope, checkpoint recovery, approval ambiguity, installed provenance,
-  and the single-runner prerequisite.
+  and runner-lease state;
+- an explicit run contract that fixes repository, PR, identities, installed
+  provenance, mutation scopes, wake budget, optional deadline, and runtime
+  paths;
+- a Windows-compatible PR-scoped renewable lease with owner-checked renew and
+  release plus expiration-based crash recovery;
+- a pure recurring evaluator with stable next-action and reason-code enums,
+  injected time, deterministic wait evidence, and durable recovery latches;
+  and
+- read-only doctor plus one-wake plan/complete interfaces that never create a
+  Codex scheduled task or perform a live review-trigger mutation.
 
 The controller remains an agent skill plus deterministic state and API helpers,
-not a standalone daemon. A supervised pilot is the next operational step;
-unattended recurring heartbeat execution is not complete.
+not a standalone daemon. The next operational step is a manually observed
+bounded recurring pilot. Long-term unattended heartbeat execution is not
+complete.
+
+The first supervised live pilot succeeded on `sunheat/job-hunter#2`: five
+frozen Codex threads were fixed and resolved, 45 tests passed, one aggregate
+commit was pushed once, and the final targeted unresolved count was zero while
+current-head approval remained pending. No trigger, issue, merge, auto-merge,
+base change, force-push, recurring task, or non-target resolution occurred.
 
 ## Requirements
 
 - Git
 - authenticated [GitHub CLI](https://cli.github.com/)
 - Python 3.10 or later
-- a single operator-controlled runner for the supervised pilot
+- a verified independent skill installation
+- one operator supervising the first bounded recurring wakes
 
 ## Use
 
@@ -54,7 +73,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
   --source-repository . `
   --source-commit $commit
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
-  --expected-version 0.2.0 `
+  --expected-version 0.3.0 `
   --expected-source-commit $commit
 ```
 
@@ -65,7 +84,7 @@ no other runner targets the PR:
 ```powershell
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_preflight.py `
   --repo OWNER/REPO --pr NUMBER `
-  --expected-skill-version 0.2.0 `
+  --expected-skill-version 0.3.0 `
   --expected-source-commit $commit `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector `
@@ -90,6 +109,13 @@ The skill requires separate authorization for every external mutation. See
 [the usage guide](skills/codex-review-pulse/references/usage.md) for install,
 preflight, update, uninstall, and supervised-cycle commands.
 
+For a bounded recurring pilot, first collect the exact PR, reviewer/approval
+identities, cadence, maximum wakes, expiration, action-specific authority,
+single-trigger choice, and notification/pause preference. Then validate a run
+contract and run the read-only doctor described in
+[the recurring guide](skills/codex-review-pulse/references/recurring.md). The
+repository never creates or updates the Codex scheduled task itself.
+
 ## Safety model
 
 - Fetch GraphQL review-thread state at the start of every cycle.
@@ -106,6 +132,11 @@ preflight, update, uninstall, and supervised-cycle commands.
 - Stop immediately when no targeted Codex threads remain and either a
   commit-bound `APPROVED` review or the reaction epoch proves current-head
   approval.
+- Acquire the PR-scoped lease before any recurring checkpoint or GitHub
+  mutation and latch failures before releasing it.
+- Execute at most one frozen batch per wake and stop on budget, deadline,
+  concurrency, recovery, API, auth, installation, checkout, or mixed-head
+  uncertainty.
 
 No additional quiet interval is required after that terminal condition.
 
@@ -117,6 +148,8 @@ See [ROADMAP.md](ROADMAP.md) for deliberately deferred milestones and
 [the core state model](docs/design/core-state-model.md).
 Pilot installation and readiness are documented in
 [the live-pilot design](docs/design/live-pilot-readiness.md).
+Bounded recurring behavior is documented in
+[the recurring-heartbeat design](docs/design/recurring-heartbeat-readiness.md).
 
 ## License
 
