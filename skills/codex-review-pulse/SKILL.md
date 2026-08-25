@@ -28,8 +28,9 @@ indefinite unattended operation.
 
 Before the first live cycle, require an independent installation created from
 an explicit clean Git commit by `scripts/manage_pilot_install.py`. Do not run a
-pilot from a symlink to a mutable development checkout. Verify the installed
-skill version, source commit, and file hashes.
+pilot from a symlink to a mutable development checkout. Reject symlinks at
+every installed path, and verify the installed inventory and hashes against
+the pinned source commit rather than trusting the adjacent manifest alone.
 
 Run `scripts/pilot_preflight.py` with the canonical repository, PR number,
 expected version/commit, reviewer and approval identities, and the operator's
@@ -71,6 +72,8 @@ and separate repeatable `--approval-login LOGIN` options for approval authors.
 Both default to `chatgpt-codex-connector`; matching is case-insensitive and
 treats `[bot]` as equivalent. The normalized reviewer set is persisted into the
 stable snapshot and frozen batch so checkpoint-driven resolution reuses it.
+In recurring mode, the run contract is authoritative for both identity sets;
+omitted CLI flags inherit it and conflicting flags fail closed.
 
 Only `targeted_unresolved_thread_ids` enter the remediation batch. Report
 `non_target_unresolved_threads`, including human and unknown-author threads,
@@ -129,11 +132,10 @@ Use this exact order:
 9. Take a final read-only snapshot. Do not process review artifacts created by
    the batch push until the next cycle.
 
-Do not move exact thread resolution after publication. For an explicitly
-supplied expected set outside a checkpoint-driven cycle, pass every intended
-ID with `resolve_thread.py --expected-thread-id`; this does not widen the
-Codex-only automatic scope. Explicit expected IDs cannot override an active
-frozen batch.
+Do not move exact thread resolution after publication. Resolution always
+requires the persisted active frozen batch, including its stable head,
+complete targeted set, reviewer identities, and recorded per-thread outcome.
+Caller-supplied expected IDs cannot substitute for or override that batch.
 
 ## Classification
 

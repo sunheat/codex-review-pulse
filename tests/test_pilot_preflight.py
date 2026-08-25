@@ -46,22 +46,56 @@ def which(name: str) -> str:
     return f"C:/tools/{name}.exe"
 
 
-def create_installation(root: Path, *, commit: str = EXPECTED_COMMIT, version: str = "0.3.1") -> None:
+def create_installation(root: Path, *, version: str = "0.3.1") -> str:
+    source = root / "source"
+    subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "tests@example.test"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.name", "Test Runner"],
+        check=True,
+    )
+    source_skill = source / "skills" / "codex-review-pulse"
+    source_skill.mkdir(parents=True)
     target = installation_path(root)
     target.mkdir(parents=True)
     content = b"---\nname: codex-review-pulse\ndescription: Test.\n---\n"
+    version_content = (version + "\n").encode()
+    (source_skill / "SKILL.md").write_bytes(content)
+    (source_skill / "VERSION").write_bytes(version_content)
+    subprocess.run(
+        ["git", "-C", str(source), "add", "skills/codex-review-pulse"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(source), "commit", "-m", "test: add skill"],
+        check=True,
+        capture_output=True,
+    )
+    commit = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     (target / "SKILL.md").write_bytes(content)
+    (target / "VERSION").write_bytes(version_content)
     manifest = {
         "schema_version": 1,
         "skill_name": "codex-review-pulse",
         "skill_version": version,
         "source_commit": commit,
-        "source_repository": "C:/source",
-        "files": {"SKILL.md": hashlib.sha256(content).hexdigest()},
+        "source_repository": str(source),
+        "files": {
+            "SKILL.md": hashlib.sha256(content).hexdigest(),
+            "VERSION": hashlib.sha256(version_content).hexdigest(),
+        },
     }
     (target / MANIFEST_NAME).write_text(
         json.dumps(manifest), encoding="utf-8"
     )
+    return commit
 
 
 class FakeSnapshot:
@@ -128,7 +162,7 @@ def run_preflight(
     state_file: Path | None = None,
 ) -> dict:
     install_root = directory / "installed"
-    create_installation(install_root)
+    expected_commit = create_installation(install_root)
     return build_preflight(
         repository="Owner/Repo",
         pr_number=17,
@@ -138,7 +172,7 @@ def run_preflight(
         state_file=state_file or directory / "state.json",
         install_root=install_root,
         expected_skill_version="0.3.1",
-        expected_source_commit=EXPECTED_COMMIT,
+        expected_source_commit=expected_commit,
         single_runner_confirmed=True,
         runtime_skill_path=installation_path(install_root),
         command_runner=runner,
@@ -152,7 +186,7 @@ class PilotPreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory_name:
             directory = Path(directory_name)
             alternate_root = directory / "alternate"
-            create_installation(alternate_root)
+            expected_commit = create_installation(alternate_root)
             alternate = installation_path(alternate_root)
             result = build_preflight(
                 repository="Owner/Repo",
@@ -163,7 +197,7 @@ class PilotPreflightTests(unittest.TestCase):
                 state_file=directory / "state.json",
                 install_root=None,
                 expected_skill_version="0.3.1",
-                expected_source_commit=EXPECTED_COMMIT,
+                expected_source_commit=expected_commit,
                 single_runner_confirmed=True,
                 runtime_skill_path=alternate,
                 command_runner=command_runner,
@@ -205,7 +239,7 @@ class PilotPreflightTests(unittest.TestCase):
             directory = Path(directory_name)
             alternate_root = directory / "alternate"
             default_root = directory / "default"
-            create_installation(alternate_root)
+            expected_commit = create_installation(alternate_root)
             create_installation(default_root, version="0.2.0")
             alternate = installation_path(alternate_root)
             result = build_preflight(
@@ -217,7 +251,7 @@ class PilotPreflightTests(unittest.TestCase):
                 state_file=directory / "state.json",
                 install_root=None,
                 expected_skill_version="0.3.1",
-                expected_source_commit=EXPECTED_COMMIT,
+                expected_source_commit=expected_commit,
                 single_runner_confirmed=True,
                 runtime_skill_path=alternate,
                 command_runner=command_runner,
@@ -317,7 +351,7 @@ class PilotPreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory_name:
             directory = Path(directory_name)
             install_root = directory / "installed"
-            create_installation(install_root)
+            expected_commit = create_installation(install_root)
             result = build_preflight(
                 repository="Owner/Repo",
                 pr_number=17,
@@ -327,7 +361,7 @@ class PilotPreflightTests(unittest.TestCase):
                 state_file=directory / "state.json",
                 install_root=install_root,
                 expected_skill_version="0.3.1",
-                expected_source_commit=EXPECTED_COMMIT,
+                expected_source_commit=expected_commit,
                 single_runner_confirmed=True,
                 runtime_skill_path=ROOT / "skills" / "codex-review-pulse",
                 command_runner=command_runner,
@@ -370,7 +404,7 @@ class PilotPreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory_name:
             directory = Path(directory_name)
             install_root = directory / "installed"
-            create_installation(install_root)
+            expected_commit = create_installation(install_root)
             result = build_preflight(
                 repository="Owner/Repo",
                 pr_number=17,
@@ -380,7 +414,7 @@ class PilotPreflightTests(unittest.TestCase):
                 state_file=None,
                 install_root=install_root,
                 expected_skill_version="0.3.1",
-                expected_source_commit=EXPECTED_COMMIT,
+                expected_source_commit=expected_commit,
                 single_runner_confirmed=True,
                 runtime_skill_path=installation_path(install_root),
                 command_runner=non_git_checkout,

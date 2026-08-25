@@ -32,7 +32,9 @@ This extracts `skills/codex-review-pulse` from the named Git commit into
 `$env:USERPROFILE\.agents\skills\codex-review-pulse`. It does not copy the
 mutable working-tree files and does not create a symlink. The installed
 manifest records version `0.3.1`, the full source commit, and SHA-256 file
-hashes.
+hashes. Verification independently reconstructs that inventory from the pinned
+Git commit, so changing both an installed file and its adjacent manifest does
+not reauthorize the modified bytes.
 
 The install fails if the source is dirty, the commit is missing, the commit
 does not contain the skill/version, or the target already exists. Use
@@ -47,9 +49,10 @@ python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_i
   --expected-source-commit $commit
 ```
 
-Verification fails on version or source-commit mismatch, missing/extra files,
-changed file hashes, a missing/invalid manifest, or a symlinked target. Do not
-continue a pilot after verification failure.
+Verification fails on version or source-commit mismatch, unavailable pinned
+source provenance, manifest/source inventory disagreement, missing/extra or
+changed files, an invalid manifest, or a symlink anywhere in the installed
+tree. Do not continue a pilot after verification failure.
 
 ## Read-only pilot preflight
 

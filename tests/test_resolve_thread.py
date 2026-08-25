@@ -13,6 +13,15 @@ from resolve_thread import resolve_exact_thread, select_resolution_context  # no
 
 
 class ResolveThreadScopeTests(unittest.TestCase):
+    def test_explicit_ids_without_a_frozen_checkpoint_are_rejected(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "active frozen batch"):
+            select_resolution_context(
+                checkpoint=None,
+                explicit_expected_ids=["T1"],
+                configured_reviewer_logins=["chatgpt-codex-connector"],
+                thread_id="T1",
+            )
+
     def test_explicit_expected_set_cannot_override_active_batch(self) -> None:
         checkpoint = {
             "approval_epoch": {"head_oid": "HEAD1"},

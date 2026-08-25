@@ -12,7 +12,7 @@ SCRIPTS = ROOT / "skills" / "codex-review-pulse" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from checkpoint_store import load_checkpoint, save_checkpoint  # noqa: E402
-from fetch_pr_state import verify_stable_head  # noqa: E402
+from fetch_pr_state import select_evaluation_identities, verify_stable_head  # noqa: E402
 from state_model import (  # noqa: E402
     classify_unresolved_threads,
     empty_checkpoint,
@@ -27,6 +27,28 @@ from state_model import (  # noqa: E402
 
 
 FIXTURE = ROOT / "tests" / "fixtures" / "review_threads.json"
+
+
+class FetchIdentityTests(unittest.TestCase):
+    def test_recurring_identities_come_from_the_run_contract(self) -> None:
+        contract = {
+            "reviewer_logins": ["contract-reviewer"],
+            "approval_logins": ["contract-approver"],
+        }
+        self.assertEqual(
+            select_evaluation_identities(
+                reviewer_logins=None,
+                approval_logins=None,
+                run_contract=contract,
+            ),
+            (["contract-reviewer"], ["contract-approver"]),
+        )
+        with self.assertRaisesRegex(RuntimeError, "Reviewer logins"):
+            select_evaluation_identities(
+                reviewer_logins=["default-reviewer"],
+                approval_logins=None,
+                run_contract=contract,
+            )
 
 
 def reaction(reaction_id: str, login: str = "chatgpt-codex-connector") -> dict:

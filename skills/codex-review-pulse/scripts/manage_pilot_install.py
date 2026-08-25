@@ -84,6 +84,22 @@ def _sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def _source_inventory(repository: Path, commit: str) -> tuple[dict[str, str], str]:
+    """Return the skill inventory and version from immutable Git objects."""
+    prefix = f"{SKILL_REPOSITORY_PATH}/"
+    inventory = {
+        source_path.removeprefix(prefix).replace("\\", "/"): _sha256(
+            _read_blob(repository, commit, source_path)
+        )
+        for source_path in _source_files(repository, commit)
+    }
+    version_path = f"{SKILL_REPOSITORY_PATH}/VERSION"
+    version = _read_blob(repository, commit, version_path).decode("utf-8").strip()
+    if not version or any(character.isspace() for character in version):
+        raise RuntimeError("Pinned source VERSION must be one non-empty token")
+    return dict(sorted(inventory.items())), version
+
+
 def _is_runtime_artifact(path: Path) -> bool:
     return "__pycache__" in path.parts or path.suffix.casefold() in {".pyc", ".pyo"}
 
@@ -142,6 +158,8 @@ def verify_installation(
     manifest: dict[str, Any] | None = None
     if not path.is_dir() or path.is_symlink():
         errors.append("installation_missing_or_not_independent_directory")
+    elif manifest_path.is_symlink():
+        errors.append("installation_manifest_is_symlink")
     elif not manifest_path.is_file():
         errors.append("installation_manifest_missing")
     else:
@@ -169,19 +187,58 @@ def verify_installation(
         if not isinstance(recorded, dict):
             errors.append("installation_file_inventory_invalid")
         else:
+            symlink_paths = sorted(
+                item.relative_to(path).as_posix()
+                for item in path.rglob("*")
+                if item.is_symlink()
+            )
+            errors.extend(
+                f"installation_symlink_present:{relative}"
+                for relative in symlink_paths
+            )
             actual_paths = {
                 item.relative_to(path).as_posix()
                 for item in path.rglob("*")
                 if item.is_file()
+                and not item.is_symlink()
                 and item.name != MANIFEST_NAME
                 and not _is_runtime_artifact(item.relative_to(path))
             }
-            expected_paths = set(recorded)
+            trusted_inventory: dict[str, str] | None = None
+            trusted_version: str | None = None
+            source_repository = manifest.get("source_repository")
+            source_commit = expected_source_commit or manifest.get("source_commit")
+            if not isinstance(source_repository, str) or not source_repository:
+                errors.append("installation_source_repository_invalid")
+            elif not isinstance(source_commit, str) or not source_commit:
+                errors.append("installation_source_commit_invalid")
+            else:
+                try:
+                    source_path = Path(source_repository).expanduser().resolve()
+                    resolved_commit = run_git(
+                        source_path,
+                        ["rev-parse", "--verify", f"{source_commit}^{{commit}}"],
+                    ).strip()
+                    if resolved_commit.casefold() != source_commit.casefold():
+                        raise RuntimeError("Pinned source commit did not resolve exactly")
+                    trusted_inventory, trusted_version = _source_inventory(
+                        source_path, resolved_commit
+                    )
+                except (OSError, RuntimeError, UnicodeDecodeError):
+                    errors.append("installation_source_provenance_unavailable")
+
+            if trusted_inventory is not None and recorded != trusted_inventory:
+                errors.append("installation_manifest_inventory_mismatch")
+            if trusted_version is not None and manifest.get("skill_version") != trusted_version:
+                errors.append("installation_manifest_version_mismatch")
+
+            expected_inventory = trusted_inventory or recorded
+            expected_paths = set(expected_inventory)
             if actual_paths != expected_paths:
                 errors.append("installation_file_set_mismatch")
-            for relative, expected_hash in recorded.items():
+            for relative, expected_hash in expected_inventory.items():
                 candidate = path / Path(relative)
-                if not candidate.is_file():
+                if not candidate.is_file() or candidate.is_symlink():
                     continue
                 if _sha256(candidate.read_bytes()) != expected_hash:
                     errors.append(f"installation_file_hash_mismatch:{relative}")

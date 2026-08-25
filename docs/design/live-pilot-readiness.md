@@ -79,6 +79,9 @@ Its private installation manifest records:
 - the SHA-256 digest of every installed skill file.
 
 Verify detects missing or modified files and expected version/commit mismatch.
+It rejects symlinks anywhere in the installed tree and reconstructs the trusted
+inventory from the pinned commit's Git objects, instead of treating the
+mutable adjacent manifest as its own trust root.
 Update refuses an already damaged or foreign target before swapping in the new
 commit snapshot. Uninstall removes only the fixed skill directory after its
 ownership and inventory verify; it refuses an unverified directory. Tests

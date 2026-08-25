@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 import subprocess
 import sys
@@ -133,6 +134,64 @@ class PilotInstallTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertIn("installed_skill_version_mismatch", result["errors"])
             self.assertIn("installed_source_commit_mismatch", result["errors"])
+
+    def test_manifest_cannot_reauthorize_modified_installed_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as source_directory, tempfile.TemporaryDirectory() as install_directory:
+            source = Path(source_directory)
+            commit = create_source(source)
+            install(
+                source_repository=source,
+                source_commit=commit,
+                skills_root=install_directory,
+            )
+            target = installation_path(install_directory)
+            probe = target / "scripts" / "probe.py"
+            replacement = b"print('modified')\n"
+            probe.write_bytes(replacement)
+            manifest_path = target / ".codex-review-pulse-install.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["files"]["scripts/probe.py"] = hashlib.sha256(replacement).hexdigest()
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            result = verify_installation(
+                target,
+                expected_version="0.3.1",
+                expected_source_commit=commit,
+            )
+            self.assertFalse(result["ok"])
+            self.assertIn("installation_manifest_inventory_mismatch", result["errors"])
+            self.assertIn(
+                "installation_file_hash_mismatch:scripts/probe.py", result["errors"]
+            )
+
+    def test_symlinked_inventory_file_is_rejected_without_following_it(self) -> None:
+        with tempfile.TemporaryDirectory() as source_directory, tempfile.TemporaryDirectory() as install_directory, tempfile.TemporaryDirectory() as external_directory:
+            source = Path(source_directory)
+            commit = create_source(source)
+            install(
+                source_repository=source,
+                source_commit=commit,
+                skills_root=install_directory,
+            )
+            target = installation_path(install_directory)
+            probe = target / "scripts" / "probe.py"
+            external = Path(external_directory) / "probe.py"
+            external.write_bytes(probe.read_bytes())
+            probe.unlink()
+            try:
+                probe.symlink_to(external)
+            except OSError as error:
+                self.skipTest(f"File symlinks are unavailable: {error}")
+
+            result = verify_installation(
+                target,
+                expected_version="0.3.1",
+                expected_source_commit=commit,
+            )
+            self.assertFalse(result["ok"])
+            self.assertIn(
+                "installation_symlink_present:scripts/probe.py", result["errors"]
+            )
 
     def test_dirty_source_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as source_directory, tempfile.TemporaryDirectory() as install_directory:

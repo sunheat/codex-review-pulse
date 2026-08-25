@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 from checkpoint_store import checkpoint_path, load_checkpoint, save_checkpoint
 from recurring_contract import assert_mutation_authority, load_run_contract
-from state_model import DEFAULT_CODEX_LOGINS, evaluate_snapshot
+from state_model import DEFAULT_CODEX_LOGINS, evaluate_snapshot, unique_logins
 
 
 def run(command: list[str], stdin: str | None = None) -> str:
@@ -218,6 +218,31 @@ def verify_stable_head(
     return final_pr
 
 
+def select_evaluation_identities(
+    *,
+    reviewer_logins: list[str] | None,
+    approval_logins: list[str] | None,
+    run_contract: dict[str, Any] | None,
+) -> tuple[list[str], list[str]]:
+    """Derive recurring identities from authority, rejecting CLI drift."""
+    if run_contract is None:
+        return (
+            unique_logins(reviewer_logins or DEFAULT_CODEX_LOGINS, label="reviewer"),
+            unique_logins(approval_logins or DEFAULT_CODEX_LOGINS, label="approval"),
+        )
+    contract_reviewers = run_contract["reviewer_logins"]
+    contract_approvers = run_contract["approval_logins"]
+    if reviewer_logins and set(unique_logins(reviewer_logins, label="reviewer")) != set(
+        contract_reviewers
+    ):
+        raise RuntimeError("Reviewer logins do not match the recurring run contract")
+    if approval_logins and set(unique_logins(approval_logins, label="approval")) != set(
+        contract_approvers
+    ):
+        raise RuntimeError("Approval logins do not match the recurring run contract")
+    return list(contract_reviewers), list(contract_approvers)
+
+
 def fetch_stable_snapshot(
     owner: str,
     repo: str,
@@ -285,24 +310,11 @@ def main() -> None:
     state_path = args.state_file or checkpoint_path(
         canonical_repo, number, repository_path=args.repository_path
     )
-    previous_checkpoint = load_checkpoint(state_path)
-    evaluation, next_checkpoint = evaluate_snapshot(
-        repository=canonical_repo,
-        pr_number=number,
-        head_oid=pull_request["headRefOid"],
-        pull_request_state=pull_request["state"],
-        review_threads=review_threads,
-        reactions=thumbs_up_reactions,
-        reviews=reviews,
-        reviewer_logins=args.reviewer_logins or DEFAULT_CODEX_LOGINS,
-        approval_logins=args.approval_logins or DEFAULT_CODEX_LOGINS,
-        checkpoint=previous_checkpoint,
-        observed_at=datetime.now(UTC).isoformat(),
-    )
     if bool(args.run_contract) != bool(args.lease_owner_token):
         raise RuntimeError(
             "Recurring checkpoint writes require both run contract and lease owner token"
         )
+    contract = None
     if args.run_contract:
         contract = load_run_contract(
             args.run_contract, repository_path=args.repository_path
@@ -313,8 +325,29 @@ def main() -> None:
             or Path(contract["paths"]["checkpoint"]).resolve() != Path(state_path).resolve()
         ):
             raise RuntimeError("Run contract does not bind this checkpoint target")
+    reviewer_logins, approval_logins = select_evaluation_identities(
+        reviewer_logins=args.reviewer_logins,
+        approval_logins=args.approval_logins,
+        run_contract=contract,
+    )
+    previous_checkpoint = load_checkpoint(state_path)
+    evaluation, next_checkpoint = evaluate_snapshot(
+        repository=canonical_repo,
+        pr_number=number,
+        head_oid=pull_request["headRefOid"],
+        pull_request_state=pull_request["state"],
+        review_threads=review_threads,
+        reactions=thumbs_up_reactions,
+        reviews=reviews,
+        reviewer_logins=reviewer_logins,
+        approval_logins=approval_logins,
+        checkpoint=previous_checkpoint,
+        observed_at=datetime.now(UTC).isoformat(),
+    )
+    if contract is not None:
         assert_mutation_authority(
             contract,
+            contract_path=args.run_contract,
             owner_token=args.lease_owner_token,
             required_scope="recurring_execution",
             runtime_script_path=__file__,

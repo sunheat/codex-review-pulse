@@ -65,9 +65,12 @@ separate artifacts under the target repository's Git common directory:
 The run contract fixes these absolute locations and is validated against the
 target Git common directory. Keeping recurring state separate avoids silently
 migrating the checkpoint that was already proven in the supervised pilot.
-Recurring run state uses schema version 2. Schema version 1 is rejected rather
-than silently migrated. Invalid schemas, repository/PR mismatches, path
-mismatches, and authorization identity mismatches fail closed.
+Recurring run state uses schema version 2. A separate authority anchor lives
+next to the run-contract file at a path derived only from that file location.
+It retains the original digest, repository, PR, and lease path even if all
+target-derived contract fields are edited together. Schema version 1 is
+rejected rather than silently migrated. Invalid schemas, repository/PR
+mismatches, path mismatches, and authorization identity mismatches fail closed.
 
 ## PR-scoped lease
 
@@ -86,7 +89,8 @@ heartbeat, and notification output.
 
 `pilot_preflight.py` and `heartbeat_tick.py doctor` call only `inspect_lease`.
 They do not create the guard file, acquire, renew, recover, or delete a lease.
-The formal `plan` tick acquires before any recurring state or checkpoint write.
+The formal `plan` tick creates or verifies the target-independent authority
+anchor before acquiring a target lease or writing target-derived runtime state.
 Doctor and every recurring mutation entrypoint also prove that the executing
 script is the copy inside the contract's hash-verified installation.
 An authorized `RUN_BATCH` or `REQUEST_REVIEW` plan retains the lease; wait,
@@ -121,14 +125,16 @@ a new explicit user authorization and contract.
 
 Before wake one, create the scheduled task paused, place its final task
 identity in `automation_identity`, validate the complete contract, and only
-then activate it. The first run-state write stores a canonical SHA-256 digest
+then activate it. The first plan creates the target-independent authority
+anchor, and the first run-state write stores the same canonical SHA-256 digest
 of the complete normalized contract. Every later doctor, plan, trigger record,
 completion, checkpoint mutation, stable fetch, and exact resolution checks
 that binding. Drift in the PR target, identity sets, installation provenance,
 mutation scope, wake/deadline, trigger head, runner/task/authorization identity,
 connector/wait policy, or runtime paths returns `run_contract_drift` before
-checkpoint or GitHub mutation, releases any acquired lease, and does not
-rewrite the state. A live contract is never amended; a changed authority needs
+checkpoint or GitHub mutation, releases the originally anchored lease, and
+does not create state or a lease for a newly named target. A live contract is
+never amended; a changed authority needs
 a separately authorized run.
 
 See [ADR 0006](../adr/0006-bounded-run-contract.md).

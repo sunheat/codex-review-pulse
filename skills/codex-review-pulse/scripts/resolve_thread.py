@@ -132,7 +132,7 @@ def verify_thread_scope(
         raise RuntimeError("Pull request head does not match the frozen batch head")
     expected = set(expected_thread_ids)
     if not expected:
-        raise RuntimeError("An intended frozen or explicit expected thread set is required")
+        raise RuntimeError("An intended frozen thread set is required")
     if thread_id not in expected:
         raise RuntimeError("Requested thread is not in the expected thread set")
     by_id = {
@@ -206,10 +206,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo", required=True, help="Canonical base repository as OWNER/REPO")
     parser.add_argument("--pr", required=True, type=int, help="Pull request number")
     parser.add_argument(
-        "--expected-thread-id", action="append", default=[],
-        help="Explicit expected-set member; repeat for the complete intended set",
-    )
-    parser.add_argument(
         "--reviewer-login", action="append", default=[],
         help="Targeted Codex root-author login; repeat for multiple identities",
     )
@@ -227,7 +223,7 @@ def select_resolution_context(
     configured_reviewer_logins: list[str],
     thread_id: str,
 ) -> tuple[list[str], list[str], str | None]:
-    """Select either a guarded active batch or an explicit standalone set."""
+    """Select a persisted, head-bound active batch for exact resolution."""
     batch = (checkpoint or {}).get("active_batch")
     if isinstance(batch, dict):
         if explicit_expected_ids:
@@ -248,14 +244,8 @@ def select_resolution_context(
             batch.get("frozen_head_oid"),
         )
 
-    if not explicit_expected_ids:
-        raise RuntimeError(
-            "No frozen batch checkpoint exists; supply the complete explicit expected set"
-        )
-    return (
-        explicit_expected_ids,
-        configured_reviewer_logins or list(DEFAULT_CODEX_LOGINS),
-        None,
+    raise RuntimeError(
+        "An active frozen batch checkpoint is required before exact resolution"
     )
 
 
@@ -283,6 +273,7 @@ def main() -> None:
             raise RuntimeError("Run contract does not bind this checkpoint target")
         assert_mutation_authority(
             contract,
+            contract_path=args.run_contract,
             owner_token=args.lease_owner_token,
             required_scope="resolve_threads",
             runtime_script_path=__file__,
@@ -290,7 +281,7 @@ def main() -> None:
 
     expected_ids, reviewer_logins, expected_head_oid = select_resolution_context(
         checkpoint=checkpoint,
-        explicit_expected_ids=args.expected_thread_id,
+        explicit_expected_ids=[],
         configured_reviewer_logins=args.reviewer_login,
         thread_id=args.thread_id,
     )

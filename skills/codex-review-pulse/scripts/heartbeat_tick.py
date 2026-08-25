@@ -13,7 +13,13 @@ from typing import Any
 from checkpoint_store import load_checkpoint, save_checkpoint
 from manage_pilot_install import verify_installation
 from pilot_preflight import inspect_local_checkout, run_command
-from recurring_contract import RunContractDriftError, load_run_contract
+from recurring_contract import (
+    RunContractDriftError,
+    inspect_contract_authority_anchor,
+    load_run_contract,
+    persist_contract_authority_anchor,
+    release_anchored_lease,
+)
 from recurring_model import (
     NextAction,
     advance_observation_state,
@@ -129,6 +135,16 @@ def doctor(
 ) -> dict[str, Any]:
     """Inspect readiness without acquiring a lease or writing runtime state."""
     contract = load_run_contract(contract_path, repository_path=repository_path)
+    try:
+        authority_anchor = inspect_contract_authority_anchor(contract_path, contract)
+    except RunContractDriftError as error:
+        authority_anchor = {
+            "ok": False,
+            "exists": True,
+            "path": str(Path(contract_path).resolve()),
+            "reason_code": "run_contract_drift",
+            "error": str(error),
+        }
     lease = inspect_lease(
         contract["paths"]["lease"],
         repository=contract["repository"],
@@ -172,6 +188,8 @@ def doctor(
         except Exception as error:
             run_state = {"ok": False, "exists": True, "error": str(error)}
     blockers = []
+    if not authority_anchor["ok"]:
+        blockers.append("run_contract_drift")
     if lease["status"] in {"active", "invalid"}:
         blockers.append("runner_lease_unavailable")
     if not checkpoint["ok"] or checkpoint["recovery_status"] != "none":
@@ -211,6 +229,7 @@ def doctor(
             "connector_capability": contract["connector_capability"],
         },
         "lease": _redact_lease(lease),
+        "authority_anchor": authority_anchor,
         "checkpoint": checkpoint,
         "installed_skill": installation,
         "execution_source": execution_source,
@@ -233,6 +252,25 @@ def plan_tick(
 ) -> dict[str, Any]:
     """Acquire authority, persist one wake, and return at most one next action."""
     contract = load_run_contract(contract_path, repository_path=repository_path)
+    if not owner_token:
+        raise ValueError("An explicit lease owner token is required")
+    try:
+        anchor = inspect_contract_authority_anchor(contract_path, contract)
+        if not anchor["exists"]:
+            anchor = persist_contract_authority_anchor(contract_path, contract)
+    except RunContractDriftError as error:
+        released = release_anchored_lease(contract_path, owner_token=owner_token)
+        return {
+            "schema_version": 1,
+            "run_status": "paused",
+            "next_action": NextAction.PAUSE_BLOCKED.value,
+            "reason_code": "run_contract_drift",
+            "details": str(error),
+            "authority_anchor": {"status": "drift"},
+            "mutation_occurred": False,
+            "recommended_heartbeat_disposition": "pause",
+            "lease": {"status": "released" if released else "not_owned"},
+        }
     execution_source = _execution_source_status(contract, runtime_script_path)
     if not execution_source["ok"]:
         return {
@@ -245,8 +283,6 @@ def plan_tick(
             "recommended_heartbeat_disposition": "pause",
             "lease": {"status": "not_acquired"},
         }
-    if not owner_token:
-        raise ValueError("An explicit lease owner token is required")
     token = owner_token
     acquisition = acquire_lease(
         contract["paths"]["lease"],
@@ -465,6 +501,19 @@ def record_trigger(
 ) -> dict[str, Any]:
     """Record injected trigger evidence; this function never posts a comment."""
     contract = load_run_contract(contract_path, repository_path=repository_path)
+    try:
+        anchor = inspect_contract_authority_anchor(contract_path, contract)
+        if not anchor["exists"]:
+            raise RunContractDriftError("run_contract_drift: authority anchor is missing")
+    except RunContractDriftError as error:
+        released = release_anchored_lease(contract_path, owner_token=owner_token)
+        return {
+            "status": "paused",
+            "reason_code": "run_contract_drift",
+            "details": str(error),
+            "mutation_occurred": False,
+            "lease": {"status": "released" if released else "not_owned"},
+        }
     if not _execution_source_status(contract, runtime_script_path)["ok"]:
         raise RuntimeError("Heartbeat is not running from the verified installation")
     state_path = Path(contract["paths"]["run_state"])
@@ -522,6 +571,22 @@ def complete_tick(
 ) -> dict[str, Any]:
     """Persist final evidence for the retained lease and release it safely."""
     contract = load_run_contract(contract_path, repository_path=repository_path)
+    try:
+        anchor = inspect_contract_authority_anchor(contract_path, contract)
+        if not anchor["exists"]:
+            raise RunContractDriftError("run_contract_drift: authority anchor is missing")
+    except RunContractDriftError as error:
+        released = release_anchored_lease(contract_path, owner_token=owner_token)
+        return {
+            "schema_version": 1,
+            "run_status": "paused",
+            "next_action": NextAction.PAUSE_BLOCKED.value,
+            "reason_code": "run_contract_drift",
+            "details": str(error),
+            "mutation_occurred": mutation_occurred,
+            "recommended_heartbeat_disposition": "pause",
+            "lease": {"status": "released" if released else "not_owned"},
+        }
     if not _execution_source_status(contract, runtime_script_path)["ok"]:
         raise RuntimeError("Heartbeat is not running from the verified installation")
     state_path = Path(contract["paths"]["run_state"])

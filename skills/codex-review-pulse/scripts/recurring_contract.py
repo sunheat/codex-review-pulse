@@ -14,12 +14,13 @@ from typing import Any
 
 from checkpoint_store import checkpoint_path, runtime_artifact_path
 from manage_pilot_install import verify_installation
-from runner_lease import assert_lease_owner
+from runner_lease import assert_lease_owner, release_lease
 from state_model import canonical_repository, unique_logins
 
 
 RUN_CONTRACT_SCHEMA_VERSION = 1
 RUN_STATE_AUTHORITY_SCHEMA_VERSION = 2
+AUTHORITY_ANCHOR_SCHEMA_VERSION = 1
 MUTATION_KEYS = (
     "recurring_execution",
     "code_edits",
@@ -213,6 +214,93 @@ def contract_authority_digest(contract: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def contract_authority_anchor_path(contract_path: str | Path) -> Path:
+    """Return an authority path derived only from the immutable contract location."""
+    resolved = Path(contract_path).expanduser().resolve()
+    return resolved.with_name(f"{resolved.name}.authority.json")
+
+
+def _authority_anchor_payload(contract: dict[str, Any]) -> dict[str, Any]:
+    normalized = validate_run_contract(contract)
+    return {
+        "schema_version": AUTHORITY_ANCHOR_SCHEMA_VERSION,
+        "contract_authority_digest": contract_authority_digest(normalized),
+        "repository": normalized["repository"],
+        "pull_request_number": normalized["pull_request_number"],
+        "lease_path": normalized["paths"]["lease"],
+    }
+
+
+def inspect_contract_authority_anchor(
+    contract_path: str | Path, contract: dict[str, Any]
+) -> dict[str, Any]:
+    """Read and validate the target-independent contract authority anchor."""
+    path = contract_authority_anchor_path(contract_path)
+    if not path.exists():
+        return {"ok": True, "exists": False, "path": str(path)}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RunContractDriftError(
+            "run_contract_drift: authority anchor is unreadable"
+        ) from error
+    if not isinstance(payload, dict) or payload.get("schema_version") != AUTHORITY_ANCHOR_SCHEMA_VERSION:
+        raise RunContractDriftError(
+            "run_contract_drift: authority anchor schema is invalid"
+        )
+    expected = contract_authority_digest(contract)
+    if payload.get("contract_authority_digest") != expected:
+        raise RunContractDriftError(
+            "run_contract_drift: authority anchor does not match the run contract"
+        )
+    required = {
+        "repository": canonical_repository(contract["repository"]),
+        "pull_request_number": contract["pull_request_number"],
+        "lease_path": str(Path(contract["paths"]["lease"]).resolve()),
+    }
+    if any(payload.get(key) != value for key, value in required.items()):
+        raise RunContractDriftError(
+            "run_contract_drift: authority anchor target does not match the run contract"
+        )
+    return {"ok": True, "exists": True, "path": str(path), "anchor": payload}
+
+
+def persist_contract_authority_anchor(
+    contract_path: str | Path, contract: dict[str, Any]
+) -> dict[str, Any]:
+    """Create the contract-location anchor once without overwriting prior authority."""
+    path = contract_authority_anchor_path(contract_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _authority_anchor_payload(contract)
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+    except FileExistsError:
+        return inspect_contract_authority_anchor(contract_path, contract)
+    return {"ok": True, "exists": True, "path": str(path), "anchor": payload}
+
+
+def release_anchored_lease(
+    contract_path: str | Path, *, owner_token: str
+) -> bool:
+    """Release the original target lease after contract-target drift."""
+    path = contract_authority_anchor_path(contract_path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return False
+        release_lease(
+            payload["lease_path"],
+            repository=payload["repository"],
+            pr_number=payload["pull_request_number"],
+            owner_token=owner_token,
+        )
+        return True
+    except (KeyError, OSError, RuntimeError, ValueError, json.JSONDecodeError):
+        return False
+
+
 def validate_contract_authority_binding(
     state: dict[str, Any], contract: dict[str, Any]
 ) -> None:
@@ -239,12 +327,22 @@ def load_run_contract(
 def assert_mutation_authority(
     contract: dict[str, Any],
     *,
+    contract_path: str | Path,
     owner_token: str,
     required_scope: str,
     now: str | datetime | None = None,
     runtime_script_path: str | Path | None = None,
 ) -> dict[str, Any]:
     normalized = validate_run_contract(contract)
+    try:
+        anchor = inspect_contract_authority_anchor(contract_path, normalized)
+        if not anchor["exists"]:
+            raise RunContractDriftError(
+                "run_contract_drift: authority anchor is missing"
+            )
+    except RunContractDriftError:
+        release_anchored_lease(contract_path, owner_token=owner_token)
+        raise
     run_state_path = Path(normalized["paths"]["run_state"])
     if not run_state_path.is_file():
         raise RunContractDriftError(

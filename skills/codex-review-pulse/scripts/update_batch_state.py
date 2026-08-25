@@ -76,6 +76,7 @@ def main() -> None:
             raise RuntimeError("Run contract does not bind this checkpoint target")
         assert_mutation_authority(
             contract,
+            contract_path=args.run_contract,
             owner_token=args.lease_owner_token,
             required_scope="recurring_execution",
             runtime_script_path=__file__,
