@@ -7,7 +7,7 @@ portability, and long-term unattended operation remain deferred.
 
 ## Development
 
-Use Python 3.10 or later. Keep runtime dependencies minimal and preserve
+Use Python 3.11 or later. Keep runtime dependencies minimal and preserve
 network-free tests by injecting GitHub GraphQL reads and mutations. Tests must
 never perform a live GitHub mutation.
 

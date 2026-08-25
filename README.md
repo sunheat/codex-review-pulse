@@ -51,7 +51,7 @@ manually reviewed bounded pilots. Long-term unattended heartbeat execution is
 not complete.
 
 The project checks executed by CI are network-free and cover the full test suite
-and publication validation on Windows and Ubuntu with Python 3.10 and 3.12.
+and publication validation on Windows and Ubuntu with Python 3.11 and 3.12.
 They do not authenticate to GitHub or exercise live mutation paths.
 
 The first supervised live pilot succeeded on `sunheat/job-hunter#2`: five
@@ -70,7 +70,7 @@ completed scheduled task without a third wake. See the
 
 - Git
 - authenticated [GitHub CLI](https://cli.github.com/)
-- Python 3.10 or later
+- Python 3.11 or later
 - a verified independent skill installation
 - one operator supervising the first bounded recurring wakes
 

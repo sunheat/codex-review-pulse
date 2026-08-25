@@ -49,7 +49,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python-version: [\"3.10\", \"3.12\"]
+        python-version: [\"3.11\", \"3.12\"]
     steps:
       - uses: third-party/example@v1
       - name: PowerShell AST
