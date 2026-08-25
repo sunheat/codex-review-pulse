@@ -11,7 +11,7 @@ import sys
 from typing import Any, Callable
 
 from checkpoint_store import checkpoint_path, load_checkpoint, save_checkpoint
-from recurring_contract import assert_mutation_authority, load_run_contract
+from recurring_contract import assert_mutation_authority, load_mutation_run_contract
 from state_model import (
     DEFAULT_CODEX_LOGINS,
     canonical_repository,
@@ -173,6 +173,7 @@ def resolve_exact_thread(
     expected_thread_ids: list[str],
     reviewer_logins: list[str] | None = None,
     expected_head_oid: str | None = None,
+    before_mutation: Callable[[], None] | None = None,
     graphql_call: Callable[[str, dict[str, object]], dict[str, Any]] = graphql,
 ) -> dict[str, Any]:
     actual_repository, actual_pr, actual_head_oid, review_threads = fetch_pr_threads(
@@ -193,6 +194,8 @@ def resolve_exact_thread(
     if verified.get("isResolved") is True:
         return {"id": thread_id, "isResolved": True, "alreadyResolved": True}
 
+    if before_mutation is not None:
+        before_mutation()
     payload = graphql_call(MUTATION, {"threadId": thread_id})
     thread = payload["data"]["resolveReviewThread"]["thread"]
     if thread["id"] != thread_id or thread["isResolved"] is not True:
@@ -261,9 +264,12 @@ def main() -> None:
         validate_checkpoint(checkpoint, args.repo, args.pr)
     if bool(args.run_contract) != bool(args.lease_owner_token):
         raise RuntimeError("Recurring resolution requires both run contract and lease owner token")
+    contract = None
     if args.run_contract:
-        contract = load_run_contract(
-            args.run_contract, repository_path=args.repository_path
+        contract = load_mutation_run_contract(
+            args.run_contract,
+            repository_path=args.repository_path,
+            owner_token=args.lease_owner_token,
         )
         if (
             contract["repository"] != args.repo.casefold()
@@ -286,6 +292,16 @@ def main() -> None:
         thread_id=args.thread_id,
     )
 
+    def recheck_mutation_authority() -> None:
+        if contract is not None:
+            assert_mutation_authority(
+                contract,
+                contract_path=args.run_contract,
+                owner_token=args.lease_owner_token,
+                required_scope="resolve_threads",
+                runtime_script_path=__file__,
+            )
+
     thread = resolve_exact_thread(
         repository=args.repo,
         pr_number=args.pr,
@@ -293,6 +309,7 @@ def main() -> None:
         expected_thread_ids=expected_ids,
         reviewer_logins=reviewer_logins,
         expected_head_oid=expected_head_oid,
+        before_mutation=recheck_mutation_authority,
     )
     batch = (checkpoint or {}).get("active_batch")
     if isinstance(batch, dict) and args.thread_id in batch.get("targeted_thread_ids", []):

@@ -89,8 +89,9 @@ heartbeat, and notification output.
 
 `pilot_preflight.py` and `heartbeat_tick.py doctor` call only `inspect_lease`.
 They do not create the guard file, acquire, renew, recover, or delete a lease.
-The formal `plan` tick creates or verifies the target-independent authority
-anchor before acquiring a target lease or writing target-derived runtime state.
+The formal `plan` tick verifies the complete installation before creating or
+verifying the target-independent authority anchor, acquiring a target lease,
+or writing target-derived runtime state.
 Doctor and every recurring mutation entrypoint also prove that the executing
 script is the copy inside the contract's hash-verified installation.
 An authorized `RUN_BATCH` or `REQUEST_REVIEW` plan retains the lease; wait,
@@ -133,7 +134,8 @@ that binding. Drift in the PR target, identity sets, installation provenance,
 mutation scope, wake/deadline, trigger head, runner/task/authorization identity,
 connector/wait policy, or runtime paths returns `run_contract_drift` before
 checkpoint or GitHub mutation, releases the originally anchored lease, and
-does not create state or a lease for a newly named target. A live contract is
+does so even when the changed contract is unreadable or invalid. It does not
+create state or a lease for a newly named target. A live contract is
 never amended; a changed authority needs
 a separately authorized run.
 

@@ -324,6 +324,22 @@ def load_run_contract(
     return validate_run_contract(payload, repository_path=repository_path)
 
 
+def load_mutation_run_contract(
+    path: str | Path,
+    *,
+    repository_path: str | Path | None,
+    owner_token: str,
+) -> dict[str, Any]:
+    """Load mutation authority and release its anchored lease on invalid drift."""
+    try:
+        return load_run_contract(path, repository_path=repository_path)
+    except Exception as error:
+        release_anchored_lease(path, owner_token=owner_token)
+        raise RunContractDriftError(
+            "run_contract_drift: run contract is unreadable or invalid"
+        ) from error
+
+
 def assert_mutation_authority(
     contract: dict[str, Any],
     *,

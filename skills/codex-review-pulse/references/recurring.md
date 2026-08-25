@@ -97,14 +97,16 @@ Do not schedule the pilot unless doctor returns
 
 Create the Codex task in a paused state first, then write its final identity
 into `automation_identity` before wake one and activate it only after doctor
-passes. The first plan also creates an authority anchor next to the contract
-file; its location depends only on the contract path, never on mutable target
-fields. The anchor and run state persist the canonical SHA-256 digest of the
+passes. Before its first write, the plan verifies the complete installed
+inventory and executing path. It then creates an authority anchor next to the
+contract file; its location depends only on the contract path, never on mutable
+target fields. The anchor and run state persist the canonical SHA-256 digest of the
 complete normalized contract. Do not amend a live contract: any later change
 to target, identities, installation provenance, mutation scope, wake/deadline,
 task/runner/authorization identity, connector/wait policy, trigger head, or
 runtime paths produces `run_contract_drift`, releases the originally anchored
-lease, and leaves both old and newly named target state unchanged. Run-state
+lease even when the contract is unreadable or invalid, and leaves both old and
+newly named target state unchanged. Run-state
 schema 1 is intentionally not
 silently migrated; start a separately authorized run instead.
 

@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 
 from checkpoint_store import checkpoint_path, load_checkpoint, save_checkpoint
-from recurring_contract import assert_mutation_authority, load_run_contract
+from recurring_contract import assert_mutation_authority, load_mutation_run_contract
 from state_model import (
     freeze_batch,
     record_publication_failure,
@@ -65,8 +65,10 @@ def main() -> None:
             "Recurring checkpoint writes require both run contract and lease owner token"
         )
     if args.run_contract:
-        contract = load_run_contract(
-            args.run_contract, repository_path=args.repository_path
+        contract = load_mutation_run_contract(
+            args.run_contract,
+            repository_path=args.repository_path,
+            owner_token=args.lease_owner_token,
         )
         if (
             contract["repository"] != args.repo.casefold()

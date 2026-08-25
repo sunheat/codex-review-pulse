@@ -12,7 +12,7 @@ import sys
 from typing import Any, Callable
 
 from checkpoint_store import checkpoint_path, load_checkpoint, save_checkpoint
-from recurring_contract import assert_mutation_authority, load_run_contract
+from recurring_contract import assert_mutation_authority, load_mutation_run_contract
 from state_model import DEFAULT_CODEX_LOGINS, evaluate_snapshot, unique_logins
 
 
@@ -316,8 +316,10 @@ def main() -> None:
         )
     contract = None
     if args.run_contract:
-        contract = load_run_contract(
-            args.run_contract, repository_path=args.repository_path
+        contract = load_mutation_run_contract(
+            args.run_contract,
+            repository_path=args.repository_path,
+            owner_token=args.lease_owner_token,
         )
         if (
             contract["repository"] != canonical_repo.casefold()

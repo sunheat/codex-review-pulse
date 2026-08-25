@@ -19,6 +19,7 @@ from manage_pilot_install import MANIFEST_NAME  # noqa: E402
 from recurring_contract import (  # noqa: E402
     RunContractDriftError,
     assert_mutation_authority,
+    contract_authority_anchor_path,
     contract_authority_digest,
     expected_runtime_paths,
     load_run_contract,
@@ -655,6 +656,69 @@ class HeartbeatTickTests(unittest.TestCase):
             )
             self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
             self.assertEqual(result["reason_code"], "install_provenance_drift")
+
+    def test_installation_drift_cannot_create_anchor_lease_or_run_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            contract = load_run_contract(contract_path, repository_path=repository)
+            (installation / "SKILL.md").write_text("modified\n", encoding="utf-8")
+
+            result = plan_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                observation=observation(),
+                now=NOW,
+                owner_token="owner-a",
+                checkout_inspector=checkout_ok,
+                runtime_script_path=verified_runtime(installation),
+            )
+            self.assertEqual(result["reason_code"], "install_provenance_drift")
+            self.assertFalse(contract_authority_anchor_path(contract_path).exists())
+            for name in ("lease", "run_state"):
+                self.assertFalse(Path(contract["paths"][name]).exists())
+
+    def test_invalid_contract_releases_retained_anchored_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            contract = load_run_contract(contract_path, repository_path=repository)
+            state_path = Path(contract["paths"]["run_state"])
+            lease_path = Path(contract["paths"]["lease"])
+            planned = plan_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                observation=observation(targeted_thread_ids=["T1"]),
+                now=NOW,
+                owner_token="owner-a",
+                checkout_inspector=checkout_ok,
+                runtime_script_path=verified_runtime(installation),
+            )
+            self.assertEqual(planned["next_action"], "RUN_BATCH")
+            before = state_path.read_bytes()
+            self.assertTrue(lease_path.exists())
+            contract_path.write_text("{", encoding="utf-8")
+
+            completed = complete_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                owner_token="owner-a",
+                final_observation=observation(),
+                now="2026-08-25T00:20:30+00:00",
+                mutation_occurred=False,
+                runtime_script_path=verified_runtime(installation),
+            )
+            self.assertEqual(completed["reason_code"], "run_contract_drift")
+            self.assertFalse(lease_path.exists())
+            self.assertEqual(state_path.read_bytes(), before)
 
     def test_lease_loss_during_tick_is_visible_and_next_runner_cannot_retry(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:

@@ -142,6 +142,62 @@ class ResolveThreadScopeTests(unittest.TestCase):
                 graphql_call=fake_graphql,
             )
 
+    def test_authority_is_rechecked_immediately_before_graphql_mutation(self) -> None:
+        mutation_called = False
+        boundary_checks = 0
+
+        def fake_graphql(query: str, variables: dict[str, object]) -> dict:
+            nonlocal mutation_called
+            if "mutation" in query:
+                mutation_called = True
+                self.fail("Mutation must not run after authority is lost")
+            return {
+                "data": {
+                    "repository": {
+                        "nameWithOwner": "Owner/Repo",
+                        "pullRequest": {
+                            "number": 17,
+                            "headRefOid": "HEAD1",
+                            "reviewThreads": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": [
+                                    {
+                                        "id": "T1",
+                                        "isResolved": False,
+                                        "comments": {
+                                            "nodes": [
+                                                {
+                                                    "author": {
+                                                        "login": "chatgpt-codex-connector"
+                                                    }
+                                                }
+                                            ]
+                                        },
+                                    }
+                                ],
+                            },
+                        },
+                    }
+                }
+            }
+
+        def reject_expired_lease() -> None:
+            nonlocal boundary_checks
+            boundary_checks += 1
+            raise RuntimeError("Lease has expired")
+
+        with self.assertRaisesRegex(RuntimeError, "Lease has expired"):
+            resolve_exact_thread(
+                repository="Owner/Repo",
+                pr_number=17,
+                thread_id="T1",
+                expected_thread_ids=["T1"],
+                before_mutation=reject_expired_lease,
+                graphql_call=fake_graphql,
+            )
+        self.assertEqual(boundary_checks, 1)
+        self.assertFalse(mutation_called)
+
     def test_same_pr_human_thread_is_rejected_before_mutation(self) -> None:
         calls: list[str] = []
 

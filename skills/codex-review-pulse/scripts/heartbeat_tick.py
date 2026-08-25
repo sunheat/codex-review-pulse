@@ -16,6 +16,7 @@ from pilot_preflight import inspect_local_checkout, run_command
 from recurring_contract import (
     RunContractDriftError,
     inspect_contract_authority_anchor,
+    load_mutation_run_contract,
     load_run_contract,
     persist_contract_authority_anchor,
     release_anchored_lease,
@@ -251,9 +252,49 @@ def plan_tick(
     runtime_script_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Acquire authority, persist one wake, and return at most one next action."""
-    contract = load_run_contract(contract_path, repository_path=repository_path)
     if not owner_token:
         raise ValueError("An explicit lease owner token is required")
+    try:
+        contract = load_mutation_run_contract(
+            contract_path,
+            repository_path=repository_path,
+            owner_token=owner_token,
+        )
+    except RunContractDriftError as error:
+        return {
+            "schema_version": 1,
+            "run_status": "paused",
+            "next_action": NextAction.PAUSE_BLOCKED.value,
+            "reason_code": "run_contract_drift",
+            "details": str(error),
+            "mutation_occurred": False,
+            "recommended_heartbeat_disposition": "pause",
+            "lease": {"status": "released_or_absent"},
+        }
+    execution_source = _execution_source_status(contract, runtime_script_path)
+    if not execution_source["ok"]:
+        return {
+            "schema_version": 1,
+            "run_status": "paused",
+            "next_action": NextAction.PAUSE_BLOCKED.value,
+            "reason_code": "heartbeat_not_running_from_verified_installation",
+            "execution_source": execution_source,
+            "mutation_occurred": False,
+            "recommended_heartbeat_disposition": "pause",
+            "lease": {"status": "not_acquired"},
+        }
+    installation = _installation_status(contract)
+    if not installation["ok"]:
+        return {
+            "schema_version": 1,
+            "run_status": "paused",
+            "next_action": NextAction.PAUSE_BLOCKED.value,
+            "reason_code": "install_provenance_drift",
+            "installed_skill": installation,
+            "mutation_occurred": False,
+            "recommended_heartbeat_disposition": "pause",
+            "lease": {"status": "not_acquired"},
+        }
     try:
         anchor = inspect_contract_authority_anchor(contract_path, contract)
         if not anchor["exists"]:
@@ -270,18 +311,6 @@ def plan_tick(
             "mutation_occurred": False,
             "recommended_heartbeat_disposition": "pause",
             "lease": {"status": "released" if released else "not_owned"},
-        }
-    execution_source = _execution_source_status(contract, runtime_script_path)
-    if not execution_source["ok"]:
-        return {
-            "schema_version": 1,
-            "run_status": "paused",
-            "next_action": NextAction.PAUSE_BLOCKED.value,
-            "reason_code": "heartbeat_not_running_from_verified_installation",
-            "execution_source": execution_source,
-            "mutation_occurred": False,
-            "recommended_heartbeat_disposition": "pause",
-            "lease": {"status": "not_acquired"},
         }
     token = owner_token
     acquisition = acquire_lease(
@@ -387,7 +416,6 @@ def plan_tick(
             }
 
         checkpoint = _checkpoint_status(contract)
-        installation = _installation_status(contract)
         local_checkout = checkout_inspector(
             repository_path,
             expected_head_repository=observation.get("head_repository"),
@@ -500,7 +528,20 @@ def record_trigger(
     runtime_script_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Record injected trigger evidence; this function never posts a comment."""
-    contract = load_run_contract(contract_path, repository_path=repository_path)
+    try:
+        contract = load_mutation_run_contract(
+            contract_path,
+            repository_path=repository_path,
+            owner_token=owner_token,
+        )
+    except RunContractDriftError as error:
+        return {
+            "status": "paused",
+            "reason_code": "run_contract_drift",
+            "details": str(error),
+            "mutation_occurred": False,
+            "lease": {"status": "released_or_absent"},
+        }
     try:
         anchor = inspect_contract_authority_anchor(contract_path, contract)
         if not anchor["exists"]:
@@ -570,7 +611,23 @@ def complete_tick(
     runtime_script_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Persist final evidence for the retained lease and release it safely."""
-    contract = load_run_contract(contract_path, repository_path=repository_path)
+    try:
+        contract = load_mutation_run_contract(
+            contract_path,
+            repository_path=repository_path,
+            owner_token=owner_token,
+        )
+    except RunContractDriftError as error:
+        return {
+            "schema_version": 1,
+            "run_status": "paused",
+            "next_action": NextAction.PAUSE_BLOCKED.value,
+            "reason_code": "run_contract_drift",
+            "details": str(error),
+            "mutation_occurred": mutation_occurred,
+            "recommended_heartbeat_disposition": "pause",
+            "lease": {"status": "released_or_absent"},
+        }
     try:
         anchor = inspect_contract_authority_anchor(contract_path, contract)
         if not anchor["exists"]:
