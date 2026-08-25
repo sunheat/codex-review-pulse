@@ -38,6 +38,21 @@ documentation, and never make public behavior depend solely on ignored notes.
 - Use authoritative GitHub GraphQL review-thread state and exact node IDs. Do
   not infer resolution from comment text or flat comment lists.
 
+## Code Review Rules
+
+- Persist a canonical digest of the complete normalized run contract before
+  the first mutation. Every later wake must recompute and match that digest;
+  authority drift fails closed before any checkpoint or GitHub mutation,
+  without rewriting state, and releases any held lease.
+- Accept review work only from a head-OID-bracketed stable GraphQL snapshot
+  whose unresolved thread root author is a configured Codex identity. Freeze
+  that head and those exact thread IDs, revalidate ownership, and resolve only
+  the corresponding exact GraphQL nodes.
+- Execute mutating pilot commands only from an independently copied,
+  commit-pinned installation whose manifest, inventory, hashes, and resolved
+  executing path all verify. Never fall back to a mutable checkout, a default
+  installation, or a symlinked path when that binding fails.
+
 ## Authorization boundaries
 
 User authorization is action-specific. Code edits do not imply permission to

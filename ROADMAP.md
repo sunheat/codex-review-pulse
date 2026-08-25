@@ -22,6 +22,14 @@ changes after wake one now fail closed without state rewrite or retained lease.
 This supports repeatable, manually reviewed bounded pilots. It remains a
 bounded pilot release, not a long-term unattended heartbeat.
 
+## Public release candidate
+
+Version `0.3.1` is the first public release candidate. The repository includes
+network-free Windows and Ubuntu CI, public contribution and security guidance,
+and the evidence from the manually reviewed one- and two-wake pilots. The
+self-hosted publication PR is the review boundary for this candidate; opening
+that PR does not itself establish connector approval or production readiness.
+
 ## Deferred milestones
 
 - public-API connector and automatic-review detection bound to a head OID;

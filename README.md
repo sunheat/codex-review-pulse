@@ -1,5 +1,7 @@
 # Codex Review Pulse
 
+[![CI](https://github.com/sunheat/codex-review-pulse/actions/workflows/ci.yml/badge.svg)](https://github.com/sunheat/codex-review-pulse/actions/workflows/ci.yml)
+
 Codex Review Pulse is a GitHub-specific Codex skill for transaction-safe,
 thread-aware remediation of pull requests reviewed by the GitHub Codex
 connector. It treats each authoritative review snapshot as a frozen batch and
@@ -12,8 +14,8 @@ framework.
 ## Current release-candidate scope
 
 The core state model, immutable installation, supervised preflight, and two
-manually reviewed bounded live pilots are complete. The current release
-candidate supports repeatable, finite recurring pilots on one PR:
+manually reviewed bounded live pilots are complete. Version `0.3.1` is a
+public release candidate for repeatable, finite recurring pilots on one PR:
 
 - a `codex-review-pulse` Agent Skill with a frozen-batch remediation protocol;
 - authoritative GitHub GraphQL retrieval of PR metadata, reviews, inline review
@@ -47,6 +49,10 @@ The controller remains an agent skill plus deterministic state and API helpers,
 not a standalone daemon. Version `0.3.1` is supported for repeatable,
 manually reviewed bounded pilots. Long-term unattended heartbeat execution is
 not complete.
+
+The project checks executed by CI are network-free and cover the full test suite
+and publication validation on Windows and Ubuntu with Python 3.10 and 3.12.
+They do not authenticate to GitHub or exercise live mutation paths.
 
 The first supervised live pilot succeeded on `sunheat/job-hunter#2`: five
 frozen Codex threads were fixed and resolved, 45 tests passed, one aggregate
@@ -159,6 +165,10 @@ Pilot installation and readiness are documented in
 [the live-pilot design](docs/design/live-pilot-readiness.md).
 Bounded recurring behavior is documented in
 [the recurring-heartbeat design](docs/design/recurring-heartbeat-readiness.md).
+
+Contributions are welcome within the documented scope; see
+[CONTRIBUTING.md](CONTRIBUTING.md). Report security-sensitive findings through
+the private path in [SECURITY.md](SECURITY.md).
 
 ## License
 
