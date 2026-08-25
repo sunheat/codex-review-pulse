@@ -16,16 +16,19 @@ The initial public baseline provides:
 - a `codex-review-pulse` Agent Skill with a frozen-batch remediation protocol;
 - authoritative GitHub GraphQL retrieval of PR metadata, reviews, inline review
   threads, comments, and PR-level `THUMBS_UP` reactions;
-- configurable matching for the Codex approval identity;
-- exact GraphQL review-thread resolution;
+- separate repeatable reviewer and approval identity configuration, with
+  Codex-only root-author targeting and non-target reporting;
+- durable, atomic current-head approval and frozen-batch recovery checkpoints;
+- exact GraphQL review-thread resolution with repository, PR, and frozen-set
+  ownership plus root-author verification;
 - one-commit/one-push batch rules, unrelated-work protection, and remote-head
   advancement checks;
 - recurring execution guidance for Codex heartbeat automations; and
 - a PowerShell wrapper for isolated Pi sessions under Windows Task Scheduler.
 
-The controller is currently an agent skill plus deterministic API helpers, not
-a standalone daemon. Durable checkpoints, a tested event classifier, connector
-detection, and server-timestamp review triggering remain future work.
+The controller is currently an agent skill plus deterministic state and API
+helpers, not a standalone daemon. Connector detection, broader event
+classification, and server-timestamp review triggering remain future work.
 
 ## Requirements
 
@@ -54,13 +57,18 @@ heartbeat and Pi scheduling examples.
 ## Safety model
 
 - Fetch GraphQL review-thread state at the start of every cycle.
-- Freeze unresolved thread IDs before making decisions.
+- Bracket connection reads with matching head-OID snapshots; discard mixed-head
+  evidence.
+- Freeze only targeted Codex thread IDs and the current head OID.
+- Report human, unknown-author, and other-reviewer threads without mutating
+  them or claiming global merge readiness.
 - Keep unrelated and pre-existing work out of the batch.
-- Publish at most one commit and one push for the batch.
+- Focused-validate and resolve each exact frozen thread before aggregate
+  validation and publication.
+- Publish at most one commit and one push for the aggregate batch.
 - Refuse to overwrite an unexpectedly advanced PR head.
-- Resolve only the exact frozen GraphQL thread IDs after successful publication.
-- Stop immediately when no unresolved review threads remain and a PR-level
-  thumbs-up comes from a configured Codex approval identity.
+- Stop immediately when no targeted Codex threads remain and a checkpoint
+  proves a qualifying PR-level thumbs-up belongs to the current head epoch.
 
 No additional quiet interval is required after that terminal condition.
 
@@ -68,7 +76,8 @@ No additional quiet interval is required after that terminal condition.
 
 See [ROADMAP.md](ROADMAP.md) for deliberately deferred milestones and
 [RELATED-WORK.md](RELATED-WORK.md) for the relationship to
-`djm204/codex-review`.
+`djm204/codex-review`. The durable state contract is documented in
+[the core state model](docs/design/core-state-model.md).
 
 ## License
 

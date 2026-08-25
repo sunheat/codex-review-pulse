@@ -1,13 +1,14 @@
 # Roadmap
 
-The initial baseline intentionally defers:
+The core state phase implements Codex-only thread targeting, current-head
+approval checkpoints, frozen-batch recovery, and PR-scoped exact resolution.
+It intentionally continues to defer:
 
-- a deterministic and tested event classifier;
-- a durable checkpoint/state file;
+- broader event and stalled-review classification beyond the core evaluator;
 - connector detection and server-timestamp review triggering;
-- unit and integration fixtures;
 - Codex plugin packaging and installation;
-- Pi portability validation; and
+- Pi portability validation;
+- generic reviewer and multi-forge support; and
 - evaluation of whether to reuse or vendor OpenAI `gh-address-comments`.
 
 These are candidate later milestones, not claims about current functionality.

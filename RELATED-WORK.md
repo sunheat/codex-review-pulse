@@ -17,7 +17,7 @@ Codex Review Pulse addresses a different part of the workflow:
 | Mutation boundary | Leaves remediation judgement to the calling agent | Defines frozen-batch, one-commit, and one-push transaction semantics |
 | Concurrency safety | Not its documented focus | Protect unrelated work and stop on unexpected remote-head advancement |
 | Recovery | Poll until a review outcome is classified | Preserve enough live/thread mapping to pause and recover after partial publication or resolution failure |
-| Approval signal | A documented clean-result classification | A PR-level `THUMBS_UP` reaction from a configured Codex identity, combined with zero unresolved threads |
+| Approval signal | A documented clean-result classification | A proven current-head PR-level `THUMBS_UP` from a configured Codex identity, combined with zero targeted Codex threads |
 | Recurrence | Review loop polling | Codex heartbeat execution and Pi scheduled execution |
 
 The projects are complementary rather than interchangeable. Future work will

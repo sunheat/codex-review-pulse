@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-"""Fetch authoritative GitHub PR thread and Codex approval state via gh."""
+"""Fetch GitHub PR evidence and evaluate Codex-specific review state."""
 
 from __future__ import annotations
 
 import argparse
+from datetime import UTC, datetime
 import json
+from pathlib import Path
 import subprocess
 import sys
 from typing import Any
 
-
-DEFAULT_APPROVAL_LOGINS = (
-    "chatgpt-codex-connector",
-    "chatgpt-codex-connector[bot]",
-)
+from checkpoint_store import checkpoint_path, load_checkpoint, save_checkpoint
+from state_model import DEFAULT_CODEX_LOGINS, evaluate_snapshot
 
 
 def run(command: list[str], stdin: str | None = None) -> str:
@@ -38,17 +37,9 @@ def graphql(
     cursor: str | None = None,
 ) -> dict[str, Any]:
     command = [
-        "gh",
-        "api",
-        "graphql",
-        "-F",
-        "query=@-",
-        "-F",
-        f"owner={owner}",
-        "-F",
-        f"repo={repo}",
-        "-F",
-        f"number={number}",
+        "gh", "api", "graphql", "-F", "query=@-",
+        "-F", f"owner={owner}", "-F", f"repo={repo}",
+        "-F", f"number={number}",
     ]
     if cursor:
         command.extend(["-F", f"cursor={cursor}"])
@@ -70,7 +61,10 @@ def fetch_connection(
     cursor: str | None = None
     while True:
         payload = graphql(query, owner, repo, number, cursor)
-        connection = payload["data"]["repository"]["pullRequest"][connection_name]
+        pull_request = payload["data"]["repository"]["pullRequest"]
+        if pull_request is None:
+            raise RuntimeError(f"Pull request not found: {owner}/{repo}#{number}")
+        connection = pull_request[connection_name]
         nodes.extend(connection.get("nodes") or [])
         page_info = connection["pageInfo"]
         if not page_info["hasNextPage"]:
@@ -83,6 +77,7 @@ def fetch_connection(
 META_QUERY = """
 query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
+    nameWithOwner
     pullRequest(number: $number) {
       number url title state isDraft mergeable reviewDecision
       headRefName headRefOid baseRefName updatedAt
@@ -157,11 +152,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo", help="Canonical base repository as OWNER/REPO")
     parser.add_argument("--pr", type=int, help="Pull request number")
     parser.add_argument(
-        "--approval-login",
-        action="append",
-        dest="approval_logins",
-        metavar="LOGIN",
+        "--reviewer-login", action="append", dest="reviewer_logins", metavar="LOGIN",
+        help="Targeted Codex root-author login; repeat for multiple identities",
+    )
+    parser.add_argument(
+        "--approval-login", action="append", dest="approval_logins", metavar="LOGIN",
         help="Allowed Codex approval login; repeat for multiple identities",
+    )
+    parser.add_argument(
+        "--state-file", type=Path,
+        help="Override the checkpoint path (primarily for controlled testing)",
+    )
+    parser.add_argument(
+        "--repository-path", default=".",
+        help="Target worktree used to locate the Git common directory",
     )
     return parser.parse_args()
 
@@ -172,74 +176,99 @@ def resolve_target(repo_arg: str | None, pr_arg: int | None) -> tuple[str, str, 
         repository = run_json(["gh", "repo", "view", "--json", "nameWithOwner"])[
             "nameWithOwner"
         ]
-    if "/" not in repository:
+    if repository.count("/") != 1:
         raise RuntimeError("--repo must be OWNER/REPO")
     owner, repo = repository.split("/", 1)
     number = pr_arg
     if number is None:
         number = int(run_json(["gh", "pr", "view", "--json", "number"])["number"])
+    if number < 1:
+        raise RuntimeError("--pr must be positive")
     return owner, repo, number
 
 
-def unique_logins(configured: list[str] | None) -> list[str]:
-    values = configured or list(DEFAULT_APPROVAL_LOGINS)
-    result: list[str] = []
-    seen: set[str] = set()
-    for login in values:
-        value = login.strip()
-        if not value:
-            raise RuntimeError("Approval logins must not be empty")
-        key = value.casefold()
-        if key not in seen:
-            result.append(value)
-            seen.add(key)
-    return result
+def verify_stable_head(
+    initial_repository: dict[str, Any],
+    final_repository: dict[str, Any],
+    pr_number: int,
+) -> dict[str, Any]:
+    """Reject connection data collected across a PR head transition."""
+    if initial_repository.get("nameWithOwner") != final_repository.get("nameWithOwner"):
+        raise RuntimeError("Canonical repository changed while fetching PR state")
+    initial_pr = initial_repository.get("pullRequest")
+    final_pr = final_repository.get("pullRequest")
+    if initial_pr is None or final_pr is None:
+        raise RuntimeError(
+            f"Pull request disappeared while fetching state: "
+            f"{initial_repository.get('nameWithOwner')}#{pr_number}"
+        )
+    if initial_pr.get("number") != pr_number or final_pr.get("number") != pr_number:
+        raise RuntimeError("GitHub returned a different pull request number")
+    if initial_pr.get("headRefOid") != final_pr.get("headRefOid"):
+        raise RuntimeError("Pull request head advanced while fetching state; retry the snapshot")
+    return final_pr
 
 
 def main() -> None:
     args = parse_args()
     run(["gh", "auth", "status"])
     owner, repo, number = resolve_target(args.repo, args.pr)
-    approval_logins = unique_logins(args.approval_logins)
-    approval_keys = {login.casefold() for login in approval_logins}
 
-    meta_payload = graphql(META_QUERY, owner, repo, number)
-    pull_request = meta_payload["data"]["repository"]["pullRequest"]
-    if pull_request is None:
+    initial_meta = graphql(META_QUERY, owner, repo, number)
+    initial_repository = initial_meta["data"].get("repository")
+    if initial_repository is None:
+        raise RuntimeError(f"Repository not found: {owner}/{repo}")
+    if initial_repository.get("pullRequest") is None:
         raise RuntimeError(f"Pull request not found: {owner}/{repo}#{number}")
 
-    review_threads = fetch_connection(
-        THREADS_QUERY, "reviewThreads", owner, repo, number
+    review_threads = fetch_connection(THREADS_QUERY, "reviewThreads", owner, repo, number)
+    thumbs_up_reactions = fetch_connection(REACTIONS_QUERY, "reactions", owner, repo, number)
+    conversation_comments = fetch_connection(COMMENTS_QUERY, "comments", owner, repo, number)
+    reviews = fetch_connection(REVIEWS_QUERY, "reviews", owner, repo, number)
+    final_meta = graphql(META_QUERY, owner, repo, number)
+    final_repository = final_meta["data"].get("repository")
+    if final_repository is None:
+        raise RuntimeError(f"Repository disappeared while fetching state: {owner}/{repo}")
+    pull_request = verify_stable_head(initial_repository, final_repository, number)
+    canonical_repo = final_repository["nameWithOwner"]
+
+    state_path = args.state_file or checkpoint_path(
+        canonical_repo, number, repository_path=args.repository_path
     )
-    unresolved_thread_ids = [
-        thread["id"] for thread in review_threads if not thread["isResolved"]
-    ]
-    thumbs_up_reactions = fetch_connection(
-        REACTIONS_QUERY, "reactions", owner, repo, number
+    previous_checkpoint = load_checkpoint(state_path)
+    evaluation, next_checkpoint = evaluate_snapshot(
+        repository=canonical_repo,
+        pr_number=number,
+        head_oid=pull_request["headRefOid"],
+        pull_request_state=pull_request["state"],
+        review_threads=review_threads,
+        reactions=thumbs_up_reactions,
+        reviewer_logins=args.reviewer_logins or DEFAULT_CODEX_LOGINS,
+        approval_logins=args.approval_logins or DEFAULT_CODEX_LOGINS,
+        checkpoint=previous_checkpoint,
+        observed_at=datetime.now(UTC).isoformat(),
     )
-    qualifying_approval_reactions = [
-        reaction
-        for reaction in thumbs_up_reactions
-        if ((reaction.get("user") or {}).get("login") or "").casefold()
-        in approval_keys
-    ]
+    save_checkpoint(state_path, next_checkpoint)
 
     result = {
         "viewer_login": run(["gh", "api", "user", "--jq", ".login"]).strip(),
-        "repository": f"{owner}/{repo}",
+        "repository": canonical_repo,
         "pull_request": pull_request,
-        "approval_logins": approval_logins,
-        "conversation_comments": fetch_connection(
-            COMMENTS_QUERY, "comments", owner, repo, number
-        ),
-        "reviews": fetch_connection(REVIEWS_QUERY, "reviews", owner, repo, number),
+        "checkpoint_path": str(state_path),
+        "reviewer_logins": evaluation["reviewer_logins"],
+        "approval_logins": evaluation["approval_logins"],
+        "conversation_comments": conversation_comments,
+        "reviews": reviews,
         "review_threads": review_threads,
-        "unresolved_review_thread_ids": unresolved_thread_ids,
+        "targeted_unresolved_thread_ids": evaluation["targeted_unresolved_thread_ids"],
+        "non_target_unresolved_threads": evaluation["non_target_unresolved_threads"],
         "thumbs_up_reactions": thumbs_up_reactions,
-        "qualifying_approval_reactions": qualifying_approval_reactions,
-        "terminal_approval": (
-            not unresolved_thread_ids and bool(qualifying_approval_reactions)
-        ),
+        "qualifying_approval_reactions": evaluation["qualifying_approval_reactions"],
+        "invalid_reaction_ids": evaluation["invalid_reaction_ids"],
+        "approval_status": evaluation["approval_status"],
+        "proven_current_head_reaction_ids": evaluation["proven_current_head_reaction_ids"],
+        "approval_epoch_transition": evaluation["approval_epoch_transition"],
+        "codex_terminal": evaluation["codex_terminal"],
     }
     print(json.dumps(result, indent=2))
 
