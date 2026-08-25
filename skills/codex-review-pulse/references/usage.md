@@ -1,150 +1,190 @@
 # Usage
 
-## Codex
+## Release-candidate boundary
 
-Place the skill at `~/.codex/skills/codex-review-pulse` or another configured
-skill directory. Start a one-time cycle with:
+The core model is complete. This version supports a controlled, manually
+supervised live pilot. It does not yet support an unattended recurring
+heartbeat, deterministic stalled-review classification, plugin packaging, or
+validated Pi portability.
 
-```text
-Use $codex-review-pulse on https://github.com/OWNER/REPO/pull/NUMBER.
-The approval and targeted reviewer identities are independently configured as
-chatgpt-codex-connector. I authorize PR-scoped fixes, commits, pushes,
-exact thread resolution, and one Codex review trigger comment. Do not merge.
-```
+Use a clean source repository and an exact release-candidate commit throughout
+the commands below. OpenAI documents `$HOME/.agents/skills` as the user-level
+local skill location; the install manager uses it by default. Codex normally
+detects skill changes automatically, but OpenAI recommends restarting Codex if
+an update does not appear.
 
-Add issue creation only when it is authorized. For recurring monitoring in the
-Codex desktop app, ask Codex to create a heartbeat automation and state the
-interval, PR identity, allowed mutations, approval logins, and stalled-review
-policy. Reviewer logins are configured separately from approval logins. Keep
-one heartbeat attached to one task so the task history retains batch and
-idle-state evidence.
+Official reference:
+[Build skills](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills).
 
-Ask Codex to view, pause, resume, or delete the automation instead of editing
-its local configuration while it runs. A heartbeat must stop immediately when
-the authoritative snapshot reports zero targeted Codex threads and a
-checkpoint proves a qualifying PR-level thumbs-up for the current head; it does
-not wait for a quiet interval. Non-target unresolved threads remain reported
-and untouched.
+## Install an immutable-provenance copy
 
-Fetch and checkpoint state explicitly when diagnosing a cycle:
+From the clean `codex-review-pulse` source repository on Windows:
 
 ```powershell
-python skills/codex-review-pulse/scripts/fetch_pr_state.py `
+$commit = git rev-parse HEAD
+python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
+  --source-repository . `
+  --source-commit $commit
+```
+
+This extracts `skills/codex-review-pulse` from the named Git commit into
+`$env:USERPROFILE\.agents\skills\codex-review-pulse`. It does not copy the
+mutable working-tree files and does not create a symlink. The installed
+manifest records version `0.2.0`, the full source commit, and SHA-256 file
+hashes.
+
+The install fails if the source is dirty, the commit is missing, the commit
+does not contain the skill/version, or the target already exists. Use
+`--skills-root C:\controlled\temporary\skills` only for isolated testing or an
+explicit alternate configured location.
+
+## Verify
+
+```powershell
+python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
+  --expected-version 0.2.0 `
+  --expected-source-commit $commit
+```
+
+Verification fails on version or source-commit mismatch, missing/extra files,
+changed file hashes, a missing/invalid manifest, or a symlinked target. Do not
+continue a pilot after verification failure.
+
+## Read-only pilot preflight
+
+Confirm manually that no Codex task, terminal, scheduler, or other person is
+running this skill against the same pull request. Then run:
+
+```powershell
+python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_preflight.py `
   --repo OWNER/REPO `
   --pr NUMBER `
+  --repository-path C:\path\to\target-repository `
+  --expected-skill-version 0.2.0 `
+  --expected-source-commit $commit `
+  --reviewer-login chatgpt-codex-connector `
+  --approval-login chatgpt-codex-connector `
+  --single-runner-confirmed
+```
+
+`--single-runner-confirmed` records operator evidence; it is not automatic
+scheduler discovery. Omitting it blocks readiness.
+
+Preflight checks Python, Git, GitHub CLI, authentication, canonical repository,
+PR/head state, configured identities, targeted and non-target threads,
+checkpoint schema and recovery state, approval evidence/ambiguity, installed
+provenance, and the single-runner prerequisite. It also requires the supplied
+target checkout to be clean, its local HEAD to equal the bracketed PR head OID,
+and the `origin` fetch and push URLs to identify the PR head repository. The
+running preflight script itself must be inside the verified installation. It
+emits JSON and exits nonzero when a readiness blocker exists.
+
+Preflight never resolves a thread, posts a comment, creates an issue, commits,
+pushes, or writes the checkpoint. If its in-memory evaluation would establish
+or advance an epoch, it reports `checkpoint_would_change: true`; the formal
+state-fetch command must perform that write after the supervised cycle is
+explicitly authorized.
+
+## Start one supervised cycle
+
+Only after preflight returns `ready_for_supervised_pilot: true`, invoke the
+installed skill with an exact PR and action-specific authority:
+
+```text
+Use $codex-review-pulse on https://github.com/OWNER/REPO/pull/NUMBER for one
+manually supervised cycle. Reviewer and approval identities are
+chatgpt-codex-connector. I authorize PR-scoped fixes, one aggregate commit and
+push, and exact frozen-thread resolution. Do not create issues, post a review
+trigger, merge, enable auto-merge, change the base, or start recurring work.
+```
+
+Change that scope only when the operator explicitly wants the additional
+mutation. Preflight success alone authorizes none of them.
+
+The formal state fetch is:
+
+```powershell
+python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\fetch_pr_state.py `
+  --repo OWNER/REPO `
+  --pr NUMBER `
+  --repository-path C:\path\to\target-repository `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector
 ```
 
-An existing qualifying reaction on cold start is ambiguous. Do not delete the
-checkpoint to make approval appear fresh.
+Unlike preflight, this command atomically persists the approval epoch and
+latest stable target snapshot in the target repository's Git common directory.
+Do not delete the checkpoint to make an existing reaction appear fresh.
 
-Freeze only the IDs returned by that stable snapshot, then persist an outcome
-before resolving each thread:
+Freeze only IDs returned by that stable snapshot, then persist an outcome
+before resolving each exact thread:
 
 ```powershell
-python skills/codex-review-pulse/scripts/update_batch_state.py `
+python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\update_batch_state.py `
   --repo OWNER/REPO --pr NUMBER `
+  --repository-path C:\path\to\target-repository `
   freeze --head-oid HEAD_OID --thread-id THREAD_ID
-python skills/codex-review-pulse/scripts/update_batch_state.py `
+python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\update_batch_state.py `
   --repo OWNER/REPO --pr NUMBER `
+  --repository-path C:\path\to\target-repository `
   record-outcome --thread-id THREAD_ID --classification fix-now `
   --reference "focused checks passed"
-python skills/codex-review-pulse/scripts/resolve_thread.py THREAD_ID `
-  --repo OWNER/REPO --pr NUMBER
+python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\resolve_thread.py `
+  THREAD_ID --repo OWNER/REPO --pr NUMBER `
+  --repository-path C:\path\to\target-repository
 ```
 
-If the bracketing head reads differ, discard the output and fetch again. Do not
-freeze IDs from a mixed-head snapshot. Custom reviewer logins are persisted in
-the frozen batch and reused by checkpoint-driven resolution. Standalone
-explicit expected-set calls must provide their reviewer logins and cannot
-override an active batch.
+If bracketing head reads differ, discard the snapshot and stop. Do not freeze
+mixed-head evidence. Report non-target threads without resolving them. Stop on
+an unfinished or failed batch and recover it before freezing another.
 
-Codex can inspect another task only when task-list/read/status capabilities are
-available and the task matches the exact PR. If no genuine cancel/interrupt
-capability exists, do not substitute archive for cancellation.
+## Approval diagnostics
 
-## Pi interactive use
+A configured identity's `APPROVED` review with `commit.oid == headRefOid` is
+direct current-head proof. PR-level thumbs-up reactions remain epoch based:
 
-Pi can load the skill directory directly. In PowerShell, start Pi from the
-target repository:
+- a reaction present at cold start is ambiguous;
+- a reaction carried into the first observation of a new head is ambiguous;
+- seeing the same reaction ID again is not a new event;
+- a newly observed ID on an already established unchanged head is proof while
+  it remains present; and
+- deleting and re-adding a reaction can produce a new observed ID, but only the
+  established epoch ordering makes that new object current-head proof.
+
+Do not infer approval ordering from PR `updatedAt`, commit `authoredDate`, or a
+reaction `createdAt` alone.
+
+## Update
+
+Commit the new release candidate and return the source repository to a clean
+state. Then:
 
 ```powershell
-pi --skill "$env:USERPROFILE\.codex\skills\codex-review-pulse"
+$newCommit = git rev-parse HEAD
+python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py update `
+  --source-repository . `
+  --source-commit $newCommit
+python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
+  --expected-version NEW_VERSION `
+  --expected-source-commit $newCommit
 ```
 
-Then invoke:
+Update verifies ownership and integrity of the current installation before an
+atomic directory swap. It refuses a dirty source or modified installation.
 
-```text
-/skill:codex-review-pulse Process one cycle for
-https://github.com/OWNER/REPO/pull/NUMBER. I authorize PR-scoped fixes,
-commits, pushes, exact thread resolution, and one review trigger comment.
-Do not merge.
-```
-
-To make the skill discoverable, add its exact directory to
-`~/.pi/agent/settings.json` and restart Pi or run `/reload`:
-
-```json
-{
-  "skills": ["~/.codex/skills/codex-review-pulse"]
-}
-```
-
-## Pi scheduled use on Windows
-
-Pi does not provide a built-in recurring scheduler. The included wrapper keeps
-Pi session history isolated per PR and uses a named mutex so scheduled cycles
-cannot overlap.
-
-Test one cycle:
+## Uninstall
 
 ```powershell
-$runner = "$env:USERPROFILE\.codex\skills\codex-review-pulse\scripts\invoke-pi-heartbeat.ps1"
-& $runner `
-  -RepositoryPath "C:\path\to\repo" `
-  -PullRequestUrl "https://github.com/OWNER/REPO/pull/NUMBER" `
-  -ScheduledTaskName "Pi Codex Review Pulse NUMBER"
+python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py uninstall
 ```
 
-After the test succeeds, register a 15-minute task:
+Uninstall first verifies the fixed target's manifest and complete inventory.
+It removes only the managed `codex-review-pulse` directory and refuses an
+unverified or foreign directory.
 
-```powershell
-$taskName = "Pi Codex Review Pulse NUMBER"
-$runner = "$env:USERPROFILE\.codex\skills\codex-review-pulse\scripts\invoke-pi-heartbeat.ps1"
-$repo = "C:\path\to\repo"
-$pr = "https://github.com/OWNER/REPO/pull/NUMBER"
-$pwsh = (Get-Command pwsh).Source
-$arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$runner`" -RepositoryPath `"$repo`" -PullRequestUrl `"$pr`" -ScheduledTaskName `"$taskName`""
-$action = New-ScheduledTaskAction -Execute $pwsh -Argument $arguments
-$trigger = New-ScheduledTaskTrigger `
-  -Once `
-  -At (Get-Date).AddMinutes(1) `
-  -RepetitionInterval (New-TimeSpan -Minutes 15) `
-  -RepetitionDuration (New-TimeSpan -Days 3650)
-$settings = New-ScheduledTaskSettingsSet `
-  -MultipleInstances IgnoreNew `
-  -StartWhenAvailable `
-  -ExecutionTimeLimit (New-TimeSpan -Hours 1)
-Register-ScheduledTask `
-  -TaskName $taskName `
-  -Action $action `
-  -Trigger $trigger `
-  -Settings $settings `
-  -Description "Run Codex Review Pulse for one GitHub pull request."
-```
+## Deferred modes
 
-Inspect and control the task with:
-
-```powershell
-Get-ScheduledTask -TaskName $taskName
-Start-ScheduledTask -TaskName $taskName
-Disable-ScheduledTask -TaskName $taskName
-Enable-ScheduledTask -TaskName $taskName
-Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
-```
-
-Pi sessions are stored under
-`~/.pi/agent/codex-review-pulse/<PR-hash>/sessions`. Pi cannot inspect Codex
-desktop or cloud task state, so the scheduled prompt uses the bounded,
-single-comment GitHub fallback.
+Do not start an unattended automation or Windows scheduled task from this
+release candidate. Connector detection, deterministic stalled-review handling,
+plugin packaging, Pi portability, generic reviewers/multi-forge behavior, and
+`gh-address-comments` integration remain deferred.

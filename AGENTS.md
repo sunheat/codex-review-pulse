@@ -54,8 +54,10 @@ worktree/staged-path audit. Report focused and complete results separately.
 
 ## Current phase boundary
 
-The core state phase covers Codex reviewer targeting, current-head approval
-epochs, durable checkpoints, frozen-batch recovery, exact PR-scoped thread
-resolution, tests, and their documentation. It does not cover connector
-detection, plugin packaging, Pi portability, generic reviewer support, or
-reuse/vendor decisions for `gh-address-comments`.
+The core state model is complete. The controlled live-pilot readiness phase
+adds commit-bound approved-review evidence, a commit-pinned independent Windows
+installation, and a read-only supervised-pilot preflight. It does not add an
+unattended recurring heartbeat, connector detection, deterministic
+stalled-review classification, plugin packaging, Pi portability, generic
+reviewer/multi-forge support, or integration/reuse/vendor decisions for
+`gh-address-comments`.

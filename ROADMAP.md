@@ -1,14 +1,28 @@
 # Roadmap
 
-The core state phase implements Codex-only thread targeting, current-head
-approval checkpoints, frozen-batch recovery, and PR-scoped exact resolution.
-It intentionally continues to defer:
+## Completed core model
 
-- broader event and stalled-review classification beyond the core evaluator;
+The core state phase implements Codex-only thread targeting, current-head
+approval checkpoints, commit-bound approved-review evidence, frozen-batch
+recovery, and PR-scoped exact resolution.
+
+## Controlled live-pilot readiness
+
+The current release candidate adds a clean-commit, independently copied pilot
+installation and a read-only readiness command. Its next operational milestone
+is one manually supervised pilot with explicit inputs, a single confirmed
+runner, and mutation-by-mutation authorization.
+
+This is not an unattended recurring heartbeat release.
+
+## Deferred milestones
+
+- deterministic stalled-review and broader event classification;
 - connector detection and server-timestamp review triggering;
-- Codex plugin packaging and installation;
+- Codex plugin packaging and marketplace distribution;
 - Pi portability validation;
 - generic reviewer and multi-forge support; and
-- evaluation of whether to reuse or vendor OpenAI `gh-address-comments`.
+- evaluation of whether to integrate, reuse, or vendor OpenAI
+  `gh-address-comments`.
 
-These are candidate later milestones, not claims about current functionality.
+These remain deferred and are not claims about current functionality.

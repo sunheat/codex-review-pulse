@@ -22,3 +22,7 @@ Historical reactions cannot approve newer code. Some real approvals will be
 reported as ambiguous when event ordering is unavailable; that false negative
 is the intentional fail-closed behavior. Once proof exists and targeted thread
 count is zero, termination is immediate without a quiet interval.
+
+ADR 0004 later adds a separate direct proof for an `APPROVED` review whose
+associated commit exactly equals the current head. It does not relax this
+reaction-epoch decision.

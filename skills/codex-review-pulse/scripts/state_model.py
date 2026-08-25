@@ -128,7 +128,12 @@ def classify_approval_reactions(
             normalize_login((item.get("user") or {}).get("login")) for item in items
         }
         contents = {item.get("content") for item in items}
-        if len(identities) != 1 or len(contents) != 1:
+        created_at_values = {item.get("createdAt") for item in items}
+        if (
+            len(identities) != 1
+            or len(contents) != 1
+            or len(created_at_values) != 1
+        ):
             invalid_ids.add(reaction_id)
             continue
         identity = next(iter(identities))
@@ -150,6 +155,60 @@ def classify_approval_reactions(
                 }
             )
     return qualifying, sorted(invalid_ids)
+
+
+def classify_current_head_approval_reviews(
+    reviews: Iterable[dict[str, Any]],
+    approval_logins: Iterable[str],
+    head_oid: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return APPROVED reviews directly bound to the current head commit."""
+    approval_keys = set(approval_logins)
+    qualifying: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    by_id: dict[str, list[dict[str, Any]]] = {}
+    for review in reviews:
+        review_id = review.get("id")
+        if not isinstance(review_id, str) or not review_id:
+            excluded.append({"id": review_id, "reason": "missing_review_id"})
+            continue
+        by_id.setdefault(review_id, []).append(review)
+
+    for review_id in sorted(by_id):
+        items = by_id[review_id]
+        signatures = {
+            (
+                normalize_login((item.get("author") or {}).get("login")),
+                item.get("state"),
+                (item.get("commit") or {}).get("oid"),
+            )
+            for item in items
+        }
+        if len(signatures) != 1:
+            excluded.append({"id": review_id, "reason": "conflicting_duplicate_review_id"})
+            continue
+        review = items[0]
+        login, state, commit_oid = next(iter(signatures))
+        if login not in approval_keys:
+            excluded.append({"id": review_id, "reason": "non_approval_author"})
+        elif state != "APPROVED":
+            excluded.append({"id": review_id, "reason": "review_not_approved"})
+        elif not isinstance(commit_oid, str) or not commit_oid:
+            excluded.append({"id": review_id, "reason": "missing_review_commit"})
+        elif commit_oid != head_oid:
+            excluded.append({"id": review_id, "reason": "review_commit_not_current_head"})
+        else:
+            qualifying.append(
+                {
+                    "id": review_id,
+                    "login": login,
+                    "state": "APPROVED",
+                    "commit_oid": commit_oid,
+                    "submittedAt": review.get("submittedAt"),
+                    "url": review.get("url"),
+                }
+            )
+    return qualifying, excluded
 
 
 def empty_checkpoint(repository: str, pr_number: int) -> dict[str, Any]:
@@ -184,6 +243,7 @@ def evaluate_snapshot(
     pull_request_state: str,
     review_threads: Iterable[dict[str, Any]],
     reactions: Iterable[dict[str, Any]],
+    reviews: Iterable[dict[str, Any]] = (),
     reviewer_logins: Iterable[str] | None = None,
     approval_logins: Iterable[str] | None = None,
     checkpoint: dict[str, Any] | None = None,
@@ -199,6 +259,9 @@ def evaluate_snapshot(
     )
     qualifying, invalid_reaction_ids = classify_approval_reactions(
         reactions, approvers
+    )
+    qualifying_reviews, excluded_approval_reviews = (
+        classify_current_head_approval_reviews(reviews, approvers, head_oid)
     )
     current_ids = {reaction["id"] for reaction in qualifying}
 
@@ -244,12 +307,18 @@ def evaluate_snapshot(
         "reviewer_logins": reviewers,
     }
     proven_ids = set(epoch["proven_reaction_ids"])
-    if proven_ids:
+    if qualifying_reviews:
         approval_status = "approved_current_head"
+        approval_proof = "pull_request_review"
+    elif proven_ids:
+        approval_status = "approved_current_head"
+        approval_proof = "reaction_epoch"
     elif current_ids:
         approval_status = "ambiguous_existing_reaction"
+        approval_proof = None
     else:
         approval_status = "awaiting_current_head_approval"
+        approval_proof = None
 
     codex_terminal = (
         pull_request_state == "OPEN"
@@ -265,8 +334,20 @@ def evaluate_snapshot(
         "targeted_unresolved_thread_ids": targeted_ids,
         "non_target_unresolved_threads": non_target,
         "qualifying_approval_reactions": qualifying,
+        "qualifying_current_head_approval_reviews": qualifying_reviews,
+        "excluded_approval_reviews": excluded_approval_reviews,
         "invalid_reaction_ids": invalid_reaction_ids,
         "approval_status": approval_status,
+        "approval_proof": approval_proof,
+        "approval_diagnostic": (
+            "A qualifying APPROVED review is directly bound to the current head commit."
+            if approval_proof == "pull_request_review"
+            else "A new reaction node was observed after the current head epoch was established."
+            if approval_proof == "reaction_epoch"
+            else "Existing PR-level reactions cannot be ordered reliably against the current head."
+            if approval_status == "ambiguous_existing_reaction"
+            else "No current-head approval evidence is available."
+        ),
         "proven_current_head_reaction_ids": sorted(proven_ids),
         "approval_epoch_transition": epoch_transition,
         "cold_start": cold_start,

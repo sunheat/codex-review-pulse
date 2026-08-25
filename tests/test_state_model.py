@@ -46,6 +46,7 @@ def evaluate(
     checkpoint: dict | None = None,
     reviewer_logins: list[str] | None = None,
     approval_logins: list[str] | None = None,
+    reviews: list[dict] | None = None,
 ) -> tuple[dict, dict]:
     return evaluate_snapshot(
         repository="Owner/Repo",
@@ -54,6 +55,7 @@ def evaluate(
         pull_request_state="OPEN",
         review_threads=threads or [],
         reactions=reactions or [],
+        reviews=reviews or [],
         reviewer_logins=reviewer_logins,
         approval_logins=approval_logins,
         checkpoint=checkpoint,
@@ -144,6 +146,33 @@ class ApprovalEpochTests(unittest.TestCase):
         self.assertEqual(newer["approval_status"], "ambiguous_existing_reaction")
         self.assertFalse(newer["codex_terminal"])
 
+    def test_existing_reaction_persists_after_head_change(self) -> None:
+        _, checkpoint = evaluate(head="A", reactions=[reaction("R1")])
+        newer, _ = evaluate(head="B", reactions=[reaction("R1")], checkpoint=checkpoint)
+        self.assertEqual(newer["approval_epoch_transition"], "head_changed")
+        self.assertEqual(newer["approval_status"], "ambiguous_existing_reaction")
+        self.assertEqual(newer["proven_current_head_reaction_ids"], [])
+
+    def test_repeated_same_reaction_id_is_not_new_evidence(self) -> None:
+        _, checkpoint = evaluate(head="A", reactions=[reaction("R1")])
+        repeated, _ = evaluate(
+            head="A",
+            reactions=[reaction("R1"), reaction("R1")],
+            checkpoint=checkpoint,
+        )
+        self.assertEqual(repeated["approval_status"], "ambiguous_existing_reaction")
+        self.assertEqual(repeated["proven_current_head_reaction_ids"], [])
+
+    def test_deleted_reaction_readded_with_new_id_is_new_epoch_evidence(self) -> None:
+        _, checkpoint = evaluate(head="A", reactions=[reaction("R1")])
+        awaiting, checkpoint = evaluate(head="A", reactions=[], checkpoint=checkpoint)
+        self.assertEqual(awaiting["approval_status"], "awaiting_current_head_approval")
+        approved, _ = evaluate(
+            head="A", reactions=[reaction("R2")], checkpoint=checkpoint
+        )
+        self.assertEqual(approved["proven_current_head_reaction_ids"], ["R2"])
+        self.assertTrue(approved["codex_terminal"])
+
     def test_checkpoint_persistence_survives_restart(self) -> None:
         _, checkpoint = evaluate(head="A")
         approved, checkpoint = evaluate(
@@ -162,6 +191,32 @@ class ApprovalEpochTests(unittest.TestCase):
     def test_cold_start_existing_approval_is_ambiguous(self) -> None:
         result, _ = evaluate(head="A", reactions=[reaction("R1")])
         self.assertEqual(result["approval_status"], "ambiguous_existing_reaction")
+        self.assertFalse(result["codex_terminal"])
+
+    def test_current_head_approved_review_is_direct_proof(self) -> None:
+        approved_review = {
+            "id": "REV1",
+            "state": "APPROVED",
+            "submittedAt": "2026-08-25T00:00:00Z",
+            "author": {"login": "chatgpt-codex-connector"},
+            "commit": {"oid": "A"},
+            "url": "https://example.test/review/1",
+        }
+        result, _ = evaluate(head="A", reviews=[approved_review])
+        self.assertEqual(result["approval_proof"], "pull_request_review")
+        self.assertEqual(result["approval_status"], "approved_current_head")
+        self.assertTrue(result["codex_terminal"])
+
+    def test_approved_review_for_old_commit_does_not_approve_head(self) -> None:
+        old_review = {
+            "id": "REV1",
+            "state": "APPROVED",
+            "author": {"login": "chatgpt-codex-connector"},
+            "commit": {"oid": "OLD"},
+        }
+        result, _ = evaluate(head="NEW", reviews=[old_review])
+        self.assertEqual(result["approval_status"], "awaiting_current_head_approval")
+        self.assertIsNone(result["approval_proof"])
         self.assertFalse(result["codex_terminal"])
 
     def test_duplicate_logins_and_reaction_ids_are_deterministic(self) -> None:

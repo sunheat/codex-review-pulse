@@ -6,7 +6,7 @@ The core model answers two narrow questions from an authoritative GitHub
 snapshot:
 
 1. Which unresolved threads belong to the configured Codex reviewer?
-2. Can a qualifying thumbs-up be proven to approve the current head OID?
+2. Can a qualifying approval be proven to apply to the current head OID?
 
 It also records enough frozen-batch state to recover when validation or
 publication fails after threads have already been resolved. It does not decide
@@ -52,7 +52,22 @@ explicitly. Checkpoint-driven resolution also requires the live PR head to
 equal the frozen head and inherits the batch's reviewer identities. An explicit
 expected set cannot override an active batch.
 
-## Approval epoch
+## Approval evidence
+
+A configured approval identity's `PullRequestReview` is direct current-head
+proof when its state is `APPROVED` and its associated `commit.oid` exactly
+equals the stable snapshot's `headRefOid`. Missing, dismissed, informational,
+pending, change-requesting, or old-commit reviews do not qualify. This proof is
+available even on cold start because GitHub binds the review object to a
+specific commit.
+
+PR-level thumbs-up reactions do not carry a head OID and use the conservative
+epoch below. GitHub can return an existing reaction when the same actor adds
+the same reaction type again; observing the same node ID again is therefore
+not a new approval. A reaction's ID identifies its node and `createdAt`
+identifies its creation time, but neither proves which head was reviewed.
+
+## Reaction approval epoch
 
 An approval event is identified by its GitHub reaction node ID, content, and
 normalized author. Duplicate identical event IDs collapse deterministically;
@@ -74,9 +89,9 @@ head. Proven IDs survive restart, remain valid only while still present, and
 are discarded when the head changes.
 
 The Codex loop is terminal immediately when the PR is open, targeted unresolved
-count is zero, and at least one current reaction ID is proven for the current
-head. No quiet interval is added. Ambiguous existing reactions are
-non-terminal.
+count is zero, and either a qualifying commit-bound approved review or at least
+one current reaction ID is proven for the current head. No quiet interval is
+added. Ambiguous existing reactions are non-terminal.
 
 ## Frozen batch and recovery
 
@@ -96,12 +111,14 @@ be overwritten by a different freeze; it must be recovered first.
 ## Limits
 
 Atomic replacement prevents torn checkpoint files but does not serialize two
-independent writers. The surrounding heartbeat or scheduled runner must keep
-one active cycle per PR. A cold start with a pre-existing reaction may remain
+independent writers. The supervised pilot must keep one active cycle per PR;
+an unattended runner is deferred. A cold start with a pre-existing reaction
+may remain
 ambiguous until GitHub exposes a new reaction event after the epoch is
 established; the evaluator deliberately prefers a stalled non-terminal result
 to attributing historical approval to a newer head.
 
 See [ADR 0001](../adr/0001-codex-only-thread-scope.md),
-[ADR 0002](../adr/0002-current-head-approval.md), and
-[ADR 0003](../adr/0003-frozen-batch-order.md).
+[ADR 0002](../adr/0002-current-head-approval.md),
+[ADR 0003](../adr/0003-frozen-batch-order.md), and
+[ADR 0004](../adr/0004-current-head-review-proof.md).

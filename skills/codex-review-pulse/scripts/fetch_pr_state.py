@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
-from typing import Any
+from typing import Any, Callable
 
 from checkpoint_store import checkpoint_path, load_checkpoint, save_checkpoint
 from state_model import DEFAULT_CODEX_LOGINS, evaluate_snapshot
@@ -56,11 +56,13 @@ def fetch_connection(
     owner: str,
     repo: str,
     number: int,
+    *,
+    graphql_call: Callable[[str, str, str, int, str | None], dict[str, Any]] = graphql,
 ) -> list[dict[str, Any]]:
     nodes: list[dict[str, Any]] = []
     cursor: str | None = None
     while True:
-        payload = graphql(query, owner, repo, number, cursor)
+        payload = graphql_call(query, owner, repo, number, cursor)
         pull_request = payload["data"]["repository"]["pullRequest"]
         if pull_request is None:
             raise RuntimeError(f"Pull request not found: {owner}/{repo}#{number}")
@@ -81,6 +83,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
     pullRequest(number: $number) {
       number url title state isDraft mergeable reviewDecision
       headRefName headRefOid baseRefName updatedAt
+      headRepository { nameWithOwner }
       author { login }
     }
   }
@@ -106,7 +109,10 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
     pullRequest(number: $number) {
       reviews(first: 100, after: $cursor) {
         pageInfo { hasNextPage endCursor }
-        nodes { id databaseId state body submittedAt updatedAt author { login } url }
+        nodes {
+          id databaseId state body submittedAt updatedAt author { login } url
+          commit { oid }
+        }
       }
     }
   }
@@ -209,28 +215,69 @@ def verify_stable_head(
     return final_pr
 
 
-def main() -> None:
-    args = parse_args()
-    run(["gh", "auth", "status"])
-    owner, repo, number = resolve_target(args.repo, args.pr)
-
-    initial_meta = graphql(META_QUERY, owner, repo, number)
+def fetch_stable_snapshot(
+    owner: str,
+    repo: str,
+    number: int,
+    *,
+    include_conversation: bool = True,
+    graphql_call: Callable[[str, str, str, int, str | None], dict[str, Any]] = graphql,
+) -> dict[str, Any]:
+    """Fetch a head-bracketed, read-only PR snapshot."""
+    initial_meta = graphql_call(META_QUERY, owner, repo, number, None)
     initial_repository = initial_meta["data"].get("repository")
     if initial_repository is None:
         raise RuntimeError(f"Repository not found: {owner}/{repo}")
     if initial_repository.get("pullRequest") is None:
         raise RuntimeError(f"Pull request not found: {owner}/{repo}#{number}")
 
-    review_threads = fetch_connection(THREADS_QUERY, "reviewThreads", owner, repo, number)
-    thumbs_up_reactions = fetch_connection(REACTIONS_QUERY, "reactions", owner, repo, number)
-    conversation_comments = fetch_connection(COMMENTS_QUERY, "comments", owner, repo, number)
-    reviews = fetch_connection(REVIEWS_QUERY, "reviews", owner, repo, number)
-    final_meta = graphql(META_QUERY, owner, repo, number)
+    review_threads = fetch_connection(
+        THREADS_QUERY, "reviewThreads", owner, repo, number,
+        graphql_call=graphql_call,
+    )
+    thumbs_up_reactions = fetch_connection(
+        REACTIONS_QUERY, "reactions", owner, repo, number,
+        graphql_call=graphql_call,
+    )
+    reviews = fetch_connection(
+        REVIEWS_QUERY, "reviews", owner, repo, number,
+        graphql_call=graphql_call,
+    )
+    conversation_comments = (
+        fetch_connection(
+            COMMENTS_QUERY, "comments", owner, repo, number,
+            graphql_call=graphql_call,
+        )
+        if include_conversation
+        else []
+    )
+    final_meta = graphql_call(META_QUERY, owner, repo, number, None)
     final_repository = final_meta["data"].get("repository")
     if final_repository is None:
         raise RuntimeError(f"Repository disappeared while fetching state: {owner}/{repo}")
     pull_request = verify_stable_head(initial_repository, final_repository, number)
-    canonical_repo = final_repository["nameWithOwner"]
+    return {
+        "repository": final_repository["nameWithOwner"],
+        "pull_request": pull_request,
+        "review_threads": review_threads,
+        "thumbs_up_reactions": thumbs_up_reactions,
+        "reviews": reviews,
+        "conversation_comments": conversation_comments,
+    }
+
+
+def main() -> None:
+    args = parse_args()
+    run(["gh", "auth", "status"])
+    owner, repo, number = resolve_target(args.repo, args.pr)
+
+    snapshot = fetch_stable_snapshot(owner, repo, number)
+    pull_request = snapshot["pull_request"]
+    canonical_repo = snapshot["repository"]
+    review_threads = snapshot["review_threads"]
+    thumbs_up_reactions = snapshot["thumbs_up_reactions"]
+    conversation_comments = snapshot["conversation_comments"]
+    reviews = snapshot["reviews"]
 
     state_path = args.state_file or checkpoint_path(
         canonical_repo, number, repository_path=args.repository_path
@@ -243,6 +290,7 @@ def main() -> None:
         pull_request_state=pull_request["state"],
         review_threads=review_threads,
         reactions=thumbs_up_reactions,
+        reviews=reviews,
         reviewer_logins=args.reviewer_logins or DEFAULT_CODEX_LOGINS,
         approval_logins=args.approval_logins or DEFAULT_CODEX_LOGINS,
         checkpoint=previous_checkpoint,
@@ -264,8 +312,14 @@ def main() -> None:
         "non_target_unresolved_threads": evaluation["non_target_unresolved_threads"],
         "thumbs_up_reactions": thumbs_up_reactions,
         "qualifying_approval_reactions": evaluation["qualifying_approval_reactions"],
+        "qualifying_current_head_approval_reviews": evaluation[
+            "qualifying_current_head_approval_reviews"
+        ],
+        "excluded_approval_reviews": evaluation["excluded_approval_reviews"],
         "invalid_reaction_ids": evaluation["invalid_reaction_ids"],
         "approval_status": evaluation["approval_status"],
+        "approval_proof": evaluation["approval_proof"],
+        "approval_diagnostic": evaluation["approval_diagnostic"],
         "proven_current_head_reaction_ids": evaluation["proven_current_head_reaction_ids"],
         "approval_epoch_transition": evaluation["approval_epoch_transition"],
         "codex_terminal": evaluation["codex_terminal"],
