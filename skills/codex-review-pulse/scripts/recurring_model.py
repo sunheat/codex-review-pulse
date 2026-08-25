@@ -10,8 +10,13 @@ import hashlib
 import json
 from typing import Any
 
+from recurring_contract import (
+    RUN_STATE_AUTHORITY_SCHEMA_VERSION,
+    contract_authority_digest,
+    validate_contract_authority_binding,
+)
 
-RUN_STATE_SCHEMA_VERSION = 1
+RUN_STATE_SCHEMA_VERSION = RUN_STATE_AUTHORITY_SCHEMA_VERSION
 
 
 class NextAction(str, Enum):
@@ -56,6 +61,7 @@ def empty_run_state(contract: dict[str, Any]) -> dict[str, Any]:
         "repository": contract["repository"],
         "pull_request_number": contract["pull_request_number"],
         "authorization_id": contract["authorization_id"],
+        "contract_authority_digest": contract_authority_digest(contract),
         "wake_count": 0,
         "last_head_oid": None,
         "stable_observation": None,
@@ -71,6 +77,7 @@ def validate_run_state(
 ) -> dict[str, Any]:
     if state.get("schema_version") != RUN_STATE_SCHEMA_VERSION:
         raise ValueError("Unsupported recurring run-state schema version")
+    validate_contract_authority_binding(state, contract)
     if state.get("repository") != contract["repository"]:
         raise ValueError("Run-state repository does not match run contract")
     if state.get("pull_request_number") != contract["pull_request_number"]:

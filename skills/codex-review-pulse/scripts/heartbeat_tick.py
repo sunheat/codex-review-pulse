@@ -13,7 +13,7 @@ from typing import Any
 from checkpoint_store import load_checkpoint, save_checkpoint
 from manage_pilot_install import verify_installation
 from pilot_preflight import inspect_local_checkout, run_command
-from recurring_contract import load_run_contract
+from recurring_contract import RunContractDriftError, load_run_contract
 from recurring_model import (
     NextAction,
     advance_observation_state,
@@ -162,6 +162,13 @@ def doctor(
                 ),
                 "last_result": state.get("last_result"),
             }
+        except RunContractDriftError as error:
+            run_state = {
+                "ok": False,
+                "exists": True,
+                "reason_code": "run_contract_drift",
+                "error": str(error),
+            }
         except Exception as error:
             run_state = {"ok": False, "exists": True, "error": str(error)}
     blockers = []
@@ -178,7 +185,11 @@ def doctor(
         or run_state.get("failure_latch")
         or run_state.get("inflight_action")
     ):
-        blockers.append("recurring_state_recovery_required")
+        blockers.append(
+            "run_contract_drift"
+            if run_state.get("reason_code") == "run_contract_drift"
+            else "recurring_state_recovery_required"
+        )
     current_time = datetime.fromisoformat(now.replace("Z", "+00:00")).astimezone(UTC)
     if contract.get("expires_at") and current_time >= datetime.fromisoformat(
         contract["expires_at"].replace("Z", "+00:00")
@@ -266,6 +277,17 @@ def plan_tick(
         if state_path.exists():
             try:
                 state = validate_run_state(_read_object(state_path), contract)
+            except RunContractDriftError as error:
+                return {
+                    "schema_version": 1,
+                    "run_status": "paused",
+                    "next_action": NextAction.PAUSE_BLOCKED.value,
+                    "reason_code": "run_contract_drift",
+                    "details": str(error),
+                    "lease": {"status": "releasing"},
+                    "mutation_occurred": False,
+                    "recommended_heartbeat_disposition": "pause",
+                }
             except Exception as error:
                 return {
                     "schema_version": 1,
@@ -445,6 +467,23 @@ def record_trigger(
     contract = load_run_contract(contract_path, repository_path=repository_path)
     if not _execution_source_status(contract, runtime_script_path)["ok"]:
         raise RuntimeError("Heartbeat is not running from the verified installation")
+    state_path = Path(contract["paths"]["run_state"])
+    try:
+        state = validate_run_state(_read_object(state_path), contract)
+    except RunContractDriftError as error:
+        release_lease(
+            contract["paths"]["lease"],
+            repository=contract["repository"],
+            pr_number=contract["pull_request_number"],
+            owner_token=owner_token,
+        )
+        return {
+            "status": "paused",
+            "reason_code": "run_contract_drift",
+            "details": str(error),
+            "mutation_occurred": False,
+            "lease": {"status": "released"},
+        }
     if not _installation_status(contract)["ok"]:
         raise RuntimeError("Heartbeat installation verification failed")
     if not contract["mutation_scope"]["review_trigger"]:
@@ -458,8 +497,6 @@ def record_trigger(
         owner_token=owner_token,
         now=evidence["created_at"],
     )
-    state_path = Path(contract["paths"]["run_state"])
-    state = validate_run_state(_read_object(state_path), contract)
     state = record_trigger_result(
         state,
         attempted_head_oid=evidence["attempted_head_oid"],
@@ -487,6 +524,26 @@ def complete_tick(
     contract = load_run_contract(contract_path, repository_path=repository_path)
     if not _execution_source_status(contract, runtime_script_path)["ok"]:
         raise RuntimeError("Heartbeat is not running from the verified installation")
+    state_path = Path(contract["paths"]["run_state"])
+    try:
+        state = validate_run_state(_read_object(state_path), contract)
+    except RunContractDriftError as error:
+        release_lease(
+            contract["paths"]["lease"],
+            repository=contract["repository"],
+            pr_number=contract["pull_request_number"],
+            owner_token=owner_token,
+        )
+        return {
+            "schema_version": 1,
+            "run_status": "paused",
+            "next_action": NextAction.PAUSE_BLOCKED.value,
+            "reason_code": "run_contract_drift",
+            "details": str(error),
+            "mutation_occurred": mutation_occurred,
+            "recommended_heartbeat_disposition": "pause",
+            "lease": {"status": "released"},
+        }
     if not _installation_status(contract)["ok"]:
         raise RuntimeError("Heartbeat installation verification failed")
     try:
@@ -508,8 +565,6 @@ def complete_tick(
             "recommended_heartbeat_disposition": "pause",
             "lease": {"status": "lost"},
         }
-    state_path = Path(contract["paths"]["run_state"])
-    state = validate_run_state(_read_object(state_path), contract)
     if failure_reason:
         state = latch_failure(
             state, reason_code=failure_reason, observed_at=now, details=final_observation

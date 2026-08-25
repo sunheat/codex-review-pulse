@@ -2,9 +2,9 @@
 
 ## Release-candidate boundary
 
-The core model, immutable installation, supervised preflight, and first
-supervised live pilot are complete. Version `0.3.0` supports both a supervised
-single cycle and a two-to-five-wake bounded recurring release candidate. It
+The core model, immutable installation, supervised preflight, and manually
+reviewed one- and two-wake live pilots are complete. Version `0.3.1` supports
+both a supervised single cycle and repeatable bounded recurring pilots. It
 does not support indefinite unattended operation, plugin packaging, or
 validated Pi portability.
 
@@ -31,7 +31,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
 This extracts `skills/codex-review-pulse` from the named Git commit into
 `$env:USERPROFILE\.agents\skills\codex-review-pulse`. It does not copy the
 mutable working-tree files and does not create a symlink. The installed
-manifest records version `0.3.0`, the full source commit, and SHA-256 file
+manifest records version `0.3.1`, the full source commit, and SHA-256 file
 hashes.
 
 The install fails if the source is dirty, the commit is missing, the commit
@@ -43,7 +43,7 @@ explicit alternate configured location.
 
 ```powershell
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
-  --expected-version 0.3.0 `
+  --expected-version 0.3.1 `
   --expected-source-commit $commit
 ```
 
@@ -61,7 +61,7 @@ python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_prefligh
   --repo OWNER/REPO `
   --pr NUMBER `
   --repository-path C:\path\to\target-repository `
-  --expected-skill-version 0.3.0 `
+  --expected-skill-version 0.3.1 `
   --expected-source-commit $commit `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector `
@@ -81,6 +81,12 @@ target checkout to be clean, its local HEAD to equal the bracketed PR head OID,
 and the `origin` fetch and push URLs to identify the PR head repository. The
 running preflight script itself must be inside the verified installation. It
 emits JSON and exits nonzero when a readiness blocker exists.
+
+With no root override, preflight verifies the exact skill directory containing
+the executing script. This supports isolated commit-pinned installations while
+an older default installation remains untouched. `--install-root` and
+`--skills-root` are equivalent parent-root overrides; supplying different
+values is an error.
 
 Preflight never resolves a thread, posts a comment, creates an issue, commits,
 pushes, or writes the checkpoint. If its in-memory evaluation would establish

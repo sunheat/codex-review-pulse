@@ -31,7 +31,7 @@ Create a JSON object with schema version 1 and validate it before scheduling:
   "reviewer_logins": ["chatgpt-codex-connector"],
   "approval_logins": ["chatgpt-codex-connector"],
   "expected_installation": {
-    "version": "0.3.0",
+    "version": "0.3.1",
     "source_commit": "0123456789abcdef0123456789abcdef01234567",
     "skill_path": "C:\\Users\\USER\\.agents\\skills\\codex-review-pulse"
   },
@@ -94,6 +94,16 @@ python scripts/heartbeat_tick.py `
 
 Do not schedule the pilot unless doctor returns
 `ready_for_bounded_recurring_pilot: true`.
+
+Create the Codex task in a paused state first, then write its final identity
+into `automation_identity` before wake one and activate it only after doctor
+passes. The first run-state write persists a canonical SHA-256 digest of the
+complete normalized contract. Do not amend a live contract: any later change
+to target, identities, installation provenance, mutation scope, wake/deadline,
+task/runner/authorization identity, connector/wait policy, trigger head, or
+runtime paths produces `run_contract_drift`, releases any acquired lease, and
+leaves the run state unchanged. Run-state schema 1 is intentionally not
+silently migrated; start a separately authorized run instead.
 
 ## Observation boundary
 
@@ -171,5 +181,5 @@ recorded attempt. A changed after-head latches recovery.
   contract.
 - Pause on every `PAUSE_*` result or any unrecognized action/reason code.
 - Treat `REQUEST_REVIEW` as a human checkpoint, not mutation permission.
-- Review the first two to five wakes manually. This version is not approved
-  for indefinite unattended recurrence.
+- Review every bounded pilot and its terminal pause/cleanup evidence. This
+  version is not approved for indefinite unattended recurrence.

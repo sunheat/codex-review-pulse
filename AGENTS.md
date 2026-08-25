@@ -32,6 +32,9 @@ documentation, and never make public behavior depend solely on ignored notes.
   both the exact resolved IDs and their classifications.
 - Keep runtime checkpoints outside tracked files, under the target
   repository's Git common directory, and replace them atomically.
+- Bind recurring state to a canonical digest of the complete normalized run
+  contract. Any cross-wake authority drift fails closed before checkpoint or
+  GitHub mutation and must not rewrite state.
 - Use authoritative GitHub GraphQL review-thread state and exact node IDs. Do
   not infer resolution from comment text or flat comment lists.
 
@@ -55,10 +58,9 @@ worktree/staged-path audit. Report focused and complete results separately.
 ## Current phase boundary
 
 The core model, immutable Windows installation, read-only supervised preflight,
-and first supervised live pilot are complete. The current phase prepares a
-two-to-five-wake bounded recurring pilot with an explicit run contract,
-PR-scoped lease, deterministic next-action evaluator, server-event wait policy,
-and durable failure latches. It does not approve long-term unattended
-operation, infer unknown connector capability, package a plugin, validate Pi,
-add generic reviewer/multi-forge support, or decide integration/reuse/vendor
-policy for `gh-address-comments`.
+and manually reviewed one- and two-wake live pilots are complete. Version
+`0.3.1` supports repeatable bounded pilots with an immutable cross-wake
+authority digest and alternate-install self-location. It does not approve
+long-term unattended operation, infer unknown connector capability, package a
+plugin, validate Pi, add generic reviewer/multi-forge support, or decide
+integration/reuse/vendor policy for `gh-address-comments`.

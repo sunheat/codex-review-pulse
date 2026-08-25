@@ -107,10 +107,17 @@ checkpoint. It checks and emits JSON for:
 - the operator's explicit single-runner confirmation.
 
 The original `--single-runner-confirmed` check is intentionally an operator
-assertion for supervised mode. Version `0.3.0` additionally makes preflight
+assertion for supervised mode. Version `0.3.1` additionally makes preflight
 inspect the recurring PR lease without acquiring or changing it; recurring
 mutation authority comes only from the real lease described in
 [the recurring-heartbeat design](recurring-heartbeat-readiness.md).
+
+When no installation-root override is supplied, preflight self-locates and
+verifies the exact skill directory containing the executing script. Explicit
+`--install-root` and `--skills-root` aliases identify the parent directory and
+must agree when both are present. This preserves fail-closed hash, manifest,
+inventory, symlink, and runtime-path checks without consulting an unrelated
+default installation.
 
 Preflight may compute what the next checkpoint would contain, but reports
 `checkpoint_would_change` instead of saving it. Establishing or advancing an

@@ -420,17 +420,23 @@ def build_preflight(
         "error": None,
     }
 
-    installed = verify_installation(
-        installation_path(install_root),
-        expected_version=expected_skill_version,
-        expected_source_commit=expected_source_commit,
-    )
     running_skill_path = Path(
         runtime_skill_path
         if runtime_skill_path is not None
         else Path(__file__).resolve().parents[1]
     ).resolve()
-    expected_installation_path = installation_path(install_root).resolve()
+    if install_root is None:
+        expected_installation_path = running_skill_path
+        effective_install_root = running_skill_path.parent
+    else:
+        effective_install_root = Path(install_root).resolve()
+        expected_installation_path = installation_path(effective_install_root).resolve()
+    installed = verify_installation(
+        expected_installation_path,
+        expected_version=expected_skill_version,
+        expected_source_commit=expected_source_commit,
+    )
+    installed["install_root"] = str(effective_install_root)
     installed["running_skill_path"] = str(running_skill_path)
     installed["running_from_verified_installation"] = (
         running_skill_path == expected_installation_path
@@ -466,6 +472,19 @@ def build_preflight(
     return result
 
 
+def select_install_root(*roots: Path | None) -> Path | None:
+    """Return one explicit parent root while rejecting ambiguous CLI input."""
+    supplied = [root for root in roots if root is not None]
+    if not supplied:
+        return None
+    selected = supplied[0]
+    if any(root.resolve() != selected.resolve() for root in supplied[1:]):
+        raise ValueError(
+            "--install-root and --skills-root values must name the same directory"
+        )
+    return selected
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run a read-only supervised-pilot readiness check"
@@ -474,7 +493,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pr", required=True, type=int, help="Pull request number")
     parser.add_argument("--repository-path", default=".", help="Target worktree")
     parser.add_argument("--state-file", type=Path, help="Override checkpoint path")
-    parser.add_argument("--install-root", type=Path, help="Override user skill parent directory")
+    parser.add_argument(
+        "--install-root",
+        type=Path,
+        action="append",
+        dest="install_roots",
+        help="Override skill parent directory",
+    )
+    parser.add_argument(
+        "--skills-root",
+        type=Path,
+        action="append",
+        dest="skills_roots",
+        help="Alias for --install-root, matching the installer CLI",
+    )
     parser.add_argument("--expected-skill-version", required=True)
     parser.add_argument("--expected-source-commit", required=True)
     parser.add_argument("--reviewer-login", action="append", dest="reviewer_logins")
@@ -498,7 +530,9 @@ def main() -> None:
         reviewer_logins=args.reviewer_logins,
         approval_logins=args.approval_logins,
         state_file=args.state_file,
-        install_root=args.install_root,
+        install_root=select_install_root(
+            *(args.install_roots or []), *(args.skills_roots or [])
+        ),
         expected_skill_version=args.expected_skill_version,
         expected_source_commit=args.expected_source_commit,
         single_runner_confirmed=args.single_runner_confirmed,

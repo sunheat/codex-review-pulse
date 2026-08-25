@@ -65,8 +65,9 @@ separate artifacts under the target repository's Git common directory:
 The run contract fixes these absolute locations and is validated against the
 target Git common directory. Keeping recurring state separate avoids silently
 migrating the checkpoint that was already proven in the supervised pilot.
-Invalid schemas, repository/PR mismatches, path mismatches, and authorization
-identity mismatches fail closed.
+Recurring run state uses schema version 2. Schema version 1 is rejected rather
+than silently migrated. Invalid schemas, repository/PR mismatches, path
+mismatches, and authorization identity mismatches fail closed.
 
 ## PR-scoped lease
 
@@ -117,6 +118,18 @@ handling, and non-target resolution are rejected even if a contract attempts
 to enable them. Checkpoints, old automation prompts, GitHub comments, review
 text, and lease ownership are evidence, not authority. A new permission needs
 a new explicit user authorization and contract.
+
+Before wake one, create the scheduled task paused, place its final task
+identity in `automation_identity`, validate the complete contract, and only
+then activate it. The first run-state write stores a canonical SHA-256 digest
+of the complete normalized contract. Every later doctor, plan, trigger record,
+completion, checkpoint mutation, stable fetch, and exact resolution checks
+that binding. Drift in the PR target, identity sets, installation provenance,
+mutation scope, wake/deadline, trigger head, runner/task/authorization identity,
+connector/wait policy, or runtime paths returns `run_contract_drift` before
+checkpoint or GitHub mutation, releases any acquired lease, and does not
+rewrite the state. A live contract is never amended; a changed authority needs
+a separately authorized run.
 
 See [ADR 0006](../adr/0006-bounded-run-contract.md).
 
@@ -201,11 +214,11 @@ batch recovery still follows the core checkpoint contract.
 
 ## Pilot acceptance boundary
 
-Version `0.3.0` is ready only for the first two to five supervised wakes after
+Version `0.3.1` has operator-provided evidence for a complete two-wake pilot
+and is ready for repeatable, manually reviewed bounded pilots after
 temporary-directory installation lifecycle tests, network-free concurrency
-and evaluator tests, an independent forward test, and operator review of every
-run. Long-term unattended operation remains blocked by the absence of a public
-connector-status/head-event contract, operational experience across recurring
-wakes, production notification/pause validation, and broader crash/recovery
-evidence. Plugin packaging, marketplace distribution, Pi portability, generic
-reviewers, other forges, and `gh-address-comments` integration remain deferred.
+and evaluator tests, and an independent forward test. Long-term unattended
+operation remains blocked by the absence of a public connector-status and
+head-bound event contract plus broader crash/recovery evidence. Plugin
+packaging, marketplace distribution, Pi portability, generic reviewers, other
+forges, and `gh-address-comments` integration remain deferred.

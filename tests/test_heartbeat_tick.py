@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
@@ -16,12 +17,14 @@ sys.path.insert(0, str(SCRIPTS))
 from heartbeat_tick import complete_tick, doctor, plan_tick  # noqa: E402
 from manage_pilot_install import MANIFEST_NAME  # noqa: E402
 from recurring_contract import (  # noqa: E402
+    RunContractDriftError,
     assert_mutation_authority,
+    contract_authority_digest,
     expected_runtime_paths,
     load_run_contract,
     validate_run_contract,
 )
-from recurring_model import empty_run_state  # noqa: E402
+from recurring_model import empty_run_state, validate_run_state  # noqa: E402
 from runner_lease import acquire_lease  # noqa: E402
 
 
@@ -33,7 +36,7 @@ def git_init(path: Path) -> None:
     subprocess.run(["git", "init", str(path)], check=True, capture_output=True, text=True)
 
 
-def create_installation(path: Path, *, version: str = "0.3.0") -> None:
+def create_installation(path: Path, *, version: str = "0.3.1") -> None:
     path.mkdir(parents=True)
     content = b"---\nname: codex-review-pulse\ndescription: Test.\n---\n"
     (path / "SKILL.md").write_bytes(content)
@@ -81,7 +84,7 @@ def create_contract(repository_path: Path, installation: Path, **changes: object
         "reviewer_logins": ["chatgpt-codex-connector"],
         "approval_logins": ["chatgpt-codex-connector"],
         "expected_installation": {
-            "version": "0.3.0",
+            "version": "0.3.1",
             "source_commit": SOURCE_COMMIT,
             "skill_path": str(installation.resolve()),
         },
@@ -134,6 +137,186 @@ def checkout_ok(*args, **kwargs) -> dict:
 
 
 class HeartbeatTickTests(unittest.TestCase):
+    def test_authority_digest_is_canonical_and_covers_every_mutable_category(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            baseline = load_run_contract(contract_path, repository_path=repository)
+            canonical_variant = deepcopy(baseline)
+            canonical_variant["repository"] = "owner/repo"
+            canonical_variant["reviewer_logins"] = ["CHATGPT-CODEX-CONNECTOR[bot]"]
+            canonical_variant["approval_logins"] = ["ChatGPT-Codex-Connector"]
+            canonical_variant["expires_at"] = "2026-08-26T00:00:00Z"
+            self.assertEqual(
+                contract_authority_digest(baseline),
+                contract_authority_digest(canonical_variant),
+            )
+
+            variants: list[tuple[str, dict]] = []
+
+            def changed(label: str, *path_and_value: object) -> None:
+                value = deepcopy(baseline)
+                *path, replacement = path_and_value
+                target = value
+                for key in path[:-1]:
+                    target = target[key]  # type: ignore[index]
+                target[path[-1]] = replacement  # type: ignore[index]
+                variants.append((label, value))
+
+            changed("repository", "repository", "other/repo")
+            changed("pull_request", "pull_request_number", 18)
+            changed("reviewer", "reviewer_logins", ["other-reviewer"])
+            changed("approver", "approval_logins", ["other-approver"])
+            changed("install_version", "expected_installation", "version", "0.3.2")
+            changed("install_commit", "expected_installation", "source_commit", "e" * 40)
+            changed(
+                "install_path",
+                "expected_installation",
+                "skill_path",
+                str((Path(directory_name) / "other-install").resolve()),
+            )
+            for scope in ("code_edits", "resolve_threads", "commit", "push"):
+                changed(f"scope_{scope}", "mutation_scope", scope, False)
+            trigger_variant = deepcopy(baseline)
+            trigger_variant["mutation_scope"]["review_trigger"] = True
+            trigger_variant["review_trigger_head_oid"] = "c" * 40
+            variants.append(("scope_review_trigger", trigger_variant))
+            changed("wake_budget", "maximum_wakes", 4)
+            changed("trigger_head", "review_trigger_head_oid", "d" * 40)
+            changed("expiration", "expires_at", "2026-08-27T00:00:00Z")
+            changed("runner", "runner_identity", "operator-b")
+            changed("automation", "automation_identity", "scheduled-task-b")
+            changed("authorization", "authorization_id", "user-request-2")
+            changed("connector", "connector_capability", "manual_trigger")
+            changed("wait_seconds", "wait_policy", "minimum_server_wait_seconds", 601)
+            changed("wait_observations", "wait_policy", "minimum_stable_observations", 3)
+            for path_name in ("checkpoint", "lease", "run_state"):
+                changed(
+                    f"path_{path_name}",
+                    "paths",
+                    path_name,
+                    str((Path(directory_name) / f"other-{path_name}.json").resolve()),
+                )
+            baseline_digest = contract_authority_digest(baseline)
+            for label, variant in variants:
+                with self.subTest(authority=label):
+                    self.assertNotEqual(
+                        contract_authority_digest(variant), baseline_digest
+                    )
+
+    def test_contract_drift_blocks_restart_without_rewriting_state_and_releases_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            first = plan_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                observation=observation(),
+                now=NOW,
+                owner_token="owner-a",
+                checkout_inspector=checkout_ok,
+                runtime_script_path=verified_runtime(installation),
+            )
+            self.assertEqual(first["next_action"], "WAIT_REVIEW")
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            state_path = Path(contract["paths"]["run_state"])
+            before = state_path.read_bytes()
+            contract["maximum_wakes"] = 4
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+
+            inspected = doctor(
+                contract_path=contract_path,
+                repository_path=repository,
+                now="2026-08-25T00:21:00+00:00",
+                runtime_script_path=verified_runtime(installation),
+            )
+            self.assertIn("run_contract_drift", inspected["blockers"])
+            restarted = plan_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                observation=observation(),
+                now="2026-08-25T00:22:00+00:00",
+                owner_token="secret-restart-token",
+                checkout_inspector=checkout_ok,
+                runtime_script_path=verified_runtime(installation),
+            )
+            self.assertEqual(restarted["reason_code"], "run_contract_drift")
+            self.assertEqual(restarted["lease"]["status"], "releasing")
+            self.assertEqual(state_path.read_bytes(), before)
+            self.assertFalse(Path(contract["paths"]["lease"]).exists())
+            self.assertNotIn("secret-restart-token", json.dumps(restarted))
+
+    def test_old_run_state_schema_fails_closed_without_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            contract = load_run_contract(contract_path, repository_path=repository)
+            state = empty_run_state(contract)
+            state["schema_version"] = 1
+            before = json.dumps(state, sort_keys=True).encode()
+            with self.assertRaisesRegex(ValueError, "Unsupported recurring"):
+                validate_run_state(state, contract)
+            self.assertEqual(json.dumps(state, sort_keys=True).encode(), before)
+
+    def test_completion_and_mutation_authority_fail_closed_after_contract_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            planned = plan_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                observation=observation(targeted_thread_ids=["T1"]),
+                now=NOW,
+                owner_token="secret-owner-token",
+                checkout_inspector=checkout_ok,
+                runtime_script_path=verified_runtime(installation),
+            )
+            self.assertEqual(planned["next_action"], "RUN_BATCH")
+            payload = json.loads(contract_path.read_text(encoding="utf-8"))
+            state_path = Path(payload["paths"]["run_state"])
+            before = state_path.read_bytes()
+            payload["automation_identity"] = "replacement-task"
+            contract_path.write_text(json.dumps(payload), encoding="utf-8")
+            drifted = load_run_contract(contract_path, repository_path=repository)
+
+            with self.assertRaisesRegex(RunContractDriftError, "run_contract_drift"):
+                assert_mutation_authority(
+                    drifted,
+                    owner_token="secret-owner-token",
+                    required_scope="resolve_threads",
+                    now="2026-08-25T00:20:30+00:00",
+                )
+            completed = complete_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                owner_token="secret-owner-token",
+                final_observation=observation(),
+                now="2026-08-25T00:20:30+00:00",
+                mutation_occurred=False,
+                runtime_script_path=verified_runtime(installation),
+            )
+            self.assertEqual(completed["reason_code"], "run_contract_drift")
+            self.assertEqual(completed["lease"]["status"], "released")
+            self.assertNotIn("secret-owner-token", json.dumps(completed))
+            self.assertEqual(state_path.read_bytes(), before)
+            self.assertFalse(Path(payload["paths"]["lease"]).exists())
+
     def test_doctor_is_read_only_and_does_not_create_lease(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             repository = Path(directory_name) / "repo"

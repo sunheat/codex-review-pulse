@@ -21,9 +21,19 @@ from recurring_model import (  # noqa: E402
 
 def contract(**overrides: object) -> dict:
     value = {
+        "schema_version": 1,
         "repository": "owner/repo",
         "pull_request_number": 17,
+        "reviewer_logins": ["chatgpt-codex-connector"],
+        "approval_logins": ["chatgpt-codex-connector"],
+        "expected_installation": {
+            "version": "0.3.1",
+            "source_commit": "a" * 40,
+            "skill_path": str((ROOT / "installed" / "codex-review-pulse").resolve()),
+        },
         "authorization_id": "auth-1",
+        "runner_identity": "operator-a",
+        "automation_identity": "scheduled-task-a",
         "maximum_wakes": 5,
         "expires_at": "2026-08-26T00:00:00+00:00",
         "connector_capability": "unknown",
@@ -38,6 +48,18 @@ def contract(**overrides: object) -> dict:
             "commit": True,
             "push": True,
             "review_trigger": False,
+            "issue_creation": False,
+            "merge": False,
+            "auto_merge": False,
+            "base_change": False,
+            "force_push": False,
+            "generic_reviewer_handling": False,
+            "non_target_thread_resolution": False,
+        },
+        "review_trigger_head_oid": None,
+        "paths": {
+            name: str((ROOT / "runtime" / f"{name}.json").resolve())
+            for name in ("checkpoint", "lease", "run_state")
         },
     }
     value.update(overrides)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -18,6 +19,7 @@ from state_model import canonical_repository, unique_logins
 
 
 RUN_CONTRACT_SCHEMA_VERSION = 1
+RUN_STATE_AUTHORITY_SCHEMA_VERSION = 2
 MUTATION_KEYS = (
     "recurring_execution",
     "code_edits",
@@ -43,6 +45,10 @@ ALWAYS_DENIED = {
     "non_target_thread_resolution",
 }
 CONNECTOR_CAPABILITIES = {"unknown", "manual_trigger", "automatic_review"}
+
+
+class RunContractDriftError(RuntimeError):
+    """The persisted run authority no longer matches the current contract."""
 
 
 def _parse_timestamp(value: object, *, label: str, optional: bool = False) -> str | None:
@@ -89,8 +95,12 @@ def validate_run_contract(
     pr_number = contract.get("pull_request_number")
     if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number < 1:
         raise ValueError("Run-contract pull request number must be positive")
-    reviewers = unique_logins(contract.get("reviewer_logins"), label="reviewer")
-    approvers = unique_logins(contract.get("approval_logins"), label="approval")
+    reviewers = sorted(
+        unique_logins(contract.get("reviewer_logins"), label="reviewer")
+    )
+    approvers = sorted(
+        unique_logins(contract.get("approval_logins"), label="approval")
+    )
 
     installation = contract.get("expected_installation")
     if not isinstance(installation, dict):
@@ -191,6 +201,32 @@ def validate_run_contract(
     return normalized
 
 
+def contract_authority_digest(contract: dict[str, Any]) -> str:
+    """Hash the complete normalized contract as the immutable run authority."""
+    normalized = validate_run_contract(contract)
+    encoded = json.dumps(
+        normalized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def validate_contract_authority_binding(
+    state: dict[str, Any], contract: dict[str, Any]
+) -> None:
+    """Fail closed when a persisted run was created under different authority."""
+    if state.get("schema_version") != RUN_STATE_AUTHORITY_SCHEMA_VERSION:
+        raise ValueError("Unsupported recurring run-state schema version")
+    expected = contract_authority_digest(contract)
+    actual = state.get("contract_authority_digest")
+    if not isinstance(actual, str) or actual != expected:
+        raise RunContractDriftError(
+            "run_contract_drift: persisted authority does not match the run contract"
+        )
+
+
 def load_run_contract(
     path: str | Path, *, repository_path: str | Path | None = None
 ) -> dict[str, Any]:
@@ -209,7 +245,26 @@ def assert_mutation_authority(
     runtime_script_path: str | Path | None = None,
 ) -> dict[str, Any]:
     normalized = validate_run_contract(contract)
-    if required_scope not in MUTATION_KEYS or not normalized["mutation_scope"][required_scope]:
+    run_state_path = Path(normalized["paths"]["run_state"])
+    if not run_state_path.is_file():
+        raise RunContractDriftError(
+            "run_contract_drift: authority-bound run state is missing"
+        )
+    try:
+        run_state = json.loads(run_state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RunContractDriftError(
+            "run_contract_drift: authority-bound run state is unreadable"
+        ) from error
+    if not isinstance(run_state, dict):
+        raise RunContractDriftError(
+            "run_contract_drift: authority-bound run state is invalid"
+        )
+    validate_contract_authority_binding(run_state, normalized)
+    if (
+        required_scope not in MUTATION_KEYS
+        or not normalized["mutation_scope"][required_scope]
+    ):
         raise RuntimeError(f"Run contract does not authorize {required_scope}")
     if runtime_script_path is not None:
         actual = Path(runtime_script_path).resolve()

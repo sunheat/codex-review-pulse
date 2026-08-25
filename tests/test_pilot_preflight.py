@@ -15,7 +15,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from checkpoint_store import save_checkpoint  # noqa: E402
 from manage_pilot_install import MANIFEST_NAME, installation_path  # noqa: E402
-from pilot_preflight import build_preflight  # noqa: E402
+from pilot_preflight import build_preflight, select_install_root  # noqa: E402
 from state_model import empty_checkpoint  # noqa: E402
 
 
@@ -46,7 +46,7 @@ def which(name: str) -> str:
     return f"C:/tools/{name}.exe"
 
 
-def create_installation(root: Path, *, commit: str = EXPECTED_COMMIT, version: str = "0.3.0") -> None:
+def create_installation(root: Path, *, commit: str = EXPECTED_COMMIT, version: str = "0.3.1") -> None:
     target = installation_path(root)
     target.mkdir(parents=True)
     content = b"---\nname: codex-review-pulse\ndescription: Test.\n---\n"
@@ -137,7 +137,7 @@ def run_preflight(
         approval_logins=None,
         state_file=state_file or directory / "state.json",
         install_root=install_root,
-        expected_skill_version="0.3.0",
+        expected_skill_version="0.3.1",
         expected_source_commit=EXPECTED_COMMIT,
         single_runner_confirmed=True,
         runtime_skill_path=installation_path(install_root),
@@ -148,6 +148,88 @@ def run_preflight(
 
 
 class PilotPreflightTests(unittest.TestCase):
+    def test_no_override_verifies_the_executing_alternate_installation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            alternate_root = directory / "alternate"
+            create_installation(alternate_root)
+            alternate = installation_path(alternate_root)
+            result = build_preflight(
+                repository="Owner/Repo",
+                pr_number=17,
+                repository_path=directory,
+                reviewer_logins=None,
+                approval_logins=None,
+                state_file=directory / "state.json",
+                install_root=None,
+                expected_skill_version="0.3.1",
+                expected_source_commit=EXPECTED_COMMIT,
+                single_runner_confirmed=True,
+                runtime_skill_path=alternate,
+                command_runner=command_runner,
+                which=which,
+                graphql_call=FakeSnapshot(),
+            )
+        self.assertTrue(result["ready_for_supervised_pilot"])
+        self.assertTrue(result["installed_skill"]["running_from_verified_installation"])
+        self.assertEqual(
+            result["installed_skill"]["running_skill_path"], str(alternate.resolve())
+        )
+
+    def test_explicit_alternate_root_and_cli_alias_select_the_same_installation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            alternate_root = Path(directory_name) / "alternate"
+            create_installation(alternate_root)
+            self.assertEqual(select_install_root(None, alternate_root), alternate_root)
+            self.assertEqual(
+                select_install_root(alternate_root, alternate_root / "."),
+                alternate_root,
+            )
+
+    def test_conflicting_root_aliases_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            with self.assertRaisesRegex(ValueError, "must name the same directory"):
+                select_install_root(directory / "one", directory / "two")
+
+    def test_conflicting_repeated_root_values_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            with self.assertRaisesRegex(ValueError, "must name the same directory"):
+                select_install_root(
+                    directory / "one", directory / "one", directory / "two"
+                )
+
+    def test_no_override_does_not_fall_back_to_an_unrelated_default_installation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            alternate_root = directory / "alternate"
+            default_root = directory / "default"
+            create_installation(alternate_root)
+            create_installation(default_root, version="0.2.0")
+            alternate = installation_path(alternate_root)
+            result = build_preflight(
+                repository="Owner/Repo",
+                pr_number=17,
+                repository_path=directory,
+                reviewer_logins=None,
+                approval_logins=None,
+                state_file=directory / "state.json",
+                install_root=None,
+                expected_skill_version="0.3.1",
+                expected_source_commit=EXPECTED_COMMIT,
+                single_runner_confirmed=True,
+                runtime_skill_path=alternate,
+                command_runner=command_runner,
+                which=which,
+                graphql_call=FakeSnapshot(),
+            )
+        self.assertTrue(result["ready_for_supervised_pilot"])
+        self.assertNotEqual(
+            result["installed_skill"]["running_skill_path"],
+            str(installation_path(default_root).resolve()),
+        )
+
     def test_preflight_does_not_modify_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             directory = Path(directory_name)
@@ -244,7 +326,7 @@ class PilotPreflightTests(unittest.TestCase):
                 approval_logins=None,
                 state_file=directory / "state.json",
                 install_root=install_root,
-                expected_skill_version="0.3.0",
+                expected_skill_version="0.3.1",
                 expected_source_commit=EXPECTED_COMMIT,
                 single_runner_confirmed=True,
                 runtime_skill_path=ROOT / "skills" / "codex-review-pulse",
@@ -256,6 +338,28 @@ class PilotPreflightTests(unittest.TestCase):
         self.assertIn(
             "preflight_not_running_from_verified_installation", result["blockers"]
         )
+
+    def test_no_override_mutable_source_checkout_fails_install_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            result = build_preflight(
+                repository="Owner/Repo",
+                pr_number=17,
+                repository_path=directory,
+                reviewer_logins=None,
+                approval_logins=None,
+                state_file=directory / "state.json",
+                install_root=None,
+                expected_skill_version="0.3.1",
+                expected_source_commit=EXPECTED_COMMIT,
+                single_runner_confirmed=True,
+                runtime_skill_path=ROOT / "skills" / "codex-review-pulse",
+                command_runner=command_runner,
+                which=which,
+                graphql_call=FakeSnapshot(),
+            )
+        self.assertFalse(result["ready_for_supervised_pilot"])
+        self.assertIn("installed_skill_verification_failed", result["blockers"])
 
     def test_non_git_repository_path_returns_structured_blockers(self) -> None:
         def non_git_checkout(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -275,7 +379,7 @@ class PilotPreflightTests(unittest.TestCase):
                 approval_logins=None,
                 state_file=None,
                 install_root=install_root,
-                expected_skill_version="0.3.0",
+                expected_skill_version="0.3.1",
                 expected_source_commit=EXPECTED_COMMIT,
                 single_runner_confirmed=True,
                 runtime_skill_path=installation_path(install_root),

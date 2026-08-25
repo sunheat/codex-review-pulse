@@ -33,7 +33,7 @@ def git(repository: Path, *arguments: str) -> str:
     return process.stdout.strip()
 
 
-def create_source(repository: Path, version: str = "0.3.0") -> str:
+def create_source(repository: Path, version: str = "0.3.1") -> str:
     git(repository, "init")
     git(repository, "config", "user.email", "tests@example.test")
     git(repository, "config", "user.name", "Test Runner")
@@ -70,7 +70,7 @@ class PilotInstallTests(unittest.TestCase):
             self.assertTrue(target.is_dir())
             verified = verify_installation(
                 target,
-                expected_version="0.3.0",
+                expected_version="0.3.1",
                 expected_source_commit=first_commit,
             )
             self.assertTrue(verified["ok"], verified["errors"])
@@ -80,7 +80,7 @@ class PilotInstallTests(unittest.TestCase):
             self.assertTrue(verify_installation(target)["ok"])
 
             (source / "skills" / "codex-review-pulse" / "VERSION").write_text(
-                "0.3.1\n", encoding="utf-8"
+                "0.3.2\n", encoding="utf-8"
             )
             git(source, "add", "skills/codex-review-pulse/VERSION")
             git(source, "commit", "-m", "test: update skill")
@@ -90,11 +90,11 @@ class PilotInstallTests(unittest.TestCase):
                 source_commit=second_commit,
                 skills_root=install_root,
             )
-            self.assertEqual(updated["skill_version"], "0.3.1")
+            self.assertEqual(updated["skill_version"], "0.3.2")
             self.assertTrue(
                 verify_installation(
                     target,
-                    expected_version="0.3.1",
+                    expected_version="0.3.2",
                     expected_source_commit=second_commit,
                 )["ok"]
             )
