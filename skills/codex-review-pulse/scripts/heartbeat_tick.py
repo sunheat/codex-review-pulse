@@ -617,6 +617,7 @@ def record_trigger(
     repository_path: str | Path,
     owner_token: str,
     evidence: dict[str, Any],
+    now: str | None = None,
     runtime_script_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Record injected trigger evidence; this function never posts a comment."""
@@ -677,7 +678,7 @@ def record_trigger(
         repository=contract["repository"],
         pr_number=contract["pull_request_number"],
         owner_token=owner_token,
-        now=evidence["created_at"],
+        now=now or datetime.now(UTC).isoformat(),
     )
     state = record_trigger_result(
         state,
@@ -687,6 +688,22 @@ def record_trigger(
         comment_node_id=evidence["comment_node_id"],
         created_at=evidence["created_at"],
     )
+    try:
+        assert_lease_owner(
+            contract["paths"]["lease"],
+            repository=contract["repository"],
+            pr_number=contract["pull_request_number"],
+            owner_token=owner_token,
+            now=now or datetime.now(UTC).isoformat(),
+        )
+    except Exception:
+        release_lease(
+            contract["paths"]["lease"],
+            repository=contract["repository"],
+            pr_number=contract["pull_request_number"],
+            owner_token=owner_token,
+        )
+        raise
     save_checkpoint(state_path, state)
     return state["trigger_events"][evidence["attempted_head_oid"]]
 
@@ -778,6 +795,31 @@ def complete_tick(
             "mutation_occurred": mutation_occurred,
             "recommended_heartbeat_disposition": "pause",
             "lease": {"status": "lost"},
+        }
+    checkpoint = _checkpoint_status(contract)
+    try:
+        if not checkpoint["ok"]:
+            raise ValueError(
+                "Persisted checkpoint is invalid: "
+                f"{checkpoint.get('error', 'unknown checkpoint error')}"
+            )
+        _require_persisted_snapshot(final_observation, checkpoint)
+    except ValueError as error:
+        release_lease(
+            contract["paths"]["lease"],
+            repository=contract["repository"],
+            pr_number=contract["pull_request_number"],
+            owner_token=owner_token,
+        )
+        return {
+            "schema_version": 1,
+            "run_status": "paused",
+            "next_action": NextAction.PAUSE_BLOCKED.value,
+            "reason_code": "snapshot_evidence_unavailable",
+            "details": str(error),
+            "mutation_occurred": mutation_occurred,
+            "recommended_heartbeat_disposition": "pause",
+            "lease": {"status": "released"},
         }
     if failure_reason:
         state = latch_failure(

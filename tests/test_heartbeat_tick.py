@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +16,12 @@ SCRIPTS = ROOT / "skills" / "codex-review-pulse" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from checkpoint_store import save_checkpoint  # noqa: E402
-from heartbeat_tick import complete_tick, doctor, plan_tick as _plan_tick  # noqa: E402
+from heartbeat_tick import (  # noqa: E402
+    complete_tick,
+    doctor,
+    plan_tick as _plan_tick,
+    record_trigger,
+)
 from manage_pilot_install import MANIFEST_NAME  # noqa: E402
 from recurring_contract import (  # noqa: E402
     RunContractDriftError,
@@ -261,6 +267,138 @@ class SnapshotBindingTests(unittest.TestCase):
 
             self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
             self.assertEqual(result["reason_code"], "snapshot_evidence_unavailable")
+
+    def test_complete_rejects_final_observation_that_differs_from_persisted_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            planned = plan_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                observation=observation(targeted_thread_ids=["T1"]),
+                now=NOW,
+                owner_token="owner-a",
+                checkout_inspector=checkout_ok,
+                runtime_script_path=verified_runtime(installation),
+            )
+            self.assertEqual(planned["next_action"], "RUN_BATCH")
+            contract = load_run_contract(contract_path, repository_path=repository)
+            state_path = Path(contract["paths"]["run_state"])
+            before = state_path.read_bytes()
+
+            result = complete_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                owner_token="owner-a",
+                final_observation=observation(
+                    targeted_thread_ids=[], approval_status="approved_current_head"
+                ),
+                now="2026-08-25T00:20:30+00:00",
+                mutation_occurred=False,
+                runtime_script_path=verified_runtime(installation),
+            )
+
+            self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+            self.assertEqual(result["reason_code"], "snapshot_evidence_unavailable")
+            self.assertEqual(state_path.read_bytes(), before)
+            self.assertFalse(Path(contract["paths"]["lease"]).exists())
+
+
+class TriggerAuthorityTests(unittest.TestCase):
+    def _prepare_trigger(self, directory_name: str):
+        repository = Path(directory_name) / "repo"
+        repository.mkdir()
+        git_init(repository)
+        installation = Path(directory_name) / "installed" / "codex-review-pulse"
+        create_installation(installation)
+        contract_path = create_contract(
+            repository,
+            installation,
+            mutation_scope={
+                "recurring_execution": True,
+                "code_edits": True,
+                "resolve_threads": True,
+                "commit": True,
+                "push": True,
+                "review_trigger": True,
+                "issue_creation": False,
+                "merge": False,
+                "auto_merge": False,
+                "base_change": False,
+                "force_push": False,
+                "generic_reviewer_handling": False,
+                "non_target_thread_resolution": False,
+            },
+            review_trigger_head_oid="a" * 40,
+        )
+        planned = plan_tick(
+            contract_path=contract_path,
+            repository_path=repository,
+            observation=observation(targeted_thread_ids=["T1"]),
+            now=NOW,
+            owner_token="owner-a",
+            checkout_inspector=checkout_ok,
+            runtime_script_path=verified_runtime(installation),
+        )
+        self.assertEqual(planned["next_action"], "RUN_BATCH")
+        evidence = {
+            "attempted_head_oid": "a" * 40,
+            "head_before": "a" * 40,
+            "head_after": "a" * 40,
+            "comment_node_id": "COMMENT1",
+            "created_at": "1970-01-01T00:00:00+00:00",
+        }
+        return repository, installation, contract_path, evidence
+
+    def test_record_trigger_checks_lease_at_current_time_not_comment_time(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository, installation, contract_path, evidence = self._prepare_trigger(
+                directory_name
+            )
+            current_time = "2026-08-25T00:20:10+00:00"
+            with patch("heartbeat_tick.assert_lease_owner") as lease_check:
+                result = record_trigger(
+                    contract_path=contract_path,
+                    repository_path=repository,
+                    owner_token="owner-a",
+                    evidence=evidence,
+                    now=current_time,
+                    runtime_script_path=verified_runtime(installation),
+                )
+
+            self.assertEqual(result["status"], "emitted")
+            self.assertEqual(lease_check.call_count, 2)
+            self.assertEqual(lease_check.call_args_list[0].kwargs["now"], current_time)
+            self.assertNotEqual(lease_check.call_args_list[0].kwargs["now"], evidence["created_at"])
+
+    def test_record_trigger_rechecks_lease_before_saving_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository, installation, contract_path, evidence = self._prepare_trigger(
+                directory_name
+            )
+            contract = load_run_contract(contract_path, repository_path=repository)
+            state_path = Path(contract["paths"]["run_state"])
+            before = state_path.read_bytes()
+            with patch(
+                "heartbeat_tick.assert_lease_owner",
+                side_effect=[None, RuntimeError("lease expired")],
+            ):
+                with self.assertRaisesRegex(RuntimeError, "lease expired"):
+                    record_trigger(
+                        contract_path=contract_path,
+                        repository_path=repository,
+                        owner_token="owner-a",
+                        evidence=evidence,
+                        now="2026-08-25T00:20:10+00:00",
+                        runtime_script_path=verified_runtime(installation),
+                    )
+
+            self.assertEqual(state_path.read_bytes(), before)
+            self.assertFalse(Path(contract["paths"]["lease"]).exists())
 
 
 class HeartbeatTickTests(unittest.TestCase):
@@ -717,7 +855,7 @@ class HeartbeatTickTests(unittest.TestCase):
                 contract_path=contract_path,
                 repository_path=repository,
                 owner_token="owner-a",
-                final_observation=observation(),
+                final_observation=observation(targeted_thread_ids=["T1"]),
                 now="2026-08-25T00:21:00+00:00",
                 mutation_occurred=True,
                 failure_reason="failed_push_unknown_remote_result",
