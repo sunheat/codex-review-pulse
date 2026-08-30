@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -27,10 +28,15 @@ def default_skills_root() -> Path:
 
 
 def run_git(repository: Path, arguments: list[str], *, text: bool = True) -> Any:
+    environment = os.environ.copy()
+    # Replacement refs make a pinned object name resolve to attacker-controlled
+    # content.  Installation provenance must always read the original object.
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     process = subprocess.run(
         ["git", "-C", str(repository), *arguments],
         capture_output=True,
         text=text,
+        env=environment,
     )
     if process.returncode != 0:
         stderr = process.stderr.strip() if text else process.stderr.decode(errors="replace").strip()
@@ -151,6 +157,7 @@ def verify_installation(
     *,
     expected_version: str | None = None,
     expected_source_commit: str | None = None,
+    expected_source_repository: str | Path | None = None,
 ) -> dict[str, Any]:
     path = Path(target).expanduser().absolute()
     errors: list[str] = []
@@ -208,13 +215,24 @@ def verify_installation(
             trusted_version: str | None = None
             source_repository = manifest.get("source_repository")
             source_commit = expected_source_commit or manifest.get("source_commit")
+            expected_source_path = (
+                Path(expected_source_repository).expanduser().resolve()
+                if expected_source_repository is not None
+                else None
+            )
             if not isinstance(source_repository, str) or not source_repository:
                 errors.append("installation_source_repository_invalid")
             elif not isinstance(source_commit, str) or not source_commit:
                 errors.append("installation_source_commit_invalid")
             else:
                 try:
-                    source_path = Path(source_repository).expanduser().resolve()
+                    manifest_source_path = Path(source_repository).expanduser().resolve()
+                    if (
+                        expected_source_path is not None
+                        and manifest_source_path != expected_source_path
+                    ):
+                        errors.append("installation_source_repository_mismatch")
+                    source_path = expected_source_path or manifest_source_path
                     resolved_commit = run_git(
                         source_path,
                         ["rev-parse", "--verify", f"{source_commit}^{{commit}}"],
@@ -248,6 +266,11 @@ def verify_installation(
         "installation_path": str(path),
         "expected_skill_version": expected_version,
         "expected_source_commit": expected_source_commit,
+        "expected_source_repository": (
+            str(Path(expected_source_repository).expanduser().resolve())
+            if expected_source_repository is not None
+            else None
+        ),
         "installed_skill_version": (manifest or {}).get("skill_version"),
         "installed_source_commit": (manifest or {}).get("source_commit"),
         "errors": errors,

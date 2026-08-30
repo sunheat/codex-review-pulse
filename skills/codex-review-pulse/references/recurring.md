@@ -33,6 +33,7 @@ Create a JSON object with schema version 1 and validate it before scheduling:
   "expected_installation": {
     "version": "0.3.1",
     "source_commit": "0123456789abcdef0123456789abcdef01234567",
+    "source_repository": "C:\\Users\\USER\\git\\codex-review-pulse",
     "skill_path": "C:\\Users\\USER\\.agents\\skills\\codex-review-pulse"
   },
   "mutation_scope": {

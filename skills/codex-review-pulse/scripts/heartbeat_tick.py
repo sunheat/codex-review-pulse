@@ -94,7 +94,85 @@ def _checkpoint_status(contract: dict[str, Any]) -> dict[str, Any]:
         "schema_version": checkpoint.get("schema_version"),
         "recovery_status": recovery,
         "active_batch": batch,
+        "latest_target_snapshot": checkpoint.get("latest_target_snapshot"),
     }
+
+
+def _snapshot_ids(value: Any, *, label: str) -> list[str]:
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item for item in value
+    ):
+        raise ValueError(f"Persisted snapshot {label} is invalid")
+    return sorted(set(value))
+
+
+def _require_persisted_snapshot(observation: dict[str, Any], checkpoint: dict[str, Any]) -> None:
+    """Bind planning inputs to the stable snapshot persisted by fetch_pr_state."""
+    snapshot = checkpoint.get("latest_target_snapshot")
+    if not isinstance(snapshot, dict):
+        raise ValueError("No persisted head-bracketed GraphQL snapshot is available")
+
+    if not isinstance(observation.get("head_oid"), str) or not observation["head_oid"]:
+        raise ValueError("Observation head OID is required")
+    if observation["head_oid"].casefold() != str(snapshot.get("head_oid", "")).casefold():
+        raise ValueError("Observation head OID does not match the persisted snapshot")
+
+    observed_ids = observation.get("targeted_thread_ids")
+    if observed_ids is None:
+        observed_ids = observation.get("targeted_unresolved_thread_ids")
+    persisted_ids = snapshot.get("targeted_unresolved_thread_ids")
+    if persisted_ids is None:
+        persisted_ids = snapshot.get("targeted_thread_ids")
+    if _snapshot_ids(observed_ids, label="targeted thread IDs") != _snapshot_ids(
+        persisted_ids, label="targeted thread IDs"
+    ):
+        raise ValueError("Observation targeted thread IDs do not match the persisted snapshot")
+
+    observed_non_target = _snapshot_ids(
+        observation.get("non_target_thread_ids") or [], label="non-target thread IDs"
+    )
+    persisted_non_target = _snapshot_ids(
+        snapshot.get("non_target_thread_ids") or [], label="non-target thread IDs"
+    )
+    if observed_non_target != persisted_non_target:
+        raise ValueError(
+            "Observation non-target thread IDs do not match the persisted snapshot"
+        )
+
+    fields = (
+        "head_repository",
+        "pull_request_state",
+        "approval_status",
+        "codex_review_in_progress",
+        "review_activity_ok",
+        "snapshot_stable",
+        "mixed_head",
+        "auth_ok",
+        "api_ok",
+        "server_time",
+    )
+    for field in fields:
+        if field not in observation or field not in snapshot:
+            raise ValueError(f"Snapshot evidence field is missing: {field}")
+        if observation[field] != snapshot[field]:
+            raise ValueError(f"Observation field does not match the persisted snapshot: {field}")
+
+    if _snapshot_ids(
+        observation.get("review_in_progress_reaction_ids") or [],
+        label="review activity reaction IDs",
+    ) != _snapshot_ids(
+        snapshot.get("review_in_progress_reaction_ids") or [],
+        label="review activity reaction IDs",
+    ):
+        raise ValueError(
+            "Observation review activity IDs do not match the persisted snapshot"
+        )
+
+    if observation.get("reviewer_logins") is not None:
+        if _snapshot_ids(observation["reviewer_logins"], label="reviewer logins") != _snapshot_ids(
+            snapshot.get("reviewer_logins") or [], label="reviewer logins"
+        ):
+            raise ValueError("Observation reviewer identities do not match the persisted snapshot")
 
 
 def _installation_status(contract: dict[str, Any]) -> dict[str, Any]:
@@ -103,6 +181,7 @@ def _installation_status(contract: dict[str, Any]) -> dict[str, Any]:
         expected["skill_path"],
         expected_version=expected["version"],
         expected_source_commit=expected["source_commit"],
+        expected_source_repository=expected["source_repository"],
     )
 
 
@@ -416,6 +495,19 @@ def plan_tick(
             }
 
         checkpoint = _checkpoint_status(contract)
+        try:
+            _require_persisted_snapshot(observation, checkpoint)
+        except ValueError as error:
+            return {
+                "schema_version": 1,
+                "run_status": "paused",
+                "next_action": NextAction.PAUSE_BLOCKED.value,
+                "reason_code": "snapshot_evidence_unavailable",
+                "details": str(error),
+                "mutation_occurred": False,
+                "recommended_heartbeat_disposition": "pause",
+                "lease": {"status": "releasing"},
+            }
         local_checkout = checkout_inspector(
             repository_path,
             expected_head_repository=observation.get("head_repository"),

@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+import contextlib
+import io
 import sys
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "codex-review-pulse" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from resolve_thread import resolve_exact_thread, select_resolution_context  # noqa: E402
+from resolve_thread import main, resolve_exact_thread, select_resolution_context  # noqa: E402
 
 
 class ResolveThreadScopeTests(unittest.TestCase):
@@ -288,6 +291,59 @@ class ResolveThreadScopeTests(unittest.TestCase):
                 graphql_call=fake_graphql,
             )
         self.assertEqual(len(calls), 1)
+
+    def test_already_resolved_path_rechecks_authority_before_checkpoint_write(self) -> None:
+        checkpoint = {
+            "approval_epoch": {"head_oid": "HEAD1"},
+            "active_batch": {
+                "targeted_thread_ids": ["T1"],
+                "frozen_head_oid": "HEAD1",
+                "reviewer_logins": ["chatgpt-codex-connector"],
+                "thread_outcomes": {"T1": {"classification": "no-fix"}},
+                "resolved_thread_ids": [],
+            }
+        }
+        contract = {
+            "repository": "owner/repo",
+            "pull_request_number": 17,
+            "paths": {"checkpoint": "C:/checkpoint.json"},
+        }
+        authority_checks: list[str] = []
+
+        def authority(*args, **kwargs) -> None:
+            authority_checks.append(kwargs["required_scope"])
+            if len(authority_checks) == 2:
+                raise RuntimeError("lease lost before checkpoint write")
+
+        with patch.object(sys, "argv", [
+            "resolve_thread.py",
+            "T1",
+            "--repo",
+            "owner/repo",
+            "--pr",
+            "17",
+            "--state-file",
+            "C:/checkpoint.json",
+            "--run-contract",
+            "C:/contract.json",
+            "--lease-owner-token",
+            "owner-a",
+        ]), patch("resolve_thread.load_checkpoint", return_value=checkpoint), patch(
+            "resolve_thread.validate_checkpoint"
+        ), patch(
+            "resolve_thread.load_mutation_run_contract", return_value=contract
+        ), patch(
+            "resolve_thread.assert_mutation_authority", side_effect=authority
+        ), patch(
+            "resolve_thread.resolve_exact_thread",
+            return_value={"id": "T1", "isResolved": True, "alreadyResolved": True},
+        ), patch("resolve_thread.save_checkpoint") as save:
+            with self.assertRaisesRegex(RuntimeError, "lease lost"):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    main()
+
+        self.assertEqual(authority_checks, ["resolve_threads", "resolve_threads"])
+        save.assert_not_called()
 
 
 if __name__ == "__main__":

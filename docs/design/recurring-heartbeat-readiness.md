@@ -110,7 +110,8 @@ The run contract is the only recurring authorization input. It fixes:
 
 - canonical repository and PR number;
 - reviewer and approval identities;
-- installed skill version, source commit, and independent installation path;
+- installed skill version, source commit, independently bound source repository,
+  and independent installation path;
 - separate booleans for recurring execution, code edits, exact resolution,
   commit, push, and one review trigger bound to an exact head OID;
 - maximum wakes and optional expiration;

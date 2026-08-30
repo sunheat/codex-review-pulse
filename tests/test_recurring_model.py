@@ -29,6 +29,7 @@ def contract(**overrides: object) -> dict:
         "expected_installation": {
             "version": "0.3.1",
             "source_commit": "a" * 40,
+            "source_repository": str((ROOT / "source").resolve()),
             "skill_path": str((ROOT / "installed" / "codex-review-pulse").resolve()),
         },
         "authorization_id": "auth-1",

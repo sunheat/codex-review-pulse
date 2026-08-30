@@ -374,6 +374,7 @@ def build_preflight(
             approval_logins=approval_logins or list(DEFAULT_CODEX_LOGINS),
             checkpoint=checkpoint,
             observed_at=result["generated_at"],
+            head_repository=head_repository,
         )
     except Exception as error:
         result["approval"] = {"ok": False, "error": str(error)}

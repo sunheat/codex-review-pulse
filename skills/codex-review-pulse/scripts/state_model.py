@@ -248,6 +248,7 @@ def evaluate_snapshot(
     approval_logins: Iterable[str] | None = None,
     checkpoint: dict[str, Any] | None = None,
     observed_at: str | None = None,
+    head_repository: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Evaluate one network snapshot and return result plus next checkpoint."""
     if not isinstance(head_oid, str) or not head_oid:
@@ -301,11 +302,6 @@ def evaluate_snapshot(
         epoch_transition = "unchanged"
 
     next_checkpoint["approval_epoch"] = epoch
-    next_checkpoint["latest_target_snapshot"] = {
-        "head_oid": head_oid,
-        "targeted_unresolved_thread_ids": targeted_ids,
-        "reviewer_logins": reviewers,
-    }
     proven_ids = set(epoch["proven_reaction_ids"])
     if qualifying_reviews:
         approval_status = "approved_current_head"
@@ -325,6 +321,27 @@ def evaluate_snapshot(
         and not targeted_ids
         and approval_status == "approved_current_head"
     )
+    next_checkpoint["latest_target_snapshot"] = {
+        "head_oid": head_oid,
+        "targeted_unresolved_thread_ids": targeted_ids,
+        "non_target_thread_ids": sorted(
+            item["id"]
+            for item in non_target
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        ),
+        "reviewer_logins": reviewers,
+        "head_repository": head_repository or canonical_repository(repository),
+        "pull_request_state": pull_request_state,
+        "approval_status": approval_status,
+        "codex_review_in_progress": False,
+        "review_activity_ok": True,
+        "review_in_progress_reaction_ids": [],
+        "snapshot_stable": True,
+        "mixed_head": False,
+        "auth_ok": True,
+        "api_ok": True,
+        "server_time": observed_at,
+    }
     result = {
         "repository": canonical_repository(repository),
         "pull_request_number": pr_number,

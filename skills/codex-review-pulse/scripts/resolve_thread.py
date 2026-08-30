@@ -314,6 +314,10 @@ def main() -> None:
     batch = (checkpoint or {}).get("active_batch")
     if isinstance(batch, dict) and args.thread_id in batch.get("targeted_thread_ids", []):
         checkpoint = record_resolved_thread(checkpoint, args.thread_id)
+        # The network call may have outlived this runner's lease. Recheck
+        # authority even when GitHub reported the thread already resolved so a
+        # stale checkpoint cannot overwrite a newer runner's state.
+        recheck_mutation_authority()
         save_checkpoint(path, checkpoint)
     print(json.dumps(thread))
 

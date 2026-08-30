@@ -108,11 +108,14 @@ def validate_run_contract(
         raise ValueError("Run contract requires expected installation provenance")
     version = installation.get("version")
     source_commit = installation.get("source_commit")
+    source_repository = installation.get("source_repository")
     skill_path = installation.get("skill_path")
     if not isinstance(version, str) or not version:
         raise ValueError("Expected skill version is required")
     if not isinstance(source_commit, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", source_commit):
         raise ValueError("Expected source commit must be a full Git OID")
+    if not isinstance(source_repository, str) or not Path(source_repository).is_absolute():
+        raise ValueError("Expected source repository must be absolute")
     if not isinstance(skill_path, str) or not Path(skill_path).is_absolute():
         raise ValueError("Expected skill path must be absolute")
 
@@ -194,6 +197,7 @@ def validate_run_contract(
     normalized["expected_installation"] = {
         "version": version,
         "source_commit": source_commit.casefold(),
+        "source_repository": str(Path(source_repository).resolve()),
         "skill_path": str(Path(skill_path).resolve()),
     }
     normalized["paths"] = {
@@ -396,6 +400,7 @@ def assert_mutation_authority(
             installation["skill_path"],
             expected_version=installation["version"],
             expected_source_commit=installation["source_commit"],
+            expected_source_repository=installation["source_repository"],
         )
         if not verified["ok"]:
             raise RuntimeError("Recurring mutation installation verification failed")

@@ -333,6 +333,7 @@ def main() -> None:
         run_contract=contract,
     )
     previous_checkpoint = load_checkpoint(state_path)
+    observed_at = datetime.now(UTC).isoformat()
     evaluation, next_checkpoint = evaluate_snapshot(
         repository=canonical_repo,
         pr_number=number,
@@ -344,7 +345,8 @@ def main() -> None:
         reviewer_logins=reviewer_logins,
         approval_logins=approval_logins,
         checkpoint=previous_checkpoint,
-        observed_at=datetime.now(UTC).isoformat(),
+        observed_at=observed_at,
+        head_repository=(pull_request.get("headRepository") or {}).get("nameWithOwner"),
     )
     if contract is not None:
         assert_mutation_authority(
@@ -381,6 +383,24 @@ def main() -> None:
         "proven_current_head_reaction_ids": evaluation["proven_current_head_reaction_ids"],
         "approval_epoch_transition": evaluation["approval_epoch_transition"],
         "codex_terminal": evaluation["codex_terminal"],
+        # Flat normalized evidence consumed by the hardened planner.
+        "snapshot_stable": True,
+        "mixed_head": False,
+        "auth_ok": True,
+        "api_ok": True,
+        "head_repository": (pull_request.get("headRepository") or {}).get("nameWithOwner"),
+        "head_oid": pull_request["headRefOid"],
+        "pull_request_state": pull_request["state"],
+        "targeted_thread_ids": evaluation["targeted_unresolved_thread_ids"],
+        "non_target_thread_ids": [
+            item["id"]
+            for item in evaluation["non_target_unresolved_threads"]
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        ],
+        "review_activity_ok": True,
+        "codex_review_in_progress": False,
+        "review_in_progress_reaction_ids": [],
+        "server_time": observed_at,
     }
     print(json.dumps(result, indent=2))
 

@@ -164,6 +164,84 @@ class PilotInstallTests(unittest.TestCase):
                 "installation_file_hash_mismatch:scripts/probe.py", result["errors"]
             )
 
+    def test_replacement_refs_cannot_reauthorize_modified_source_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as source_directory, tempfile.TemporaryDirectory() as install_directory:
+            source = Path(source_directory)
+            base_commit = create_source(source)
+            install(
+                source_repository=source,
+                source_commit=base_commit,
+                skills_root=install_directory,
+            )
+            probe = source / "skills" / "codex-review-pulse" / "scripts" / "probe.py"
+            probe.write_text("print('replacement')\n", encoding="utf-8")
+            git(source, "add", "skills/codex-review-pulse/scripts/probe.py")
+            replacement_commit = git(
+                source, "commit", "-m", "test: add replacement object"
+            )
+            replacement_commit = git(source, "rev-parse", "HEAD")
+            subprocess.run(
+                ["git", "-C", str(source), "replace", base_commit, replacement_commit],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            try:
+                target = installation_path(install_directory)
+                installed_probe = target / "scripts" / "probe.py"
+                installed_probe.write_text("print('replacement')\n", encoding="utf-8")
+                manifest_path = target / ".codex-review-pulse-install.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest["files"]["scripts/probe.py"] = hashlib.sha256(
+                    installed_probe.read_bytes()
+                ).hexdigest()
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                result = verify_installation(
+                    target,
+                    expected_version="0.4.0",
+                    expected_source_commit=base_commit,
+                    expected_source_repository=source,
+                )
+            finally:
+                subprocess.run(
+                    ["git", "-C", str(source), "replace", "-d", base_commit],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertIn("installation_manifest_inventory_mismatch", result["errors"])
+            self.assertIn(
+                "installation_file_hash_mismatch:scripts/probe.py", result["errors"]
+            )
+
+    def test_contract_source_repository_is_independently_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as source_directory, tempfile.TemporaryDirectory() as install_directory, tempfile.TemporaryDirectory() as other_directory:
+            source = Path(source_directory)
+            commit = create_source(source)
+            install(
+                source_repository=source,
+                source_commit=commit,
+                skills_root=install_directory,
+            )
+            target = installation_path(install_directory)
+            manifest_path = target / ".codex-review-pulse-install.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["source_repository"] = str(Path(other_directory).resolve())
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            result = verify_installation(
+                target,
+                expected_version="0.4.0",
+                expected_source_commit=commit,
+                expected_source_repository=source,
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertIn("installation_source_repository_mismatch", result["errors"])
+
     def test_symlinked_inventory_file_is_rejected_without_following_it(self) -> None:
         with tempfile.TemporaryDirectory() as source_directory, tempfile.TemporaryDirectory() as install_directory, tempfile.TemporaryDirectory() as external_directory:
             source = Path(source_directory)
