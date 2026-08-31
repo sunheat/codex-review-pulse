@@ -1106,6 +1106,46 @@ class HeartbeatTickTests(unittest.TestCase):
             self.assertEqual(state_path.read_bytes(), before)
             self.assertEqual(json.loads(lease_path.read_text())["owner_token"], "owner-a")
 
+    def test_cadence_failure_rereads_state_after_acquiring_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            _seed_persisted_snapshot(contract_path, observation())
+            contract = load_run_contract(contract_path, repository_path=repository)
+            state_path = Path(contract["paths"]["run_state"])
+            raced_state = empty_run_state(contract)
+            raced_state["wake_count"] = 7
+            raced_state["last_wake_id"] = "other-wake"
+            raced_state["next_not_before"] = "2026-08-25T00:30:00+00:00"
+
+            def acquire_after_state_race(*args, **kwargs):
+                save_checkpoint(state_path, raced_state)
+                return acquire_lease(*args, **kwargs)
+
+            with patch("heartbeat_tick.acquire_lease", side_effect=acquire_after_state_race):
+                result = _plan_tick(
+                    contract_path=contract_path,
+                    repository_path=repository,
+                    observation=observation(),
+                    now=NOW,
+                    owner_token="owner-b",
+                    wake_id="wake-b",
+                    pause_heartbeat=lambda: True,
+                    checkout_inspector=checkout_ok,
+                    runtime_script_path=verified_runtime(installation),
+                )
+
+            self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+            self.assertEqual(result["reason_code"], "cadence_not_elapsed")
+            self.assertEqual(result["wake_count"], 7)
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["wake_count"], 7)
+            self.assertEqual(state["failure_latch"]["reason_code"], "cadence_not_elapsed")
+
     def test_final_wait_pauses_without_allowing_an_extra_wake(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             repository = Path(directory_name) / "repo"

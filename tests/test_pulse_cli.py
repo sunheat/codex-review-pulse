@@ -352,6 +352,46 @@ class PulseCliTests(unittest.TestCase):
         self.assertEqual(harness.graphql_count(), calls_after_first)
         self.assertEqual(second, first)
 
+    def test_retry_snapshot_preserves_frozen_batch_when_threads_disappear(self) -> None:
+        harness = CliHarness(self)
+        harness.begin_and_snapshot(
+            thread={"id": "T1", "root_author": "chatgpt-codex-connector"}
+        )
+        harness.json_output(harness.run("freeze"))
+        harness.json_output(
+            harness.run(
+                "retry",
+                "--reason-code",
+                "validation_failed",
+                "--signature",
+                "test-failure",
+            )
+        )
+        harness.json_output(
+            harness.run("complete-wake", "--schedule-reanchored", now="2026-08-26T00:01:00+00:00")
+        )
+
+        fixture = harness.read_fixture()
+        fixture["threads"] = []
+        harness.write_fixture(fixture)
+        harness.json_output(
+            harness.run(
+                "begin-wake",
+                "--pause-confirmed",
+                wake_id="wake-2",
+                now="2026-08-26T00:11:00+00:00",
+            )
+        )
+        result = harness.json_output(
+            harness.run("snapshot", wake_id="wake-2", now="2026-08-26T00:11:00+00:00")
+        )
+
+        self.assertEqual(result["decision"]["next_action"], "RUN_BATCH")
+        self.assertEqual(result["decision"]["reason_code"], "resume_pending_batch")
+        state = load_checkpoint(checkpoint_path("owner/repo", 17, repository_path=harness.checkout))
+        self.assertEqual(state["latest_target_snapshot"]["targeted_unresolved_thread_ids"], ["T1"])
+        self.assertEqual(state["active_batch"]["targeted_thread_ids"], ["T1"])
+
     def test_exact_resolve_requires_outcome_and_uses_one_mutation(self) -> None:
         harness = CliHarness(self)
         path = harness.begin_and_snapshot(

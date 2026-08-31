@@ -160,6 +160,7 @@ def ensure_default_lifecycle(checkpoint: dict[str, Any]) -> dict[str, Any]:
         "review_epoch_state": _default_review_epoch(),
         "trigger_events": {},
         "last_snapshot_wake_id": None,
+        "resume_pending_batch": False,
         "automation_policy": default_policy(),
         "automation_policy_digest": None,
         "retry_state": {
@@ -473,6 +474,7 @@ def begin_wake(
     state["scheduled_task_disposition"] = "PAUSED"
     state["last_decision"] = None
     state["last_wake_result"] = None
+    state["resume_pending_batch"] = pending_batch
     if pending_batch:
         state["wake_phase"] = "processing"
         state["last_decision"] = _decision(
@@ -618,6 +620,63 @@ def record_snapshot(
     _require_active_wake(state, wake_id)
     if state.get("wake_phase") == "snapshotted" and state.get("last_decision"):
         return state, deepcopy(state["last_decision"])
+    active_batch = state.get("active_batch")
+    resume_pending_batch = (
+        state.get("resume_pending_batch") is True
+        and isinstance(active_batch, dict)
+        and (active_batch.get("publication") or {}).get("status") != "succeeded"
+    )
+    if resume_pending_batch:
+        frozen_head_oid = active_batch.get("frozen_head_oid")
+        frozen_thread_ids = list(active_batch.get("targeted_thread_ids") or [])
+        if snapshot.get("head_oid") != frozen_head_oid:
+            result = _pause(
+                state,
+                reason_code="retry_batch_head_changed",
+                now=_iso(now),
+                evidence={
+                    "frozen_head_oid": frozen_head_oid,
+                    "observed_head_oid": snapshot.get("head_oid"),
+                },
+                action="PAUSE_RECOVERY",
+            )
+            state["last_snapshot_wake_id"] = wake_id
+            return state, result
+        if (
+            snapshot.get("snapshot_stable") is not True
+            or not snapshot.get("review_activity_ok", True)
+            or snapshot.get("pull_request_state") != "OPEN"
+        ):
+            result = _pause(
+                state,
+                reason_code="retry_batch_snapshot_invalid",
+                now=_iso(now),
+                evidence={
+                    "head_oid": snapshot.get("head_oid"),
+                    "pull_request_state": snapshot.get("pull_request_state"),
+                    "review_activity_ok": snapshot.get("review_activity_ok"),
+                    "snapshot_stable": snapshot.get("snapshot_stable"),
+                },
+                action="PAUSE_RECOVERY",
+            )
+            state["last_snapshot_wake_id"] = wake_id
+            return state, result
+        latest_target_snapshot = state.setdefault("latest_target_snapshot", {})
+        latest_target_snapshot["head_oid"] = frozen_head_oid
+        latest_target_snapshot["targeted_unresolved_thread_ids"] = frozen_thread_ids
+        latest_target_snapshot["reviewer_logins"] = list(
+            active_batch.get("reviewer_logins") or DEFAULT_CODEX_LOGINS
+        )
+        state["last_snapshot_wake_id"] = wake_id
+        state["resume_pending_batch"] = False
+        state["wake_phase"] = "snapshotted"
+        result = _decision(
+            "RUN_BATCH",
+            "resume_pending_batch",
+            targeted_thread_ids=frozen_thread_ids,
+        )
+        _set_last_result(state, result)
+        return state, result
     state["latest_target_snapshot"] = {
         "head_oid": snapshot.get("head_oid"),
         "targeted_unresolved_thread_ids": list(snapshot.get("targeted_thread_ids") or []),

@@ -145,6 +145,73 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertTrue(result["resume_pending_batch"])
         self.assertEqual(state["last_decision"]["reason_code"], "resume_pending_batch")
 
+    def test_retry_resume_preserves_frozen_targets_when_review_threads_disappear(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(
+            state, snapshot(targeted=["T1"]), wake_id="wake-1", now=NOW
+        )
+        state, _ = pulse.freeze_default_batch(state, wake_id="wake-1")
+        state, _ = pulse.record_retry(
+            state,
+            wake_id="wake-1",
+            reason_code="transient_validation_failure",
+            now=NOW,
+            signature="test-failure",
+        )
+        state, _ = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:01:00+00:00",
+            schedule_next_wake=lambda _: True,
+        )
+        state, _ = started(
+            state, wake_id="wake-2", now="2026-08-26T00:11:00+00:00"
+        )
+
+        state, result = pulse.record_snapshot(
+            state, snapshot(targeted=[]), wake_id="wake-2", now="2026-08-26T00:11:00+00:00"
+        )
+
+        self.assertEqual(result["next_action"], "RUN_BATCH")
+        self.assertEqual(result["reason_code"], "resume_pending_batch")
+        self.assertEqual(state["latest_target_snapshot"]["targeted_unresolved_thread_ids"], ["T1"])
+        state, batch = pulse.freeze_default_batch(state, wake_id="wake-2")
+        self.assertEqual(batch["targeted_thread_ids"], ["T1"])
+
+    def test_retry_resume_fails_closed_when_frozen_head_changes(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(
+            state, snapshot(targeted=["T1"]), wake_id="wake-1", now=NOW
+        )
+        state, _ = pulse.freeze_default_batch(state, wake_id="wake-1")
+        state, _ = pulse.record_retry(
+            state,
+            wake_id="wake-1",
+            reason_code="transient_validation_failure",
+            now=NOW,
+            signature="test-failure",
+        )
+        state, _ = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:01:00+00:00",
+            schedule_next_wake=lambda _: True,
+        )
+        state, _ = started(
+            state, wake_id="wake-2", now="2026-08-26T00:11:00+00:00"
+        )
+
+        state, result = pulse.record_snapshot(
+            state,
+            snapshot(head="HEAD2", targeted=[]),
+            wake_id="wake-2",
+            now="2026-08-26T00:11:00+00:00",
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "retry_batch_head_changed")
+        self.assertEqual(state["active_batch"]["frozen_head_oid"], "HEAD1")
+
     def test_repeated_no_progress_reaches_pause_limit(self) -> None:
         state, _ = pulse.begin_wake(
             empty_checkpoint("Owner/Repo", 17),

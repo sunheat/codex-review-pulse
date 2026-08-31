@@ -586,37 +586,6 @@ def plan_tick(
                 "mutation_occurred": False,
                 "lease": {"status": "unchanged"},
             }
-        next_not_before = existing_state.get("next_not_before")
-        if next_not_before is not None:
-            current_time = datetime.fromisoformat(now.replace("Z", "+00:00")).astimezone(UTC)
-            if current_time < datetime.fromisoformat(next_not_before.replace("Z", "+00:00")).astimezone(UTC):
-                blocked = latch_failure(
-                    existing_state,
-                    reason_code="cadence_not_elapsed",
-                    observed_at=now,
-                    details={"next_not_before": next_not_before, "wake_id": wake_id},
-                )
-                blocked["active_wake_id"] = None
-                blocked["wake_phase"] = "paused"
-                blocked["scheduled_task_disposition"] = "PAUSED"
-                blocked["last_wake_id"] = wake_id
-                blocked["wake_completed_at"] = now
-                blocked["last_result"] = {
-                    "next_action": NextAction.PAUSE_BLOCKED.value,
-                    "reason_code": "cadence_not_elapsed",
-                    "recommended_heartbeat_disposition": "pause",
-                    "next_not_before": next_not_before,
-                    "wake_id": wake_id,
-                }
-                save_checkpoint(state_path, blocked)
-                return {
-                    "schema_version": 1,
-                    "run_status": "paused",
-                    **blocked["last_result"],
-                    "wake_count": blocked["wake_count"],
-                    "mutation_occurred": False,
-                    "lease": {"status": "not_acquired"},
-                }
     acquisition = acquire_lease(
         contract["paths"]["lease"],
         repository=contract["repository"],
@@ -670,6 +639,38 @@ def plan_tick(
                 }
         else:
             state = empty_run_state(contract)
+
+        next_not_before = state.get("next_not_before")
+        if next_not_before is not None:
+            current_time = datetime.fromisoformat(now.replace("Z", "+00:00")).astimezone(UTC)
+            if current_time < datetime.fromisoformat(next_not_before.replace("Z", "+00:00")).astimezone(UTC):
+                blocked = latch_failure(
+                    state,
+                    reason_code="cadence_not_elapsed",
+                    observed_at=now,
+                    details={"next_not_before": next_not_before, "wake_id": wake_id},
+                )
+                blocked["active_wake_id"] = None
+                blocked["wake_phase"] = "paused"
+                blocked["scheduled_task_disposition"] = "PAUSED"
+                blocked["last_wake_id"] = wake_id
+                blocked["wake_completed_at"] = now
+                blocked["last_result"] = {
+                    "next_action": NextAction.PAUSE_BLOCKED.value,
+                    "reason_code": "cadence_not_elapsed",
+                    "recommended_heartbeat_disposition": "pause",
+                    "next_not_before": next_not_before,
+                    "wake_id": wake_id,
+                }
+                save_checkpoint(state_path, blocked)
+                return {
+                    "schema_version": 1,
+                    "run_status": "paused",
+                    **blocked["last_result"],
+                    "wake_count": blocked["wake_count"],
+                    "mutation_occurred": False,
+                    "lease": {"status": "releasing"},
+                }
 
         inflight = state.get("inflight_action")
         if isinstance(inflight, dict) and inflight.get("owner_token") != token:
