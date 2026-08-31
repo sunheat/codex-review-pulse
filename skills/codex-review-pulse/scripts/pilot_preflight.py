@@ -282,6 +282,7 @@ def build_preflight(
             repo,
             pr_number,
             include_conversation=False,
+            require_server_time=False,
             graphql_call=graphql_call,
         )
         canonical_name = snapshot["repository"]

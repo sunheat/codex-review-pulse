@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -38,13 +40,34 @@ def graphql(
     cursor: str | None = None,
 ) -> dict[str, Any]:
     command = [
-        "gh", "api", "graphql", "-F", "query=@-",
+        "gh", "api", "graphql", "--include", "-F", "query=@-",
         "-F", f"owner={owner}", "-F", f"repo={repo}",
         "-F", f"number={number}",
     ]
     if cursor:
         command.extend(["-F", f"cursor={cursor}"])
-    payload = run_json(command, query)
+    response = run(command, query)
+    header_end = re.search(r"\r?\n\r?\n", response)
+    if header_end is None:
+        raise RuntimeError("GitHub GraphQL response did not include HTTP headers")
+    date_header = re.search(
+        r"(?im)^date:\s*(?P<value>[^\r\n]+)", response[: header_end.start()]
+    )
+    if date_header is None:
+        raise RuntimeError("GitHub GraphQL response did not include a Date header")
+    try:
+        server_time = parsedate_to_datetime(date_header.group("value"))
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("GitHub GraphQL Date header is invalid") from error
+    if server_time.tzinfo is None:
+        raise RuntimeError("GitHub GraphQL Date header has no timezone")
+    try:
+        payload = json.loads(response[header_end.end():])
+    except json.JSONDecodeError as error:
+        raise RuntimeError("GitHub GraphQL response body is not JSON") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError("GitHub GraphQL response root must be an object")
+    payload["_github_server_time"] = server_time.astimezone(UTC).isoformat()
     errors = payload.get("errors")
     if errors:
         raise RuntimeError(f"GitHub GraphQL errors: {json.dumps(errors)}")
@@ -249,10 +272,25 @@ def fetch_stable_snapshot(
     number: int,
     *,
     include_conversation: bool = True,
+    require_server_time: bool = True,
     graphql_call: Callable[[str, str, str, int, str | None], dict[str, Any]] = graphql,
 ) -> dict[str, Any]:
     """Fetch a head-bracketed, read-only PR snapshot."""
-    initial_meta = graphql_call(META_QUERY, owner, repo, number, None)
+    server_times: list[str] = []
+
+    def request(
+        query: str, request_owner: str, request_repo: str, request_number: int,
+        cursor: str | None,
+    ) -> dict[str, Any]:
+        payload = graphql_call(
+            query, request_owner, request_repo, request_number, cursor
+        )
+        server_time = payload.get("_github_server_time")
+        if isinstance(server_time, str) and server_time:
+            server_times.append(server_time)
+        return payload
+
+    initial_meta = request(META_QUERY, owner, repo, number, None)
     initial_repository = initial_meta["data"].get("repository")
     if initial_repository is None:
         raise RuntimeError(f"Repository not found: {owner}/{repo}")
@@ -261,29 +299,32 @@ def fetch_stable_snapshot(
 
     review_threads = fetch_connection(
         THREADS_QUERY, "reviewThreads", owner, repo, number,
-        graphql_call=graphql_call,
+        graphql_call=request,
     )
     thumbs_up_reactions = fetch_connection(
         REACTIONS_QUERY, "reactions", owner, repo, number,
-        graphql_call=graphql_call,
+        graphql_call=request,
     )
     reviews = fetch_connection(
         REVIEWS_QUERY, "reviews", owner, repo, number,
-        graphql_call=graphql_call,
+        graphql_call=request,
     )
     conversation_comments = (
         fetch_connection(
             COMMENTS_QUERY, "comments", owner, repo, number,
-            graphql_call=graphql_call,
+            graphql_call=request,
         )
         if include_conversation
         else []
     )
-    final_meta = graphql_call(META_QUERY, owner, repo, number, None)
+    final_meta = request(META_QUERY, owner, repo, number, None)
     final_repository = final_meta["data"].get("repository")
     if final_repository is None:
         raise RuntimeError(f"Repository disappeared while fetching state: {owner}/{repo}")
     pull_request = verify_stable_head(initial_repository, final_repository, number)
+    server_time = server_times[-1] if server_times else None
+    if require_server_time and server_time is None:
+        raise RuntimeError("GitHub snapshot did not provide authoritative server time")
     return {
         "repository": final_repository["nameWithOwner"],
         "pull_request": pull_request,
@@ -291,6 +332,7 @@ def fetch_stable_snapshot(
         "thumbs_up_reactions": thumbs_up_reactions,
         "reviews": reviews,
         "conversation_comments": conversation_comments,
+        "server_time": server_time,
     }
 
 
@@ -299,7 +341,7 @@ def main() -> None:
     run(["gh", "auth", "status"])
     owner, repo, number = resolve_target(args.repo, args.pr)
 
-    snapshot = fetch_stable_snapshot(owner, repo, number)
+    snapshot = fetch_stable_snapshot(owner, repo, number, require_server_time=True)
     pull_request = snapshot["pull_request"]
     canonical_repo = snapshot["repository"]
     review_threads = snapshot["review_threads"]
@@ -333,7 +375,7 @@ def main() -> None:
         run_contract=contract,
     )
     previous_checkpoint = load_checkpoint(state_path)
-    observed_at = datetime.now(UTC).isoformat()
+    observed_at = snapshot["server_time"]
     evaluation, next_checkpoint = evaluate_snapshot(
         repository=canonical_repo,
         pr_number=number,
@@ -400,6 +442,8 @@ def main() -> None:
         "review_activity_ok": True,
         "codex_review_in_progress": False,
         "review_in_progress_reaction_ids": [],
+        "batch_publication_event": None,
+        "relevant_codex_events": [],
         "server_time": observed_at,
     }
     print(json.dumps(result, indent=2))

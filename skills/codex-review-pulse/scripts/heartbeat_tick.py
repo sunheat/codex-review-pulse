@@ -145,6 +145,8 @@ def _require_persisted_snapshot(observation: dict[str, Any], checkpoint: dict[st
         "approval_status",
         "codex_review_in_progress",
         "review_activity_ok",
+        "batch_publication_event",
+        "relevant_codex_events",
         "snapshot_stable",
         "mixed_head",
         "auth_ok",

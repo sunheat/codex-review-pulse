@@ -336,6 +336,8 @@ def evaluate_snapshot(
         "codex_review_in_progress": False,
         "review_activity_ok": True,
         "review_in_progress_reaction_ids": [],
+        "batch_publication_event": None,
+        "relevant_codex_events": [],
         "snapshot_stable": True,
         "mixed_head": False,
         "auth_ok": True,

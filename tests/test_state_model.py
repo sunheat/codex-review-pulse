@@ -148,6 +148,12 @@ class ReviewerScopeTests(unittest.TestCase):
         )
         self.assertTrue(result["codex_terminal"])
 
+    def test_latest_snapshot_explicitly_records_stalled_review_evidence_defaults(self) -> None:
+        _, checkpoint = evaluate(head="A")
+        snapshot = checkpoint["latest_target_snapshot"]
+        self.assertIsNone(snapshot["batch_publication_event"])
+        self.assertEqual(snapshot["relevant_codex_events"], [])
+
 
 class ApprovalEpochTests(unittest.TestCase):
     def test_current_head_approval_terminates_without_quiet_interval(self) -> None:
