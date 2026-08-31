@@ -259,6 +259,12 @@ class PulseCliTests(unittest.TestCase):
             text=True,
             check=True,
         ).stdout
+        configure_help = subprocess.run(
+            [sys.executable, str(PULSE), "configure-policy", "--help"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
 
         root_help = " ".join(root_help.split())
         self.assertIn("--pause-confirmed", root_help)
@@ -269,6 +275,8 @@ class PulseCliTests(unittest.TestCase):
         self.assertIn("heartbeat-prompt", root_help)
         self.assertIn("prepare-publication", root_help)
         self.assertIn("--pause-confirmed", begin_help)
+        self.assertIn("--policy-json", begin_help)
+        self.assertIn("--policy-json", configure_help)
         self.assertIn("--schedule-reanchored", complete_help)
         self.assertIn("--scheduled-first-run", complete_help)
 
@@ -288,9 +296,9 @@ class PulseCliTests(unittest.TestCase):
         harness = CliHarness(self)
         initial = harness.json_output(
             harness.run(
+                "begin-wake",
                 "--policy-json",
                 '{"max_wakes": 5, "allow_test_changes": false}',
-                "begin-wake",
                 "--pause-confirmed",
             )
         )
@@ -307,9 +315,9 @@ class PulseCliTests(unittest.TestCase):
         )
         updated = harness.json_output(
             harness.run(
+                "configure-policy",
                 "--policy-json",
                 '{"max_wakes": 8, "notifications": "every-wake"}',
-                "configure-policy",
             )
         )
         self.assertEqual(updated["next_action"], "POLICY_UPDATED")

@@ -121,9 +121,11 @@ def _policy_confirmation_allows(state: dict[str, Any], operation: str) -> bool:
     expected_head_oid = confirmation.get("head_oid")
     if expected_head_oid is not None:
         current_head_oid = (
-            batch.get("frozen_head_oid")
+            (state.get("latest_target_snapshot") or {}).get("head_oid")
+            if operation == "review_trigger"
+            else batch.get("frozen_head_oid")
             if isinstance(batch, dict)
-            else (state.get("latest_target_snapshot") or {}).get("head_oid")
+            else None
         )
         if current_head_oid != expected_head_oid:
             return False
@@ -164,12 +166,18 @@ def confirm_policy_operation(
     state["policy_confirmation"] = {
         "operation": operation,
         "confirmed_at": _iso(now),
-        "head_oid": batch.get("frozen_head_oid")
-        if isinstance(batch, dict)
-        else (state.get("latest_target_snapshot") or {}).get("head_oid"),
-        "targeted_thread_ids": list(batch.get("targeted_thread_ids") or [])
-        if isinstance(batch, dict)
-        else [],
+        "head_oid": (
+            (state.get("latest_target_snapshot") or {}).get("head_oid")
+            if operation == "review_trigger"
+            else batch.get("frozen_head_oid")
+            if isinstance(batch, dict)
+            else None
+        ),
+        "targeted_thread_ids": (
+            list(batch.get("targeted_thread_ids") or [])
+            if operation != "review_trigger" and isinstance(batch, dict)
+            else []
+        ),
     }
     state["wake_phase"] = "confirmation_ready"
     state["scheduled_task_disposition"] = "PAUSED"
@@ -670,7 +678,10 @@ def decide_snapshot(
         )
     elif epoch.get("idle_observation_count", 0) >= 2:
         trigger_policy = state["automation_policy"]["review_trigger"]
-        if trigger_policy != "auto":
+        if (
+            trigger_policy != "auto"
+            and not _policy_confirmation_allows(state, "review_trigger")
+        ):
             return _policy_pause(state, now=now, operation="review_trigger")
         result = _decision("REQUEST_REVIEW", "idle_boundary_reached", head_oid=snapshot.get("head_oid"))
     else:
@@ -1475,6 +1486,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Acknowledge that the host pause call succeeded; pulse.py does not perform it",
     )
+    begin.add_argument(
+        "--policy-json",
+        dest="command_policy_json",
+        help="JSON object of prompt-derived policy overrides for the initial wake",
+    )
 
     commands.add_parser("snapshot", help="Fetch and normalize one stable PR snapshot")
     commands.add_parser("freeze", help="Freeze the targeted threads from the snapshot")
@@ -1508,9 +1524,14 @@ def parse_args() -> argparse.Namespace:
         help="Count this retry only when the same validation failure made no progress",
     )
 
-    commands.add_parser(
+    configure = commands.add_parser(
         "configure-policy",
         help="Persist explicit prompt-derived default automation policy overrides",
+    )
+    configure.add_argument(
+        "--policy-json",
+        dest="command_policy_json",
+        help="JSON object of prompt-derived policy overrides",
     )
 
     confirm = commands.add_parser(
@@ -1546,9 +1567,19 @@ def parse_args() -> argparse.Namespace:
     complete.add_argument("--cadence-seconds", type=int)
     parser.add_argument(
         "--policy-json",
+        dest="root_policy_json",
         help="JSON object of prompt-derived policy overrides (initial wake or configure-policy)",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    command_policy_json = getattr(args, "command_policy_json", None)
+    if args.root_policy_json is not None and command_policy_json is not None:
+        parser.error("--policy-json may be supplied only once")
+    args.policy_json = (
+        command_policy_json
+        if command_policy_json is not None
+        else args.root_policy_json
+    )
+    return args
 
 
 def main() -> None:

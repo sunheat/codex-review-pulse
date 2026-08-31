@@ -122,8 +122,11 @@ python scripts/recurring_contract.py C:\controlled\run-contract.json `
 
 `connector_capability` stays `unknown` unless an operator explicitly supplies
 `manual_trigger` or `automatic_review` from settings they control. It is
-descriptive evidence, not trigger authority. Trigger authority comes from the
-immutable mutation scope and is guarded once per exact current-head epoch.
+descriptive evidence, but the recurring controller permits `REQUEST_REVIEW`
+only for the explicitly known `manual_trigger` capability. Unknown or
+`automatic_review` capability pauses for operator action. Trigger authority
+also comes from the immutable mutation scope and is guarded once per exact
+current-head epoch.
 
 ## Read-only doctor
 

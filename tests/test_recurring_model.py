@@ -286,13 +286,15 @@ class RecurringModelTests(unittest.TestCase):
         )
 
     def test_idle_protocol_requests_one_automatic_trigger_after_wait_policy(self) -> None:
+        authorized = contract(connector_capability="manual_trigger")
         state = advance_observation_state(self.state, observation())
         state = advance_observation_state(state, observation())
-        result = evaluated(self.contract, observation(), state)
+        result = evaluated(authorized, observation(), state)
         self.assertEqual(result["next_action"], "REQUEST_REVIEW")
         self.assertEqual(result["reason_code"], "authorized_single_trigger_available")
 
     def test_cold_start_idle_observation_becomes_the_wait_boundary(self) -> None:
+        authorized = contract(connector_capability="manual_trigger")
         first = observation(
             server_time="2026-08-25T00:00:00+00:00",
             batch_publication_event=None,
@@ -303,9 +305,17 @@ class RecurringModelTests(unittest.TestCase):
         )
         state = advance_observation_state(self.state, first)
         state = advance_observation_state(state, second)
-        result = evaluated(self.contract, second, state)
+        result = evaluated(authorized, second, state)
         self.assertEqual(result["next_action"], "REQUEST_REVIEW")
         self.assertEqual(result["reason_code"], "authorized_single_trigger_available")
+
+    def test_unknown_connector_capability_blocks_review_trigger(self) -> None:
+        state = advance_observation_state(self.state, observation())
+        state = advance_observation_state(state, observation())
+        result = evaluated(self.contract, observation(), state)
+        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+        self.assertEqual(result["reason_code"], "review_trigger_capability_not_authorized")
+        self.assertEqual(result["connector_capability"], "unknown")
 
     def test_narrow_contract_without_trigger_authority_pauses(self) -> None:
         narrowed = contract(
@@ -318,7 +328,10 @@ class RecurringModelTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "review_trigger_not_authorized")
 
     def test_trigger_authority_without_exact_head_pauses(self) -> None:
-        unrestricted = contract(review_trigger_head_oid=None)
+        unrestricted = contract(
+            review_trigger_head_oid=None,
+            connector_capability="manual_trigger",
+        )
         state = advance_observation_state(self.state, observation())
         state = advance_observation_state(state, observation())
         result = evaluated(unrestricted, observation(), state)
@@ -359,6 +372,7 @@ class RecurringModelTests(unittest.TestCase):
     def test_server_time_and_stable_observations_are_both_required_for_trigger(self) -> None:
         authorized = contract(
             review_trigger_head_oid=HEAD1,
+            connector_capability="manual_trigger",
         )
         one = advance_observation_state(self.state, observation())
         self.assertEqual(

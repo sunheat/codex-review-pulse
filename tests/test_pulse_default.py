@@ -398,6 +398,65 @@ class DefaultLifecycleTests(unittest.TestCase):
             )
         self.assertIsNotNone(state["failure_latch"])
 
+    def test_supervised_review_trigger_confirmation_allows_exact_trigger(self) -> None:
+        state, _ = pulse.begin_wake(
+            empty_checkpoint("Owner/Repo", 17),
+            wake_id="wake-1",
+            now=NOW,
+            policy_overrides={"profile": "supervised"},
+            pause_heartbeat=lambda: True,
+        )
+        state, result = pulse.record_snapshot(
+            state, snapshot(), wake_id="wake-1", now=NOW
+        )
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        state, _ = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:01:00+00:00",
+            schedule_next_wake=lambda expected: expected,
+        )
+
+        state, _ = started(
+            state, wake_id="wake-2", now="2026-08-26T00:11:00+00:00"
+        )
+        state, result = pulse.record_snapshot(
+            state, snapshot(), wake_id="wake-2", now="2026-08-26T00:11:00+00:00"
+        )
+        self.assertEqual(result["next_action"], "PAUSE_POLICY_CONFIRMATION")
+        self.assertEqual(result["reason_code"], "policy_requires_confirmation")
+        state["active_batch"] = {
+            "frozen_head_oid": "OLDER_HEAD",
+            "publication": {"status": "succeeded"},
+            "targeted_thread_ids": ["OLD_THREAD"],
+        }
+
+        state, result = pulse.confirm_policy_operation(
+            state, operation="review_trigger", now="2026-08-26T00:12:00+00:00"
+        )
+        self.assertEqual(result["next_action"], "POLICY_CONFIRMATION_RECORDED")
+
+        state, _ = started(
+            state, wake_id="wake-3", now="2026-08-26T00:22:00+00:00"
+        )
+        state, result = pulse.record_snapshot(
+            state, snapshot(), wake_id="wake-3", now="2026-08-26T00:22:00+00:00"
+        )
+        self.assertEqual(result["next_action"], "REQUEST_REVIEW")
+        state, result = pulse.record_default_trigger(
+            state,
+            wake_id="wake-3",
+            evidence={
+                "attempted_head_oid": "HEAD1",
+                "head_before": "HEAD1",
+                "head_after": "HEAD1",
+                "comment_node_id": "COMMENT1",
+                "created_at": "2026-08-26T00:22:00+00:00",
+            },
+        )
+        self.assertEqual(result["reason_code"], "review_trigger_recorded")
+        self.assertIsNone(state["policy_confirmation"])
+
     def test_validation_failure_policy_can_disable_automatic_retry(self) -> None:
         state, _ = pulse.begin_wake(
             empty_checkpoint("Owner/Repo", 17),

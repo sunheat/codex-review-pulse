@@ -391,11 +391,21 @@ def evaluate_recurring_action(
                 stalled_review=stalled,
             )
         restricted_head = contract.get("review_trigger_head_oid")
-        if (
-            contract["mutation_scope"]["review_trigger"]
-            and restricted_head is not None
-            and restricted_head == head_oid
-        ):
+        capability = contract.get("connector_capability")
+        if not contract["mutation_scope"]["review_trigger"]:
+            return _decision(
+                NextAction.PAUSE_BLOCKED,
+                "review_trigger_not_authorized",
+                stalled_review=stalled,
+            )
+        if capability != "manual_trigger":
+            return _decision(
+                NextAction.PAUSE_BLOCKED,
+                "review_trigger_capability_not_authorized",
+                connector_capability=capability,
+                stalled_review=stalled,
+            )
+        if restricted_head is not None and restricted_head == head_oid:
             return _decision(
                 NextAction.REQUEST_REVIEW,
                 "authorized_single_trigger_available",
@@ -403,12 +413,7 @@ def evaluate_recurring_action(
             )
         return _decision(
             NextAction.PAUSE_BLOCKED,
-            (
-                "review_trigger_head_not_authorized"
-                if contract["mutation_scope"]["review_trigger"]
-                and restricted_head != head_oid
-                else "review_trigger_not_authorized"
-            ),
+            "review_trigger_head_not_authorized",
             stalled_review=stalled,
         )
 
