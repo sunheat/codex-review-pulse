@@ -28,7 +28,7 @@ the old heartbeat activated too early, used fixed-cadence overlap, allowed a
 and continued after `PAUSE_BLOCKED`. Do not describe `0.4.0` as production
 ready or use its old scheduled-task protocol as the default.
 
-Version `0.7.0` is the Codex-first default automation-policy candidate. Its
+Version `0.7.1` is the Codex-first default automation-policy candidate. Its
 real scheduled-task and live GitHub integration remains unverified until an
 independent forward test completes; do not describe that integration as proven
 before then.
@@ -106,9 +106,11 @@ authority. The next fresh wake resumes the frozen batch; a generic latch
 clearing or policy rewrite cannot resume it.
 
 The host adapter may pass `--pause-confirmed` to `begin-wake` and
-`--schedule-reanchored` to `complete-wake` only as confirmations of successful
-host-tool calls. These flags do not pause or schedule a Codex task themselves;
-the flag value is never evidence that the host operation succeeded.
+`--schedule-reanchored` to `complete-wake` only after successful host-tool
+calls. The latter must be accompanied by `--scheduled-first-run` containing
+the actual persisted first run read back from the updated task. These flags do
+not pause or schedule a Codex task themselves; a success boolean is never
+evidence that the host operation or completion-relative re-anchor succeeded.
 
 ### Host invocation boundary
 
@@ -229,8 +231,9 @@ COMPLETION_NOW = current UTC time
 NEXT_NOT_BEFORE = COMPLETION_NOW + cadence_seconds
 reanchor_result = host.reanchor_task(task_id, first_run=NEXT_NOT_BEFORE)
 if reanchor_result is success:
+    ACTUAL_FIRST_RUN = host.read_task(task_id).first_run
     completion = PULSE TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
-      --schedule-reanchored
+      --schedule-reanchored --scheduled-first-run ACTUAL_FIRST_RUN
     report completion
     END_INVOCATION
 else:
@@ -361,7 +364,15 @@ next_not_before = wake_completed_at + cadence_seconds
 Never rely on pausing and reactivating a fixed RRULE to reset its clock. The
 host must re-anchor the next run to `next_not_before`. If the host cannot prove
 that completion-relative schedule, keep the disposition `PAUSED` and report
-`PAUSE_BLOCKED / scheduled_task_reanchor_unavailable`.
+`PAUSE_BLOCKED / scheduled_task_reanchor_unavailable`. If the persisted
+first run differs from `next_not_before`, report
+`PAUSE_BLOCKED / scheduled_task_reanchor_mismatch`; never reuse an earlier
+`DTSTART`.
+
+Multiple pushes that finish before the next wake naturally coalesce into the
+latest head accepted by that wake's stable GraphQL snapshot. A head change
+after the snapshot is frozen remains a recovery pause: do not add later pushes
+or their review artifacts to the active batch.
 
 `STOP_*`, every `PAUSE_*`, recovery, closed/merged, expired, publication
 failure, lease loss, and unknown results remain `PAUSED` and do not schedule a
@@ -402,11 +413,13 @@ invocation:
    completion timestamp and compute
    `next_not_before = wake_completed_at + cadence_seconds` without calling
    `complete-wake` yet.
-9. Update the task so its next run is anchored to that timestamp, and inspect
-   the host-tool result.
-10. After the task update succeeds, call `complete-wake` exactly once with the
-   same completion timestamp and `--schedule-reanchored`.
-11. If the task update fails, call `complete-wake` exactly once without
+9. Update the task so its next run is anchored to that timestamp, inspect the
+   host-tool result, then read back the task's actual persisted first run.
+10. After the task update and readback succeed, call `complete-wake` exactly
+   once with the same completion timestamp, `--schedule-reanchored`, and
+   `--scheduled-first-run ACTUAL_FIRST_RUN`. A stale or mismatched readback
+   persists a blocker and must not activate the checkpoint.
+11. If the task update or readback fails, call `complete-wake` exactly once without
    `--schedule-reanchored`; this persists the re-anchor blocker and keeps the
    task paused.
 12. Immediately report the result of either `complete-wake` call and end this

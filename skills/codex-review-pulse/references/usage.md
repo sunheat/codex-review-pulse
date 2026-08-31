@@ -32,9 +32,11 @@ wake, the checkpoint's bound repository and PR are reused and explicit target
 drift is rejected.
 
 The host adapter's `--pause-confirmed` and `--schedule-reanchored` inputs are
-post-success confirmations only. They do not call, verify, or authorize a
-Codex automation operation. Pass them only after the corresponding host task
-tool returns success.
+post-success confirmations only. They do not call or authorize a Codex
+automation operation. Pass `--schedule-reanchored` only after the task update
+succeeds and pair it with `--scheduled-first-run` containing the persisted
+first run read back from the task. The controller verifies that timestamp
+against its completion-relative expectation.
 
 Use a clean source repository and an exact release-candidate commit throughout
 the commands below. OpenAI documents `$HOME/.agents/skills` as the user-level
@@ -59,7 +61,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
 This extracts `skills/codex-review-pulse` from the named Git commit into
 `$env:USERPROFILE\.agents\skills\codex-review-pulse`. It does not copy the
 mutable working-tree files and does not create a symlink. The installed
-manifest records version `0.7.0`, the full source commit, and SHA-256 file
+manifest records version `0.7.1`, the full source commit, and SHA-256 file
 hashes. Verification independently reconstructs that inventory from the pinned
 Git commit, so changing both an installed file and its adjacent manifest does
 not reauthorize the modified bytes.
@@ -73,7 +75,7 @@ explicit alternate configured location.
 
 ```powershell
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
-  --expected-version 0.7.0 `
+  --expected-version 0.7.1 `
   --expected-source-commit $commit
 ```
 
@@ -92,7 +94,7 @@ python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_prefligh
   --repo OWNER/REPO `
   --pr NUMBER `
   --repository-path C:\path\to\target-repository `
-  --expected-skill-version 0.7.0 `
+  --expected-skill-version 0.7.1 `
   --expected-source-commit $commit `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector `

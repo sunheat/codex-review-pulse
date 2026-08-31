@@ -42,7 +42,7 @@ from state_model import (
 
 DEFAULT_CADENCE_SECONDS = 600
 DEFAULT_MODE_SCHEMA_VERSION = 2
-HEARTBEAT_PROTOCOL_VERSION = 1
+HEARTBEAT_PROTOCOL_VERSION = 2
 HEARTBEAT_BATCH_ORDER = (
     "record-outcome",
     "focused-validation",
@@ -86,7 +86,10 @@ def build_heartbeat_handoff(repository: str, pr_number: int) -> dict[str, Any]:
         "aggregate validation; run prepare-publication before commit and again "
         "immediately before push; explicitly stage intended paths; commit and push "
         "at most once; verify the published head; then record the publication result. "
-        "Leave push-created review artifacts for a later wake. Preserve non-target "
+        "Leave push-created review artifacts for a later wake. When rearming, compute "
+        "the next first run from this wake's completion time, update the heartbeat, "
+        "read back its persisted first run, and pass that exact timestamp to "
+        "complete-wake; never reuse an earlier DTSTART. Preserve non-target "
         "threads; never merge, enable auto-merge, change the base, force-push, or "
         "create issues. Keep the heartbeat paused on every PAUSE_* or STOP_* result."
     )
@@ -1185,7 +1188,7 @@ def complete_wake(
     cadence_seconds: int | None = None,
     schedule_next_wake: Callable[[str], object] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Complete exactly one wake and rearm only from its completion timestamp."""
+    """Complete one wake after proving the persisted completion-relative first run."""
     now = _iso(now)
     state = ensure_default_lifecycle(checkpoint)
     effective_cadence = (
@@ -1245,12 +1248,40 @@ def complete_wake(
         next_not_before=next_not_before,
         mutation_occurred=mutation_occurred,
     )
-    if schedule_next_wake is None or not _pause_confirmation(lambda: schedule_next_wake(next_not_before)):
+    observed_first_run: object = None
+    if schedule_next_wake is not None:
+        try:
+            observed_first_run = schedule_next_wake(next_not_before)
+        except Exception:
+            observed_first_run = None
+    if observed_first_run is None or isinstance(observed_first_run, bool):
         return_state_result = _pause(
             state,
             reason_code="scheduled_task_reanchor_unavailable",
             now=now,
-            evidence={"next_not_before": next_not_before},
+            evidence={
+                "expected_first_run": next_not_before,
+                "observed_first_run": observed_first_run,
+            },
+            mutation_occurred=mutation_occurred,
+        )
+        state["next_not_before"] = next_not_before
+        state["last_wake_id"] = wake_id
+        return state, return_state_result
+
+    try:
+        normalized_first_run = _iso(str(observed_first_run))
+    except (TypeError, ValueError):
+        normalized_first_run = None
+    if normalized_first_run != next_not_before:
+        return_state_result = _pause(
+            state,
+            reason_code="scheduled_task_reanchor_mismatch",
+            now=now,
+            evidence={
+                "expected_first_run": next_not_before,
+                "observed_first_run": observed_first_run,
+            },
             mutation_occurred=mutation_occurred,
         )
         state["next_not_before"] = next_not_before
@@ -1408,7 +1439,8 @@ def parse_args() -> argparse.Namespace:
             "Host handoff:\n"
             "  pause the scheduled task before begin-wake; pass --pause-confirmed "
             "after success.\n"
-            "  re-anchor the next run before complete-wake --schedule-reanchored."
+            "  re-anchor and read back the next run before complete-wake "
+            "--schedule-reanchored --scheduled-first-run ACTUAL_FIRST_RUN."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1505,7 +1537,11 @@ def parse_args() -> argparse.Namespace:
     complete.add_argument(
         "--schedule-reanchored",
         action="store_true",
-        help="Acknowledge that the host re-anchor call succeeded; pulse.py does not perform it",
+        help="Confirm that the host re-anchor call succeeded and its first run was read back",
+    )
+    complete.add_argument(
+        "--scheduled-first-run",
+        help="Actual persisted first-run timestamp read back after the host re-anchor",
     )
     complete.add_argument("--cadence-seconds", type=int)
     parser.add_argument(
@@ -1709,7 +1745,11 @@ def main() -> None:
             wake_id=args.wake_id,
             now=now,
             cadence_seconds=args.cadence_seconds,
-            schedule_next_wake=lambda _: args.schedule_reanchored,
+            schedule_next_wake=(
+                (lambda _: args.scheduled_first_run)
+                if args.schedule_reanchored
+                else None
+            ),
         )
         _write(path, state, result)
         return

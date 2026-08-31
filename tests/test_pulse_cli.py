@@ -270,6 +270,7 @@ class PulseCliTests(unittest.TestCase):
         self.assertIn("prepare-publication", root_help)
         self.assertIn("--pause-confirmed", begin_help)
         self.assertIn("--schedule-reanchored", complete_help)
+        self.assertIn("--scheduled-first-run", complete_help)
 
     def test_canonical_heartbeat_prompt_is_rendered_without_a_checkpoint(self) -> None:
         harness = CliHarness(self)
@@ -296,7 +297,13 @@ class PulseCliTests(unittest.TestCase):
         self.assertEqual(initial["next_action"], "WAKE_STARTED")
         harness.json_output(harness.run("snapshot"))
         harness.json_output(
-            harness.run("complete-wake", "--schedule-reanchored", now="2026-08-26T00:01:00+00:00")
+            harness.run(
+                "complete-wake",
+                "--schedule-reanchored",
+                "--scheduled-first-run",
+                "2026-08-26T00:11:00+00:00",
+                now="2026-08-26T00:01:00+00:00",
+            )
         )
         updated = harness.json_output(
             harness.run(
@@ -374,7 +381,7 @@ class PulseCliTests(unittest.TestCase):
         harness.json_output(begin)
         path = checkpoint_path("owner/repo", 17, repository_path=harness.checkout)
         self.assertTrue(path.exists())
-        self.assertTrue(str(path).startswith(str(harness.checkout / ".git")))
+        self.assertTrue(path.parents[1].samefile(harness.checkout / ".git"))
 
         first = harness.json_output(harness.run("snapshot"))
         second = harness.json_output(harness.run("snapshot", now="2026-08-26T00:01:00+00:00"))
@@ -426,7 +433,13 @@ class PulseCliTests(unittest.TestCase):
             )
         )
         harness.json_output(
-            harness.run("complete-wake", "--schedule-reanchored", now="2026-08-26T00:01:00+00:00")
+            harness.run(
+                "complete-wake",
+                "--schedule-reanchored",
+                "--scheduled-first-run",
+                "2026-08-26T00:11:00+00:00",
+                now="2026-08-26T00:01:00+00:00",
+            )
         )
 
         fixture = harness.read_fixture()
@@ -518,6 +531,7 @@ class PulseCliTests(unittest.TestCase):
         result = paused.json_output(
             paused.run(
                 "complete-wake",
+                "--schedule-reanchored",
                 now="2026-08-26T00:26:00+00:00",
             )
         )
@@ -532,6 +546,8 @@ class PulseCliTests(unittest.TestCase):
             reanchored.run(
                 "complete-wake",
                 "--schedule-reanchored",
+                "--scheduled-first-run",
+                "2026-08-26T00:36:00+00:00",
                 now="2026-08-26T00:26:00+00:00",
             )
         )
@@ -539,6 +555,33 @@ class PulseCliTests(unittest.TestCase):
         state = load_checkpoint(checkpoint_path("owner/repo", 17, repository_path=reanchored.checkout))
         self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
         self.assertEqual(state["next_not_before"], "2026-08-26T00:36:00+00:00")
+
+        stale = CliHarness(self)
+        stale.begin_and_snapshot()
+        result = stale.json_output(
+            stale.run(
+                "complete-wake",
+                "--schedule-reanchored",
+                "--scheduled-first-run",
+                "2026-08-26T00:06:00+00:00",
+                now="2026-08-26T00:26:00+00:00",
+            )
+        )
+        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+        self.assertEqual(result["reason_code"], "scheduled_task_reanchor_mismatch")
+        self.assertEqual(
+            result["evidence"],
+            {
+                "expected_first_run": "2026-08-26T00:36:00+00:00",
+                "observed_first_run": "2026-08-26T00:06:00+00:00",
+            },
+        )
+        state = load_checkpoint(checkpoint_path("owner/repo", 17, repository_path=stale.checkout))
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+        self.assertEqual(
+            state["failure_latch"]["reason_code"],
+            "scheduled_task_reanchor_mismatch",
+        )
 
     def test_terminal_cli_result_stays_paused(self) -> None:
         fixture = CliHarness.default_fixture()

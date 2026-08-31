@@ -49,7 +49,7 @@ def waiting_checkpoint() -> dict[str, object]:
         state,
         wake_id="seed-wake",
         now="2026-08-26T00:26:00+00:00",
-        schedule_next_wake=lambda _: True,
+        schedule_next_wake=lambda expected: expected,
     )
     return state
 
@@ -191,7 +191,9 @@ class HostInvocation:
             self.host.state or {},
             wake_id=self.wake_id,
             now=(datetime.fromisoformat(self.now) + timedelta(minutes=1)).isoformat(),
-            schedule_next_wake=lambda _: reanchor_succeeds,
+            schedule_next_wake=(
+                (lambda expected: expected) if reanchor_succeeds else (lambda _: None)
+            ),
         )
         return self._end(result)
 

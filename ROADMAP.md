@@ -75,6 +75,18 @@ before commit and again immediately before push. A premature publication
 attempt or head change pauses recovery instead of allowing the host to record a
 successful batch after reordering resolution and publication.
 
+## 0.7.1 verified completion-relative re-anchor
+
+Version `0.7.1` requires the host to read back the task's persisted first run
+after every successful re-anchor. `complete-wake` activates the checkpoint
+only when that timestamp equals the controller's completion-relative
+`next_not_before`; an old or malformed `DTSTART` stays paused with explicit
+mismatch evidence.
+
+Pushes completed before the next wake continue to coalesce into the latest
+stable observed head. Head changes after a batch is frozen continue to pause
+recovery, so this release does not weaken the frozen-head publication gate.
+
 ## Deferred milestones
 
 - public-API connector and automatic-review detection bound to a head OID;
