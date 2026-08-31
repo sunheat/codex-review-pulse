@@ -19,6 +19,7 @@ from state_model import (  # noqa: E402
     evaluate_snapshot,
     freeze_batch,
     record_publication_failure,
+    record_publication_success,
     record_resolved_thread,
     record_thread_outcome,
     unique_logins,
@@ -182,6 +183,42 @@ class ReviewerScopeTests(unittest.TestCase):
             checkpoint["latest_target_snapshot"]["batch_publication_event"]["created_at"],
             "2026-08-25T00:01:00+00:00",
         )
+
+    def test_no_change_batch_creates_a_publication_boundary_without_a_commit(self) -> None:
+        _, checkpoint = evaluate(head="HEAD1")
+        checkpoint = freeze_batch(checkpoint, "HEAD1", ["T1"])
+        checkpoint = record_thread_outcome(
+            checkpoint, thread_id="T1", classification="no-fix"
+        )
+        checkpoint = record_resolved_thread(checkpoint, "T1")
+        checkpoint = record_publication_success(checkpoint)
+
+        _, checkpoint = evaluate(
+            head="HEAD1",
+            checkpoint=checkpoint,
+            observed_at="2026-08-25T00:03:00+00:00",
+        )
+
+        self.assertEqual(
+            checkpoint["latest_target_snapshot"]["batch_publication_event"],
+            {
+                "kind": "batch_publication",
+                "head_oid": "HEAD1",
+                "commit_oid": None,
+                "created_at": "2026-08-25T00:03:00+00:00",
+            },
+        )
+
+    def test_fix_batch_requires_a_published_commit(self) -> None:
+        checkpoint = empty_checkpoint("Owner/Repo", 17)
+        checkpoint = freeze_batch(checkpoint, "HEAD1", ["T1"])
+        checkpoint = record_thread_outcome(
+            checkpoint, thread_id="T1", classification="fix-now"
+        )
+        checkpoint = record_resolved_thread(checkpoint, "T1")
+
+        with self.assertRaisesRegex(ValueError, "published commit is required"):
+            record_publication_success(checkpoint)
 
     def test_relevant_codex_events_are_derived_from_current_head_evidence(self) -> None:
         result, _ = evaluate(

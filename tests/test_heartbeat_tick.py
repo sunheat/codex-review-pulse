@@ -401,6 +401,139 @@ class SnapshotBindingTests(unittest.TestCase):
             self.assertIsNone(state["inflight_action"])
             self.assertFalse(Path(contract["paths"]["lease"]).exists())
 
+    def test_complete_rejects_the_prepublication_action_head_after_a_batch_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            planned = plan_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                observation=observation(targeted_thread_ids=["T1"]),
+                now=NOW,
+                owner_token="owner-a",
+                checkout_inspector=checkout_ok,
+                runtime_script_path=verified_runtime(installation),
+            )
+            self.assertEqual(planned["next_action"], "RUN_BATCH")
+
+            contract = load_run_contract(contract_path, repository_path=repository)
+            checkpoint = load_checkpoint(contract["paths"]["checkpoint"])
+            checkpoint["active_batch"] = {
+                "frozen_head_oid": "HEAD1",
+                "publication": {
+                    "status": "succeeded",
+                    "published_commit": "HEAD2",
+                },
+            }
+            save_checkpoint(contract["paths"]["checkpoint"], checkpoint)
+
+            result = complete_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                owner_token="owner-a",
+                final_observation=observation(head_oid="HEAD1", targeted_thread_ids=["T1"]),
+                now="2026-08-25T00:20:30+00:00",
+                mutation_occurred=True,
+                runtime_script_path=verified_runtime(installation),
+            )
+
+            self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+            self.assertEqual(result["reason_code"], "unexpected_remote_head_advance")
+
+    def test_plan_does_not_trust_caller_supplied_head_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            first = plan_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                observation=observation(head_oid="HEAD1"),
+                now=NOW,
+                owner_token="owner-a",
+                checkout_inspector=checkout_ok,
+                runtime_script_path=verified_runtime(installation),
+            )
+            self.assertEqual(first["next_action"], "WAIT_REVIEW")
+
+            second_observation = observation(
+                head_oid="HEAD2",
+                targeted_thread_ids=["T1"],
+                expected_head_transition_from="HEAD1",
+            )
+            second = plan_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                observation=second_observation,
+                now="2026-08-25T00:21:00+00:00",
+                owner_token="owner-a",
+                checkout_inspector=checkout_ok,
+                runtime_script_path=verified_runtime(installation),
+            )
+
+            self.assertEqual(second["next_action"], "PAUSE_RECOVERY")
+            self.assertEqual(second["reason_code"], "unexpected_remote_head_advance")
+
+    def test_plan_derives_a_published_head_transition_from_persisted_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            first = plan_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                observation=observation(head_oid="HEAD1"),
+                now=NOW,
+                owner_token="owner-a",
+                checkout_inspector=checkout_ok,
+                runtime_script_path=verified_runtime(installation),
+            )
+            self.assertEqual(first["next_action"], "WAIT_REVIEW")
+
+            second_observation = observation(
+                head_oid="HEAD2",
+                targeted_thread_ids=["T1"],
+                batch_publication_event={
+                    "head_oid": "HEAD2",
+                    "commit_oid": "HEAD2",
+                    "created_at": "2026-08-25T00:20:30+00:00",
+                },
+            )
+            _seed_persisted_snapshot(contract_path, second_observation)
+            contract = load_run_contract(contract_path, repository_path=repository)
+            checkpoint = load_checkpoint(contract["paths"]["checkpoint"])
+            checkpoint["active_batch"] = {
+                "frozen_head_oid": "HEAD1",
+                "publication": {
+                    "status": "succeeded",
+                    "published_commit": "HEAD2",
+                },
+            }
+            save_checkpoint(contract["paths"]["checkpoint"], checkpoint)
+
+            second = _plan_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                observation=second_observation,
+                now="2026-08-25T00:21:00+00:00",
+                owner_token="owner-a",
+                checkout_inspector=checkout_ok,
+                runtime_script_path=verified_runtime(installation),
+            )
+
+            self.assertEqual(second["next_action"], "RUN_BATCH")
+            self.assertFalse(second["reason_code"] == "unexpected_remote_head_advance")
+
 
 class TriggerAuthorityTests(unittest.TestCase):
     def _prepare_trigger(self, directory_name: str):

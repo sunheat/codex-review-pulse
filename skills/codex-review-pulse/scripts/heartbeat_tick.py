@@ -213,7 +213,6 @@ def _completion_head_expectation(
     if not isinstance(action_head, str) or not action_head:
         raise ValueError("Retained action has no expected head OID")
 
-    expected_heads = [action_head]
     if inflight.get("next_action") == NextAction.RUN_BATCH.value:
         batch = checkpoint.get("active_batch")
         publication = batch.get("publication") if isinstance(batch, dict) else None
@@ -224,11 +223,49 @@ def _completion_head_expectation(
             else None
         )
         if isinstance(published_commit, str) and published_commit:
-            expected_heads.append(published_commit)
+            return {
+                "action": inflight.get("next_action"),
+                "expected_head_oids": [published_commit],
+                "publication_commit_required": True,
+            }
     return {
         "action": inflight.get("next_action"),
-        "expected_head_oids": sorted(set(expected_heads)),
+        "expected_head_oids": [action_head],
+        "publication_commit_required": False,
     }
+
+
+def _is_authorized_publication_head_transition(
+    *,
+    previous_head: Any,
+    observation: dict[str, Any],
+    checkpoint: dict[str, Any],
+) -> bool:
+    """Derive a permitted head change only from persisted publication evidence."""
+    observed_head = observation.get("head_oid")
+    if (
+        not isinstance(previous_head, str)
+        or not previous_head
+        or not isinstance(observed_head, str)
+        or not observed_head
+        or observed_head.casefold() == previous_head.casefold()
+    ):
+        return False
+    batch = checkpoint.get("active_batch")
+    publication = batch.get("publication") if isinstance(batch, dict) else None
+    event = observation.get("batch_publication_event")
+    published_commit = publication.get("published_commit") if isinstance(publication, dict) else None
+    return bool(
+        isinstance(batch, dict)
+        and batch.get("frozen_head_oid") == previous_head
+        and isinstance(publication, dict)
+        and publication.get("status") == "succeeded"
+        and isinstance(published_commit, str)
+        and published_commit.casefold() == observed_head.casefold()
+        and isinstance(event, dict)
+        and event.get("head_oid") == observed_head
+        and event.get("commit_oid") == published_commit
+    )
 
 
 def _redact_lease(lease: dict[str, Any]) -> dict[str, Any]:
@@ -554,7 +591,11 @@ def plan_tick(
         prepared["external_head_advance"] = bool(
             previous_head
             and prepared.get("head_oid") != previous_head
-            and prepared.get("expected_head_transition_from") != previous_head
+            and not _is_authorized_publication_head_transition(
+                previous_head=previous_head,
+                observation=prepared,
+                checkpoint=checkpoint,
+            )
         )
 
         state = advance_observation_state(state, prepared)

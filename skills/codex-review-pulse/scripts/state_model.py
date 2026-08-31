@@ -253,14 +253,24 @@ def _derive_batch_publication_event(
         return None
     if publication.get("status") != "succeeded":
         return None
-    if publication.get("published_commit") != head_oid:
-        return None
     if not isinstance(observed_at, str) or not observed_at:
+        return None
+
+    published_commit = publication.get("published_commit")
+    if isinstance(published_commit, str) and published_commit:
+        if published_commit != head_oid:
+            return None
+        commit_oid = published_commit
+    elif published_commit is None:
+        if batch.get("frozen_head_oid") != head_oid or not _is_no_change_batch(batch):
+            return None
+        commit_oid = None
+    else:
         return None
     return {
         "kind": "batch_publication",
         "head_oid": head_oid,
-        "commit_oid": head_oid,
+        "commit_oid": commit_oid,
         "created_at": observed_at,
     }
 
@@ -663,6 +673,14 @@ def record_publication_success(
     )
     if unresolved:
         raise ValueError("Cannot complete publication while frozen threads remain unresolved")
+    if published_commit is None and not _is_no_change_batch(batch):
+        raise ValueError(
+            "A published commit is required when the batch contains a fix-now outcome"
+        )
+    if published_commit is not None and (
+        not isinstance(published_commit, str) or not published_commit
+    ):
+        raise ValueError("Published commit must be a non-empty string")
     batch["publication"] = {
         "status": "succeeded",
         "published_commit": published_commit,
@@ -680,6 +698,21 @@ def _stable_unique_ids(values: Iterable[str]) -> list[str]:
             result.append(value)
             seen.add(value)
     return result
+
+
+def _is_no_change_batch(batch: dict[str, Any]) -> bool:
+    """Return whether every frozen thread was explicitly classified no-change."""
+    targeted_ids = batch.get("targeted_thread_ids")
+    outcomes = batch.get("thread_outcomes")
+    if not isinstance(targeted_ids, list) or not targeted_ids:
+        return False
+    if not isinstance(outcomes, dict) or set(outcomes) != set(targeted_ids):
+        return False
+    return all(
+        isinstance(outcome, dict)
+        and outcome.get("classification") in {"no-fix", "defer"}
+        for outcome in outcomes.values()
+    )
 
 
 def _require_active_batch(checkpoint: dict[str, Any]) -> dict[str, Any]:
