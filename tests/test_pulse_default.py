@@ -272,6 +272,99 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertEqual(result["next_action"], "PAUSE_POLICY_CONFIRMATION")
         self.assertEqual(result["reason_code"], "policy_requires_confirmation")
 
+        state, result = pulse.confirm_policy_operation(
+            state, operation="thread_resolution", now="2026-08-26T00:01:00+00:00"
+        )
+        self.assertEqual(result["next_action"], "POLICY_CONFIRMATION_RECORDED")
+        self.assertIsNone(state["failure_latch"])
+        self.assertEqual(state["wake_phase"], "confirmation_ready")
+
+        state, result = started(
+            state, wake_id="wake-2", now="2026-08-26T00:11:00+00:00"
+        )
+        self.assertTrue(result["resume_pending_batch"])
+        state, result = pulse.record_snapshot(
+            state, snapshot(targeted=[]), wake_id="wake-2", now="2026-08-26T00:11:00+00:00"
+        )
+        self.assertEqual(result["reason_code"], "resume_confirmed_batch")
+        state, result = pulse.record_default_outcome(
+            state,
+            wake_id="wake-2",
+            thread_id="T1",
+            classification="fix-now",
+            now="2026-08-26T00:11:00+00:00",
+        )
+        self.assertEqual(result["next_action"], "PROCESS_BATCH")
+
+        def graphql_call(query: str, variables: dict[str, object]) -> dict[str, object]:
+            if "resolveReviewThread" in query:
+                return {
+                    "data": {
+                        "resolveReviewThread": {
+                            "thread": {"id": variables["threadId"], "isResolved": True}
+                        }
+                    }
+                }
+            return {
+                "data": {
+                    "repository": {
+                        "nameWithOwner": "owner/repo",
+                        "pullRequest": {
+                            "number": 17,
+                            "headRefOid": "HEAD1",
+                            "reviewThreads": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": [
+                                    {
+                                        "id": "T1",
+                                        "isResolved": False,
+                                        "comments": {
+                                            "nodes": [
+                                                {"author": {"login": "chatgpt-codex-connector"}}
+                                            ]
+                                        },
+                                    }
+                                ],
+                            },
+                        },
+                    }
+                }
+            }
+
+        state, result = pulse.resolve_default_thread(
+            state,
+            wake_id="wake-2",
+            thread_id="T1",
+            graphql_call=graphql_call,
+        )
+        self.assertEqual(result["next_action"], "THREAD_RESOLVED")
+        self.assertIsNone(state["policy_confirmation"])
+
+    def test_supervised_confirmation_must_match_the_pending_operation(self) -> None:
+        state, _ = pulse.begin_wake(
+            empty_checkpoint("Owner/Repo", 17),
+            wake_id="wake-1",
+            now=NOW,
+            policy_overrides={"profile": "supervised"},
+            pause_heartbeat=lambda: True,
+        )
+        state, _ = pulse.record_snapshot(
+            state, snapshot(targeted=["T1"]), wake_id="wake-1", now=NOW
+        )
+        state, _ = pulse.freeze_default_batch(state, wake_id="wake-1")
+        state, _ = pulse.record_default_outcome(
+            state,
+            wake_id="wake-1",
+            thread_id="T1",
+            classification="fix-now",
+            now=NOW,
+        )
+        with self.assertRaisesRegex(pulse.DefaultWakeError, "does not match"):
+            pulse.confirm_policy_operation(
+                state, operation="aggregate_publication", now=NOW
+            )
+        self.assertIsNotNone(state["failure_latch"])
+
     def test_validation_failure_policy_can_disable_automatic_retry(self) -> None:
         state, _ = pulse.begin_wake(
             empty_checkpoint("Owner/Repo", 17),

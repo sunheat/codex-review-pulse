@@ -110,6 +110,76 @@ def _policy_pause(state: dict[str, Any], *, now: str, operation: str) -> dict[st
     )
 
 
+def _policy_confirmation_allows(state: dict[str, Any], operation: str) -> bool:
+    confirmation = state.get("policy_confirmation")
+    if not isinstance(confirmation, dict) or confirmation.get("operation") != operation:
+        return False
+    batch = state.get("active_batch")
+    expected_head_oid = confirmation.get("head_oid")
+    if expected_head_oid is not None:
+        current_head_oid = (
+            batch.get("frozen_head_oid")
+            if isinstance(batch, dict)
+            else (state.get("latest_target_snapshot") or {}).get("head_oid")
+        )
+        if current_head_oid != expected_head_oid:
+            return False
+    if confirmation.get("targeted_thread_ids"):
+        if not isinstance(batch, dict):
+            return False
+        if list(batch.get("targeted_thread_ids") or []) != list(
+            confirmation.get("targeted_thread_ids") or []
+        ):
+            return False
+    return True
+
+
+def _consume_policy_confirmation(state: dict[str, Any], operation: str) -> None:
+    if _policy_confirmation_allows(state, operation):
+        state["policy_confirmation"] = None
+
+
+def confirm_policy_operation(
+    checkpoint: dict[str, Any], *, operation: str, now: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Record one explicit supervised continuation without generic latch clearing."""
+    if operation not in {"thread_resolution", "aggregate_publication", "review_trigger"}:
+        raise ValueError("Unsupported supervised confirmation operation")
+    state = ensure_default_lifecycle(checkpoint)
+    if state.get("active_wake_id"):
+        raise DefaultWakeError("A policy confirmation cannot be recorded during an active wake")
+    latch = state.get("failure_latch")
+    evidence = latch.get("evidence") if isinstance(latch, dict) else None
+    if not isinstance(latch, dict) or latch.get("reason_code") != "policy_requires_confirmation":
+        raise DefaultWakeError("No supervised policy confirmation is pending")
+    if not isinstance(evidence, dict) or evidence.get("operation") != operation:
+        raise DefaultWakeError("The requested confirmation does not match the pending operation")
+    batch = state.get("active_batch")
+    if operation in {"thread_resolution", "aggregate_publication"} and not isinstance(batch, dict):
+        raise DefaultWakeError("The pending supervised operation has no active batch")
+    state["failure_latch"] = None
+    state["policy_confirmation"] = {
+        "operation": operation,
+        "confirmed_at": _iso(now),
+        "head_oid": batch.get("frozen_head_oid")
+        if isinstance(batch, dict)
+        else (state.get("latest_target_snapshot") or {}).get("head_oid"),
+        "targeted_thread_ids": list(batch.get("targeted_thread_ids") or [])
+        if isinstance(batch, dict)
+        else [],
+    }
+    state["wake_phase"] = "confirmation_ready"
+    state["scheduled_task_disposition"] = "PAUSED"
+    result = _decision(
+        "POLICY_CONFIRMATION_RECORDED",
+        "policy_confirmation_recorded",
+        operation=operation,
+        mutation_occurred=False,
+    )
+    _set_last_result(state, result)
+    return state, result
+
+
 def _utc(value: str | datetime) -> datetime:
     parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
@@ -157,6 +227,7 @@ def ensure_default_lifecycle(checkpoint: dict[str, Any]) -> dict[str, Any]:
         "last_wake_id": None,
         "last_wake_result": None,
         "last_decision": None,
+        "policy_confirmation": None,
         "review_epoch_state": _default_review_epoch(),
         "trigger_events": {},
         "last_snapshot_wake_id": None,
@@ -464,7 +535,7 @@ def begin_wake(
     pending_batch = (
         isinstance(state.get("active_batch"), dict)
         and (state.get("active_batch") or {}).get("publication", {}).get("status") != "succeeded"
-        and state.get("wake_phase") == "retry_waiting"
+        and state.get("wake_phase") in {"retry_waiting", "confirmation_ready"}
     )
     state["active_wake_id"] = wake_id
     state["wake_phase"] = "started"
@@ -479,7 +550,9 @@ def begin_wake(
         state["wake_phase"] = "processing"
         state["last_decision"] = _decision(
             "RUN_BATCH",
-            "resume_pending_batch",
+            "resume_confirmed_batch"
+            if state.get("policy_confirmation")
+            else "resume_pending_batch",
             targeted_thread_ids=list(
                 (state.get("active_batch") or {}).get("targeted_thread_ids") or []
             ),
@@ -672,7 +745,9 @@ def record_snapshot(
         state["wake_phase"] = "snapshotted"
         result = _decision(
             "RUN_BATCH",
-            "resume_pending_batch",
+            "resume_confirmed_batch"
+            if state.get("policy_confirmation")
+            else "resume_pending_batch",
             targeted_thread_ids=frozen_thread_ids,
         )
         _set_last_result(state, result)
@@ -728,7 +803,10 @@ def record_default_outcome(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     state = ensure_default_lifecycle(checkpoint)
     _require_active_wake(state, wake_id)
-    if state["automation_policy"]["thread_resolution"] != "auto":
+    if (
+        state["automation_policy"]["thread_resolution"] != "auto"
+        and not _policy_confirmation_allows(state, "thread_resolution")
+    ):
         result = _policy_pause(state, now=_iso(now), operation="thread_resolution")
         state["last_wake_id"] = wake_id
         return state, result
@@ -857,7 +935,10 @@ def resolve_default_thread(
 
     state = ensure_default_lifecycle(checkpoint)
     _require_active_wake(state, wake_id)
-    if state["automation_policy"]["thread_resolution"] != "auto":
+    if (
+        state["automation_policy"]["thread_resolution"] != "auto"
+        and not _policy_confirmation_allows(state, "thread_resolution")
+    ):
         raise DefaultWakeError("The current policy requires confirmation before thread resolution")
     batch = state.get("active_batch")
     if not isinstance(batch, dict) or thread_id not in batch.get("targeted_thread_ids", []):
@@ -865,6 +946,7 @@ def resolve_default_thread(
     if thread_id not in batch.get("thread_outcomes", {}):
         raise DefaultWakeError("Record the thread outcome before exact resolution")
     if thread_id in batch.get("resolved_thread_ids", []):
+        _consume_policy_confirmation(state, "thread_resolution")
         return state, {"id": thread_id, "isResolved": True, "alreadyResolved": True}
 
     def recheck_boundary() -> None:
@@ -884,6 +966,7 @@ def resolve_default_thread(
         graphql_call=graphql_call,
     )
     state = record_resolved_thread(state, thread_id)
+    _consume_policy_confirmation(state, "thread_resolution")
     result = {
         "next_action": "THREAD_RESOLVED",
         "reason_code": "exact_thread_resolution_confirmed",
@@ -905,7 +988,10 @@ def prepare_default_publication(
     """Authorize commit/push only after exact resolution on the frozen head."""
     state = ensure_default_lifecycle(checkpoint)
     _require_active_wake(state, wake_id)
-    if state["automation_policy"]["publication"] != "auto":
+    if (
+        state["automation_policy"]["publication"] != "auto"
+        and not _policy_confirmation_allows(state, "aggregate_publication")
+    ):
         result = _policy_pause(state, now=_iso(now), operation="aggregate_publication")
         state["last_wake_id"] = wake_id
         return state, result
@@ -981,7 +1067,10 @@ def record_default_trigger(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     state = ensure_default_lifecycle(checkpoint)
     _require_active_wake(state, wake_id)
-    if state["automation_policy"]["review_trigger"] != "auto":
+    if (
+        state["automation_policy"]["review_trigger"] != "auto"
+        and not _policy_confirmation_allows(state, "review_trigger")
+    ):
         try:
             policy_now = _iso(evidence.get("created_at", datetime.now(UTC).isoformat()))
         except (TypeError, ValueError):
@@ -1004,6 +1093,7 @@ def record_default_trigger(
         )
     else:
         state["wake_phase"] = "trigger_recorded"
+        _consume_policy_confirmation(state, "review_trigger")
         result = {
             "next_action": "REQUEST_REVIEW",
             "reason_code": "review_trigger_recorded",
@@ -1047,7 +1137,10 @@ def record_publication_result(
         return state, result
     if status != "succeeded":
         raise ValueError("Publication status must be succeeded or failed")
-    if state["automation_policy"]["publication"] != "auto":
+    if (
+        state["automation_policy"]["publication"] != "auto"
+        and not _policy_confirmation_allows(state, "aggregate_publication")
+    ):
         result = _policy_pause(state, now=_iso(now), operation="aggregate_publication")
         state["last_wake_id"] = wake_id
         return state, result
@@ -1066,6 +1159,7 @@ def record_publication_result(
         state["last_wake_id"] = wake_id
         return state, result
     state = record_publication_success(state, published_commit=published_commit)
+    _consume_policy_confirmation(state, "aggregate_publication")
     state["retry_state"] = {
         "inline_attempts": 0,
         "wake_attempts": 0,
@@ -1387,6 +1481,16 @@ def parse_args() -> argparse.Namespace:
         help="Persist explicit prompt-derived default automation policy overrides",
     )
 
+    confirm = commands.add_parser(
+        "confirm-policy",
+        help="Record one explicit supervised continuation for a pending operation",
+    )
+    confirm.add_argument(
+        "--operation",
+        required=True,
+        choices=["thread_resolution", "aggregate_publication", "review_trigger"],
+    )
+
     publication = commands.add_parser("publication-result", help="Persist aggregate publication outcome")
     publication.add_argument("--status", required=True, choices=["succeeded", "failed"])
     publication.add_argument("--phase", choices=["validation", "commit", "push"])
@@ -1463,6 +1567,15 @@ def main() -> None:
         state, result = update_default_policy(
             state,
             overrides=policy_overrides,
+            now=now,
+        )
+        _write(path, state, result)
+        return
+
+    if args.command == "confirm-policy":
+        state, result = confirm_policy_operation(
+            state,
+            operation=args.operation,
             now=now,
         )
         _write(path, state, result)

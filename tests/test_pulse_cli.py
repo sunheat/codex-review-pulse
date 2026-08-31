@@ -264,6 +264,7 @@ class PulseCliTests(unittest.TestCase):
         self.assertIn("--pause-confirmed", root_help)
         self.assertIn("--schedule-reanchored", root_help)
         self.assertIn("retry", root_help)
+        self.assertIn("confirm-policy", root_help)
         self.assertIn("configure-policy", root_help)
         self.assertIn("heartbeat-prompt", root_help)
         self.assertIn("prepare-publication", root_help)
@@ -309,6 +310,63 @@ class PulseCliTests(unittest.TestCase):
         self.assertEqual(state["automation_policy"]["max_wakes"], 8)
         self.assertFalse(state["automation_policy"]["allow_test_changes"])
         self.assertEqual(state["automation_policy"]["notifications"], "every-wake")
+
+    def test_confirm_policy_resumes_a_supervised_frozen_batch(self) -> None:
+        harness = CliHarness(
+            self,
+            fixture={
+                **CliHarness.default_fixture(),
+                "threads": [{"id": "T1", "root_author": "chatgpt-codex-connector"}],
+            },
+        )
+        harness.json_output(
+            harness.run(
+                "--policy-json",
+                '{"profile":"supervised"}',
+                "begin-wake",
+                "--pause-confirmed",
+            )
+        )
+        harness.json_output(harness.run("snapshot"))
+        harness.json_output(harness.run("freeze"))
+        paused = harness.json_output(
+            harness.run(
+                "record",
+                "--thread-id",
+                "T1",
+                "--classification",
+                "fix-now",
+            )
+        )
+        self.assertEqual(paused["next_action"], "PAUSE_POLICY_CONFIRMATION")
+
+        confirmed = harness.json_output(
+            harness.run("confirm-policy", "--operation", "thread_resolution")
+        )
+        self.assertEqual(confirmed["next_action"], "POLICY_CONFIRMATION_RECORDED")
+        harness.json_output(
+            harness.run(
+                "begin-wake",
+                "--pause-confirmed",
+                wake_id="wake-2",
+                now="2026-08-26T00:11:00+00:00",
+            )
+        )
+        harness.json_output(
+            harness.run("snapshot", wake_id="wake-2", now="2026-08-26T00:11:00+00:00")
+        )
+        resumed = harness.json_output(
+            harness.run(
+                "record",
+                "--thread-id",
+                "T1",
+                "--classification",
+                "fix-now",
+                wake_id="wake-2",
+                now="2026-08-26T00:11:00+00:00",
+            )
+        )
+        self.assertEqual(resumed["next_action"], "PROCESS_BATCH")
 
     def test_infers_pr_target_and_reuses_one_persisted_wake(self) -> None:
         harness = CliHarness(self)

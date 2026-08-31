@@ -44,7 +44,7 @@ path; never substitute a similarly named script from the target repository.
 ```
 
 Its small subcommands are `heartbeat-prompt`, `begin-wake`, `snapshot`,
-`freeze`, `record`, `resolve`, `retry`, `trigger-result`,
+`freeze`, `record`, `resolve`, `retry`, `trigger-result`, `confirm-policy`,
 `prepare-publication`, `publication-result`, `configure-policy`, and
 `complete-wake`.
 `snapshot` returns an agent-facing normalized object with top-level
@@ -100,7 +100,10 @@ profiles are `supervised` (confirm publication, resolution, and triggers) and
 `observe-only` (no PR mutations). A prompt such as “keep working unattended,
 update stale PR-scoped tests when the implementation is correct, and retry
 transient failures until the review is clean” selects the default autonomous
-profile and needs no extra flags.
+profile and needs no extra flags. When a supervised operation pauses a frozen
+batch, `confirm-policy --operation` records only that exact continuation
+authority. The next fresh wake resumes the frozen batch; a generic latch
+clearing or policy rewrite cannot resume it.
 
 The host adapter may pass `--pause-confirmed` to `begin-wake` and
 `--schedule-reanchored` to `complete-wake` only as confirmations of successful
