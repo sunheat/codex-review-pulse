@@ -159,6 +159,7 @@ def ensure_default_lifecycle(checkpoint: dict[str, Any]) -> dict[str, Any]:
         "last_decision": None,
         "review_epoch_state": _default_review_epoch(),
         "trigger_events": {},
+        "last_snapshot_wake_id": None,
         "automation_policy": default_policy(),
         "automation_policy_digest": None,
         "retry_state": {
@@ -624,6 +625,7 @@ def record_snapshot(
     }
     state["reviewer_logins"] = list(snapshot.get("reviewer_logins") or DEFAULT_CODEX_LOGINS)
     state["approval_logins"] = list(snapshot.get("approval_logins") or DEFAULT_CODEX_LOGINS)
+    state["last_snapshot_wake_id"] = wake_id
     result = decide_snapshot(state, snapshot, now=_iso(now))
     if result["next_action"] in PAUSE_ACTIONS:
         state["last_wake_id"] = wake_id
@@ -1411,6 +1413,12 @@ def main() -> None:
         raise RuntimeError("--wake-id is required")
 
     if args.command == "snapshot":
+        if (
+            state.get("last_snapshot_wake_id") == args.wake_id
+            and isinstance(state.get("last_snapshot"), dict)
+        ):
+            _write(path, state, state["last_snapshot"])
+            return
         repository = state["repository"]
         pr_number = state["pull_request_number"]
         owner, repo_name = repository.split("/", 1)

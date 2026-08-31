@@ -80,6 +80,11 @@ def review_thread(thread):
 
 
 arguments = sys.argv[1:]
+calls_path = os.environ.get("PULSE_FAKE_GH_CALLS")
+if calls_path and arguments[:2] == ["api", "graphql"]:
+    path = Path(calls_path)
+    count = int(path.read_text(encoding="utf-8")) if path.exists() else 0
+    path.write_text(str(count + 1), encoding="utf-8")
 if arguments[:2] == ["repo", "view"]:
     output({"nameWithOwner": fixture["repository"]})
     raise SystemExit(0)
@@ -157,6 +162,7 @@ class CliHarness:
         )
         self.fixture_path = root / "fixture.json"
         self.counts_path = root / "mutation-count.txt"
+        self.calls_path = root / "graphql-count.txt"
         self.write_fixture(fixture or self.default_fixture())
 
     @staticmethod
@@ -182,11 +188,15 @@ class CliHarness:
     def mutation_count(self) -> int:
         return int(self.counts_path.read_text(encoding="utf-8")) if self.counts_path.exists() else 0
 
+    def graphql_count(self) -> int:
+        return int(self.calls_path.read_text(encoding="utf-8")) if self.calls_path.exists() else 0
+
     def run(self, *command: str, wake_id: str = "wake-1", now: str = NOW) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment["PATH"] = str(self.fake_bin) + os.pathsep + environment.get("PATH", "")
         environment["PULSE_FAKE_GH_FIXTURE"] = str(self.fixture_path)
         environment["PULSE_FAKE_GH_COUNTS"] = str(self.counts_path)
+        environment["PULSE_FAKE_GH_CALLS"] = str(self.calls_path)
         environment["CODEX_REVIEW_PULSE_GH_SCRIPT"] = str(self.fake_bin / "fake_gh.py")
         arguments = [
             sys.executable,
@@ -325,6 +335,22 @@ class PulseCliTests(unittest.TestCase):
             ).stdout,
             "",
         )
+
+    def test_duplicate_snapshot_does_not_refetch_or_mix_heads(self) -> None:
+        harness = CliHarness(self)
+        harness.json_output(harness.run("begin-wake", "--pause-confirmed"))
+        first = harness.json_output(harness.run("snapshot"))
+        calls_after_first = harness.graphql_count()
+
+        fixture = harness.read_fixture()
+        fixture["head_oid"] = "HEAD2"
+        harness.write_fixture(fixture)
+        second = harness.json_output(
+            harness.run("snapshot", now="2026-08-26T00:01:00+00:00")
+        )
+
+        self.assertEqual(harness.graphql_count(), calls_after_first)
+        self.assertEqual(second, first)
 
     def test_exact_resolve_requires_outcome_and_uses_one_mutation(self) -> None:
         harness = CliHarness(self)

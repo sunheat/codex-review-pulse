@@ -19,6 +19,10 @@ from recurring_model import (  # noqa: E402
 )
 
 
+HEAD1 = "1" * 40
+HEAD2 = "2" * 40
+
+
 def contract(**overrides: object) -> dict:
     value = {
         "schema_version": 1,
@@ -58,7 +62,7 @@ def contract(**overrides: object) -> dict:
             "generic_reviewer_handling": False,
             "non_target_thread_resolution": False,
         },
-        "review_trigger_head_oid": None,
+        "review_trigger_head_oid": HEAD1,
         "paths": {
             name: str((ROOT / "runtime" / f"{name}.json").resolve())
             for name in ("checkpoint", "lease", "run_state")
@@ -80,7 +84,7 @@ def observation(**overrides: object) -> dict:
         "lease_status": "owned",
         "recovery_status": "none",
         "pull_request_state": "OPEN",
-        "head_oid": "HEAD1",
+        "head_oid": HEAD1,
         "targeted_thread_ids": [],
         "non_target_thread_ids": [],
         "approval_status": "awaiting_current_head_approval",
@@ -90,7 +94,7 @@ def observation(**overrides: object) -> dict:
         "review_in_progress_reaction_ids": [],
         "server_time": "2026-08-25T00:20:00+00:00",
         "batch_publication_event": {
-            "head_oid": "HEAD1",
+            "head_oid": HEAD1,
             "created_at": "2026-08-25T00:00:00+00:00",
         },
         "relevant_codex_events": [],
@@ -313,12 +317,20 @@ class RecurringModelTests(unittest.TestCase):
         self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
         self.assertEqual(result["reason_code"], "review_trigger_not_authorized")
 
+    def test_trigger_authority_without_exact_head_pauses(self) -> None:
+        unrestricted = contract(review_trigger_head_oid=None)
+        state = advance_observation_state(self.state, observation())
+        state = advance_observation_state(state, observation())
+        result = evaluated(unrestricted, observation(), state)
+        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+        self.assertEqual(result["reason_code"], "review_trigger_head_not_authorized")
+
     def test_emitted_trigger_that_never_starts_review_pauses_without_retry(self) -> None:
         state = record_trigger_result(
             self.state,
-            attempted_head_oid="HEAD1",
-            head_before="HEAD1",
-            head_after="HEAD1",
+            attempted_head_oid=HEAD1,
+            head_before=HEAD1,
+            head_after=HEAD1,
             comment_node_id="IC_1",
             created_at="2026-08-25T00:00:00+00:00",
         )
@@ -331,9 +343,9 @@ class RecurringModelTests(unittest.TestCase):
     def test_emitted_trigger_waits_one_full_cadence_before_pausing(self) -> None:
         state = record_trigger_result(
             self.state,
-            attempted_head_oid="HEAD1",
-            head_before="HEAD1",
-            head_after="HEAD1",
+            attempted_head_oid=HEAD1,
+            head_before=HEAD1,
+            head_after=HEAD1,
             comment_node_id="IC_1",
             created_at="2026-08-25T00:00:00+00:00",
         )
@@ -346,7 +358,7 @@ class RecurringModelTests(unittest.TestCase):
 
     def test_server_time_and_stable_observations_are_both_required_for_trigger(self) -> None:
         authorized = contract(
-            review_trigger_head_oid="HEAD1",
+            review_trigger_head_oid=HEAD1,
         )
         one = advance_observation_state(self.state, observation())
         self.assertEqual(
@@ -373,7 +385,7 @@ class RecurringModelTests(unittest.TestCase):
             relevant_codex_events=[
                 {
                     "id": "REV1",
-                    "head_oid": "HEAD1",
+                    "head_oid": HEAD1,
                     "created_at": "2026-08-25T00:05:00+00:00",
                 }
             ]
@@ -386,9 +398,9 @@ class RecurringModelTests(unittest.TestCase):
             event_result["reason_code"], "relevant_codex_event_observed"
         )
         new_head = observation(
-            head_oid="HEAD2",
+            head_oid=HEAD2,
             batch_publication_event={
-                "head_oid": "HEAD2",
+                "head_oid": HEAD2,
                 "created_at": "2026-08-25T00:00:00+00:00",
             },
         )
@@ -401,9 +413,9 @@ class RecurringModelTests(unittest.TestCase):
     def test_trigger_idempotency_survives_restart_and_is_head_scoped(self) -> None:
         state = record_trigger_result(
             self.state,
-            attempted_head_oid="HEAD1",
-            head_before="HEAD1",
-            head_after="HEAD1",
+            attempted_head_oid=HEAD1,
+            head_before=HEAD1,
+            head_after=HEAD1,
             comment_node_id="IC_1",
             created_at="2026-08-25T00:00:00+00:00",
         )
@@ -411,33 +423,33 @@ class RecurringModelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already recorded"):
             record_trigger_result(
                 restarted,
-                attempted_head_oid="HEAD1",
-                head_before="HEAD1",
-                head_after="HEAD1",
+                attempted_head_oid=HEAD1,
+                head_before=HEAD1,
+                head_after=HEAD1,
                 comment_node_id="IC_2",
                 created_at="2026-08-25T00:01:00+00:00",
             )
         new_head = record_trigger_result(
             restarted,
-            attempted_head_oid="HEAD2",
-            head_before="HEAD2",
-            head_after="HEAD2",
+                attempted_head_oid=HEAD2,
+                head_before=HEAD2,
+                head_after=HEAD2,
             comment_node_id="IC_3",
             created_at="2026-08-25T00:02:00+00:00",
         )
-        self.assertEqual(set(new_head["trigger_events"]), {"HEAD1", "HEAD2"})
+        self.assertEqual(set(new_head["trigger_events"]), {HEAD1, HEAD2})
 
     def test_head_change_during_trigger_is_latched(self) -> None:
         state = record_trigger_result(
             self.state,
-            attempted_head_oid="HEAD1",
-            head_before="HEAD1",
-            head_after="HEAD2",
+            attempted_head_oid=HEAD1,
+            head_before=HEAD1,
+            head_after=HEAD2,
             comment_node_id="IC_1",
             created_at="2026-08-25T00:00:00+00:00",
         )
         self.assertEqual(
-            state["trigger_events"]["HEAD1"]["status"],
+            state["trigger_events"][HEAD1]["status"],
             "head_changed_during_trigger",
         )
         self.assertEqual(state["failure_latch"]["reason_code"], "trigger_head_changed")

@@ -393,7 +393,8 @@ def evaluate_recurring_action(
         restricted_head = contract.get("review_trigger_head_oid")
         if (
             contract["mutation_scope"]["review_trigger"]
-            and (restricted_head is None or restricted_head == head_oid)
+            and restricted_head is not None
+            and restricted_head == head_oid
         ):
             return _decision(
                 NextAction.REQUEST_REVIEW,

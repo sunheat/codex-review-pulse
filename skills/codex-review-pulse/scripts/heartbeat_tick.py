@@ -446,37 +446,67 @@ def plan_tick(
             "lease": {"status": "released_or_absent"},
         }
     if wake_id is not None and not pause_confirmed:
-        state_path = Path(contract["paths"]["run_state"])
-        if state_path.exists():
-            state = validate_run_state(_read_object(state_path), contract)
-        else:
-            state = empty_run_state(contract)
-        state = latch_failure(
-            state,
-            reason_code="heartbeat_pause_unconfirmed",
-            observed_at=now,
-            details={"wake_id": wake_id},
+        acquisition = acquire_lease(
+            contract["paths"]["lease"],
+            repository=contract["repository"],
+            pr_number=contract["pull_request_number"],
+            owner_token=owner_token,
+            now=now,
+            duration_seconds=effective_lease_duration,
         )
-        state["active_wake_id"] = None
-        state["wake_phase"] = "paused"
-        state["scheduled_task_disposition"] = "PAUSED"
-        state["last_wake_id"] = wake_id
-        state["wake_completed_at"] = now
-        state["last_result"] = {
-            "next_action": NextAction.PAUSE_BLOCKED.value,
-            "reason_code": "heartbeat_pause_unconfirmed",
-            "recommended_heartbeat_disposition": "pause",
-            "wake_id": wake_id,
-        }
-        save_checkpoint(state_path, state)
-        return {
-            "schema_version": 1,
-            "run_status": "paused",
-            **state["last_result"],
-            "wake_count": state["wake_count"],
-            "mutation_occurred": False,
-            "lease": {"status": "not_acquired"},
-        }
+        if not acquisition["acquired"]:
+            lease = acquisition["lease"]
+            return {
+                "schema_version": 1,
+                "run_status": "paused",
+                "next_action": NextAction.PAUSE_CONCURRENT.value,
+                "reason_code": "concurrent_runner_lease_active",
+                "lease": {
+                    "status": "active",
+                    "expires_at": lease.get("expires_at"),
+                },
+                "mutation_occurred": False,
+                "recommended_heartbeat_disposition": "pause",
+            }
+        try:
+            state_path = Path(contract["paths"]["run_state"])
+            if state_path.exists():
+                state = validate_run_state(_read_object(state_path), contract)
+            else:
+                state = empty_run_state(contract)
+            state = latch_failure(
+                state,
+                reason_code="heartbeat_pause_unconfirmed",
+                observed_at=now,
+                details={"wake_id": wake_id},
+            )
+            state["active_wake_id"] = None
+            state["wake_phase"] = "paused"
+            state["scheduled_task_disposition"] = "PAUSED"
+            state["last_wake_id"] = wake_id
+            state["wake_completed_at"] = now
+            state["last_result"] = {
+                "next_action": NextAction.PAUSE_BLOCKED.value,
+                "reason_code": "heartbeat_pause_unconfirmed",
+                "recommended_heartbeat_disposition": "pause",
+                "wake_id": wake_id,
+            }
+            save_checkpoint(state_path, state)
+            return {
+                "schema_version": 1,
+                "run_status": "paused",
+                **state["last_result"],
+                "wake_count": state["wake_count"],
+                "mutation_occurred": False,
+                "lease": {"status": "releasing"},
+            }
+        finally:
+            release_lease(
+                contract["paths"]["lease"],
+                repository=contract["repository"],
+                pr_number=contract["pull_request_number"],
+                owner_token=owner_token,
+            )
     execution_source = _execution_source_status(contract, runtime_script_path)
     if not execution_source["ok"]:
         return {
@@ -915,10 +945,7 @@ def record_trigger(
     if not contract["mutation_scope"]["review_trigger"]:
         raise RuntimeError("Run contract does not authorize a review trigger")
     restricted_head = contract.get("review_trigger_head_oid")
-    if (
-        restricted_head is not None
-        and restricted_head != evidence.get("attempted_head_oid")
-    ):
+    if restricted_head != evidence.get("attempted_head_oid"):
         raise RuntimeError("Run contract does not authorize a trigger for this head")
     assert_lease_owner(
         contract["paths"]["lease"],

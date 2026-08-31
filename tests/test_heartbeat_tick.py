@@ -1043,7 +1043,7 @@ class HeartbeatTickTests(unittest.TestCase):
             state = json.loads(Path(paths["run_state"]).read_text(encoding="utf-8"))
             self.assertEqual(state["wake_count"], 1)
 
-    def test_unrestricted_trigger_authority_records_once_for_current_head(self) -> None:
+    def test_trigger_authority_requires_an_exact_head(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             repository = Path(directory_name) / "repo"
             repository.mkdir()
@@ -1053,10 +1053,9 @@ class HeartbeatTickTests(unittest.TestCase):
             contract_path = create_contract(repository, installation)
             payload = json.loads(contract_path.read_text(encoding="utf-8"))
             payload["mutation_scope"]["review_trigger"] = True
-            self.assertIsNone(payload["review_trigger_head_oid"])
             contract_path.write_text(json.dumps(payload), encoding="utf-8")
 
-            first = plan_tick(
+            result = plan_tick(
                 contract_path=contract_path,
                 repository_path=repository,
                 observation=observation(),
@@ -1065,45 +1064,47 @@ class HeartbeatTickTests(unittest.TestCase):
                 checkout_inspector=checkout_ok,
                 runtime_script_path=verified_runtime(installation),
             )
-            self.assertEqual(first["next_action"], "WAIT_REVIEW")
-            later = "2026-08-25T00:30:00+00:00"
-            second = plan_tick(
+            self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+            self.assertEqual(result["reason_code"], "run_contract_drift")
+
+    def test_pause_failure_does_not_overwrite_state_while_another_lease_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            _seed_persisted_snapshot(contract_path, observation())
+            contract = load_run_contract(contract_path, repository_path=repository)
+            state_path = Path(contract["paths"]["run_state"])
+            save_checkpoint(state_path, empty_run_state(contract))
+            before = state_path.read_bytes()
+            lease_path = Path(contract["paths"]["lease"])
+            acquire_lease(
+                lease_path,
+                repository="owner/repo",
+                pr_number=17,
+                owner_token="owner-a",
+                now=NOW,
+                duration_seconds=7200,
+            )
+
+            result = _plan_tick(
                 contract_path=contract_path,
                 repository_path=repository,
-                observation=observation(server_time=later),
-                now=later,
+                observation=observation(),
+                now=NOW,
                 owner_token="owner-b",
+                wake_id="wake-b",
+                pause_heartbeat=lambda: False,
                 checkout_inspector=checkout_ok,
                 runtime_script_path=verified_runtime(installation),
             )
-            self.assertEqual(second["next_action"], "REQUEST_REVIEW")
 
-            recorded = record_trigger(
-                contract_path=contract_path,
-                repository_path=repository,
-                owner_token="owner-b",
-                evidence={
-                    "attempted_head_oid": "HEAD1",
-                    "head_before": "HEAD1",
-                    "head_after": "HEAD1",
-                    "comment_node_id": "IC_1",
-                    "created_at": later,
-                },
-                now=later,
-                runtime_script_path=verified_runtime(installation),
-            )
-            self.assertEqual(recorded["status"], "emitted")
-            completed = complete_tick(
-                contract_path=contract_path,
-                repository_path=repository,
-                owner_token="owner-b",
-                final_observation=observation(server_time=later),
-                now=later,
-                mutation_occurred=True,
-                runtime_script_path=verified_runtime(installation),
-            )
-            self.assertEqual(completed["next_action"], "WAIT_REVIEW")
-            self.assertEqual(completed["reason_code"], "server_wait_budget_pending")
+            self.assertEqual(result["next_action"], "PAUSE_CONCURRENT")
+            self.assertEqual(state_path.read_bytes(), before)
+            self.assertEqual(json.loads(lease_path.read_text())["owner_token"], "owner-a")
 
     def test_final_wait_pauses_without_allowing_an_extra_wake(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:

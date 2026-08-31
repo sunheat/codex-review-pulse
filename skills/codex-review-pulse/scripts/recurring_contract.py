@@ -177,14 +177,15 @@ def validate_run_contract(
     if not mutation_scope["recurring_execution"]:
         raise ValueError("Bounded recurring execution must be explicitly authorized")
     trigger_head_oid = contract.get("review_trigger_head_oid")
+    if mutation_scope["review_trigger"] and trigger_head_oid is None:
+        raise ValueError(
+            "Review-trigger head is required when review-trigger authority is enabled"
+        )
     if trigger_head_oid is not None and (
         not isinstance(trigger_head_oid, str)
         or not re.fullmatch(r"[0-9a-fA-F]{40}", trigger_head_oid)
     ):
         raise ValueError("Review-trigger head must be a full Git OID")
-    # A null restriction authorizes at most one safely bracketed trigger for
-    # each current-head epoch. A non-null value narrows that authority to one
-    # exact head, which remains useful for supervised or custom contracts.
 
     cadence_seconds = contract.get("cadence_seconds")
     if (
