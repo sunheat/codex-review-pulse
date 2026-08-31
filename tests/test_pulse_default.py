@@ -398,6 +398,52 @@ class DefaultLifecycleTests(unittest.TestCase):
             )
         self.assertIsNotNone(state["failure_latch"])
 
+    def test_never_policy_cannot_be_confirmed(self) -> None:
+        state, _ = pulse.begin_wake(
+            empty_checkpoint("Owner/Repo", 17),
+            wake_id="wake-1",
+            now=NOW,
+            policy_overrides={"thread_resolution": "never"},
+            pause_heartbeat=lambda: True,
+        )
+        state, _ = pulse.record_snapshot(
+            state, snapshot(targeted=["T1"]), wake_id="wake-1", now=NOW
+        )
+        state, _ = pulse.freeze_default_batch(state, wake_id="wake-1")
+        state, result = pulse.record_default_outcome(
+            state,
+            wake_id="wake-1",
+            thread_id="T1",
+            classification="fix-now",
+            now=NOW,
+        )
+        self.assertEqual(result["next_action"], "PAUSE_POLICY_CONFIRMATION")
+        with self.assertRaisesRegex(pulse.DefaultWakeError, "does not permit confirmation"):
+            pulse.confirm_policy_operation(
+                state, operation="thread_resolution", now="2026-08-26T00:01:00+00:00"
+            )
+        self.assertIsNotNone(state["failure_latch"])
+        self.assertIsNone(state["policy_confirmation"])
+
+    def test_initial_wake_replay_precedes_later_policy_override_validation(self) -> None:
+        state, result = pulse.begin_wake(
+            empty_checkpoint("Owner/Repo", 17),
+            wake_id="wake-1",
+            now=NOW,
+            policy_overrides={"max_wakes": 5},
+            pause_heartbeat=lambda: True,
+        )
+        before = deepcopy(state)
+        replayed, replay_result = pulse.begin_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:01:00+00:00",
+            policy_overrides={"not_a_policy": True},
+            pause_heartbeat=lambda: False,
+        )
+        self.assertEqual(replayed, before)
+        self.assertEqual(replay_result, result)
+
     def test_supervised_review_trigger_confirmation_allows_exact_trigger(self) -> None:
         state, _ = pulse.begin_wake(
             empty_checkpoint("Owner/Repo", 17),
@@ -617,7 +663,7 @@ class DefaultLifecycleTests(unittest.TestCase):
         with self.assertRaises(pulse.DefaultWakeError):
             pulse.freeze_default_batch(state, wake_id="wake-1")
 
-    def test_eyes_disappear_with_targets_runs_and_without_targets_terminates(self) -> None:
+    def test_eyes_disappear_with_targets_runs_and_without_targets_reaches_trigger_boundary(self) -> None:
         state, _ = started()
         state, _ = pulse.record_snapshot(
             state, snapshot(targeted=["T1"], eyes=True), wake_id="wake-1", now=NOW
@@ -641,7 +687,18 @@ class DefaultLifecycleTests(unittest.TestCase):
         clean, _ = pulse.complete_wake(clean, wake_id="wake-1", now="2026-08-26T00:01:00+00:00", schedule_next_wake=lambda expected: expected)
         clean, _ = started(clean, wake_id="wake-2", now="2026-08-26T00:11:00+00:00")
         clean, result = pulse.record_snapshot(clean, snapshot(), wake_id="wake-2", now="2026-08-26T00:11:00+00:00")
-        self.assertEqual(result["next_action"], "STOP_TERMINAL")
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        clean, _ = pulse.complete_wake(
+            clean,
+            wake_id="wake-2",
+            now="2026-08-26T00:12:00+00:00",
+            schedule_next_wake=lambda expected: expected,
+        )
+        clean, _ = started(clean, wake_id="wake-3", now="2026-08-26T00:22:00+00:00")
+        clean, result = pulse.record_snapshot(
+            clean, snapshot(), wake_id="wake-3", now="2026-08-26T00:22:00+00:00"
+        )
+        self.assertEqual(result["next_action"], "REQUEST_REVIEW")
 
     def test_current_head_approval_and_historical_approval_are_distinct(self) -> None:
         approved, _ = started()

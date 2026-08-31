@@ -159,6 +159,15 @@ def confirm_policy_operation(
         raise DefaultWakeError("No supervised policy confirmation is pending")
     if not isinstance(evidence, dict) or evidence.get("operation") != operation:
         raise DefaultWakeError("The requested confirmation does not match the pending operation")
+    policy_key = {
+        "thread_resolution": "thread_resolution",
+        "aggregate_publication": "publication",
+        "review_trigger": "review_trigger",
+    }[operation]
+    if state["automation_policy"].get(policy_key) != "confirm":
+        raise DefaultWakeError(
+            "The persisted policy does not permit confirmation for this operation"
+        )
     batch = state.get("active_batch")
     if operation in {"thread_resolution", "aggregate_publication"} and not isinstance(batch, dict):
         raise DefaultWakeError("The pending supervised operation has no active batch")
@@ -445,6 +454,9 @@ def begin_wake(
     now = _iso(now)
     state = ensure_default_lifecycle(checkpoint)
 
+    if state.get("last_wake_id") == wake_id and state.get("last_wake_result"):
+        return state, deepcopy(state["last_wake_result"])
+
     if policy_overrides is not None:
         if state.get("wake_count", 0) > 0 or state.get("active_wake_id"):
             raise DefaultWakeError(
@@ -466,8 +478,6 @@ def begin_wake(
     if isinstance(effective_cadence, bool) or not isinstance(effective_cadence, int) or effective_cadence <= 0:
         raise ValueError("Cadence must be positive")
 
-    if state.get("last_wake_id") == wake_id and state.get("last_wake_result"):
-        return state, deepcopy(state["last_wake_result"])
     if state.get("wake_phase") in {"terminal", "closed"}:
         raise DefaultWakeError(
             "The checkpoint has reached an absorbing stop; an explicit user command is required to reopen it"
@@ -661,13 +671,6 @@ def decide_snapshot(
             "RUN_BATCH",
             "targeted_work_available",
             targeted_thread_ids=list(snapshot["targeted_thread_ids"]),
-        )
-    elif epoch.get("clean_epoch_proven"):
-        return _terminal(
-            state,
-            action="STOP_TERMINAL",
-            reason_code="clean_review_epoch_proven",
-            now=now,
         )
     elif state.get("trigger_events", {}).get(snapshot.get("head_oid"), {}).get("status") == "emitted":
         return _pause(

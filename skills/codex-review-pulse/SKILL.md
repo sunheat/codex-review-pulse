@@ -103,7 +103,8 @@ transient failures until the review is clean” selects the default autonomous
 profile and needs no extra flags. When a supervised operation pauses a frozen
 batch, `confirm-policy --operation` records only that exact continuation
 authority. The next fresh wake resumes the frozen batch; a generic latch
-clearing or policy rewrite cannot resume it.
+clearing or policy rewrite cannot resume it. A `never` operation is an
+absorbing opt-out and cannot be resumed through `confirm-policy`.
 
 The host adapter may pass `--pause-confirmed` to `begin-wake` and
 `--schedule-reanchored` to `complete-wake` only after successful host-tool
@@ -439,8 +440,6 @@ readiness:
    `review.commit.oid == headRefOid` and no targeted threads;
 2. a newly proven current-head Codex `THUMBS_UP` reaction epoch and no targeted
    threads; or
-3. Codex `EYES` was observed on this head, then disappeared in a newer stable
-   snapshot, and targeted unresolved threads are zero.
 
 Cold-start or first-observation historical reactions remain ambiguous.
 `EYES` is review activity, never approval. A head with targeted threads is
