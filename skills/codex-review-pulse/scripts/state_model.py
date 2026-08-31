@@ -107,11 +107,14 @@ def _root_comment_url(thread: dict[str, Any]) -> str | None:
     return url if isinstance(url, str) else None
 
 
-def classify_approval_reactions(
-    reactions: Iterable[dict[str, Any]], approval_logins: Iterable[str]
+def _classify_identity_reactions(
+    reactions: Iterable[dict[str, Any]],
+    allowed_logins: Iterable[str],
+    *,
+    expected_content: str,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Return stable qualifying events, excluding conflicting duplicate IDs."""
-    approval_keys = set(approval_logins)
+    """Return stable identity-scoped reactions, excluding conflicting IDs."""
+    allowed_keys = set(allowed_logins)
     by_id: dict[str, list[dict[str, Any]]] = {}
     invalid_ids: set[str] = set()
     for reaction in reactions:
@@ -138,7 +141,7 @@ def classify_approval_reactions(
             continue
         identity = next(iter(identities))
         content = next(iter(contents))
-        if identity in approval_keys and content == "THUMBS_UP":
+        if identity in allowed_keys and content == expected_content:
             source = min(
                 items,
                 key=lambda item: (
@@ -149,12 +152,30 @@ def classify_approval_reactions(
             qualifying.append(
                 {
                     "id": reaction_id,
-                    "content": "THUMBS_UP",
+                    "content": expected_content,
                     "createdAt": source.get("createdAt"),
                     "login": identity,
                 }
             )
     return qualifying, sorted(invalid_ids)
+
+
+def classify_approval_reactions(
+    reactions: Iterable[dict[str, Any]], approval_logins: Iterable[str]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Return stable qualifying approval events."""
+    return _classify_identity_reactions(
+        reactions, approval_logins, expected_content="THUMBS_UP"
+    )
+
+
+def classify_review_activity_reactions(
+    reactions: Iterable[dict[str, Any]], reviewer_logins: Iterable[str]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Return current Codex EYES reactions used only as in-progress evidence."""
+    return _classify_identity_reactions(
+        reactions, reviewer_logins, expected_content="EYES"
+    )
 
 
 def classify_current_head_approval_reviews(
@@ -406,6 +427,7 @@ def evaluate_snapshot(
     pull_request_state: str,
     review_threads: Iterable[dict[str, Any]],
     reactions: Iterable[dict[str, Any]],
+    review_activity_reactions: Iterable[dict[str, Any]] = (),
     reviews: Iterable[dict[str, Any]] = (),
     conversation_comments: Iterable[dict[str, Any]] = (),
     reviewer_logins: Iterable[str] | None = None,
@@ -427,6 +449,9 @@ def evaluate_snapshot(
     )
     qualifying, invalid_reaction_ids = classify_approval_reactions(
         reactions, approvers
+    )
+    review_activity, invalid_review_activity_ids = (
+        classify_review_activity_reactions(review_activity_reactions, reviewers)
     )
     qualifying_reviews, excluded_approval_reviews = (
         classify_current_head_approval_reviews(reviews, approvers, head_oid)
@@ -536,6 +561,10 @@ def evaluate_snapshot(
         "qualifying_current_head_approval_reviews": qualifying_reviews,
         "excluded_approval_reviews": excluded_approval_reviews,
         "invalid_reaction_ids": invalid_reaction_ids,
+        "codex_review_in_progress": bool(review_activity),
+        "codex_review_in_progress_reactions": review_activity,
+        "review_activity_ok": not invalid_review_activity_ids,
+        "invalid_review_activity_reaction_ids": invalid_review_activity_ids,
         "approval_status": approval_status,
         "approval_proof": approval_proof,
         "approval_diagnostic": (

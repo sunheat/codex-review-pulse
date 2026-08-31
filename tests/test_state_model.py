@@ -61,11 +61,21 @@ def reaction(reaction_id: str, login: str = "chatgpt-codex-connector") -> dict:
     }
 
 
+def eyes_reaction(reaction_id: str, login: str = "chatgpt-codex-connector") -> dict:
+    return {
+        "id": reaction_id,
+        "content": "EYES",
+        "createdAt": "2026-08-25T00:00:00Z",
+        "user": {"login": login},
+    }
+
+
 def evaluate(
     *,
     head: str,
     threads: list[dict] | None = None,
     reactions: list[dict] | None = None,
+    review_activity_reactions: list[dict] | None = None,
     checkpoint: dict | None = None,
     reviewer_logins: list[str] | None = None,
     approval_logins: list[str] | None = None,
@@ -80,6 +90,7 @@ def evaluate(
         pull_request_state="OPEN",
         review_threads=threads or [],
         reactions=reactions or [],
+        review_activity_reactions=review_activity_reactions or [],
         reviews=reviews or [],
         conversation_comments=conversation_comments or [],
         reviewer_logins=reviewer_logins,
@@ -114,6 +125,35 @@ class ReviewerScopeTests(unittest.TestCase):
         self.assertEqual(reasons["T_HUMAN"], "non_target_root_author")
         self.assertEqual(reasons["T_UNKNOWN"], "unknown_root_author")
         self.assertEqual(reasons["T_NO_COMMENTS"], "unknown_root_author")
+
+    def test_codex_eyes_is_wait_only_review_activity_evidence(self) -> None:
+        result, _ = evaluate(
+            head="A",
+            review_activity_reactions=[
+                eyes_reaction("E1", "CHATGPT-CODEX-CONNECTOR[bot]"),
+                eyes_reaction("E2", "human-reviewer"),
+            ],
+        )
+        self.assertTrue(result["review_activity_ok"])
+        self.assertTrue(result["codex_review_in_progress"])
+        self.assertEqual(
+            [item["id"] for item in result["codex_review_in_progress_reactions"]],
+            ["E1"],
+        )
+        self.assertEqual(result["approval_status"], "awaiting_current_head_approval")
+        self.assertFalse(result["codex_terminal"])
+
+    def test_invalid_eyes_reaction_id_fails_activity_evidence_closed(self) -> None:
+        conflicting = eyes_reaction("E1")
+        other = eyes_reaction("E1")
+        other["createdAt"] = "2026-08-25T00:01:00Z"
+        result, _ = evaluate(
+            head="A",
+            review_activity_reactions=[conflicting, other],
+        )
+        self.assertFalse(result["review_activity_ok"])
+        self.assertFalse(result["codex_review_in_progress"])
+        self.assertEqual(result["invalid_review_activity_reaction_ids"], ["E1"])
 
     def test_human_thread_cannot_be_added_to_frozen_target_set(self) -> None:
         _, checkpoint = evaluate(head="A", threads=self.threads)

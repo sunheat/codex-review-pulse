@@ -370,6 +370,7 @@ def build_preflight(
             pull_request_state=pull_request["state"],
             review_threads=snapshot["review_threads"],
             reactions=snapshot["thumbs_up_reactions"],
+            review_activity_reactions=snapshot["eyes_reactions"],
             reviews=snapshot["reviews"],
             reviewer_logins=reviewer_logins or list(DEFAULT_CODEX_LOGINS),
             approval_logins=approval_logins or list(DEFAULT_CODEX_LOGINS),
@@ -393,6 +394,18 @@ def build_preflight(
         "non_target_unresolved_threads": evaluation[
             "non_target_unresolved_threads"
         ],
+    }
+    result["review_activity"] = {
+        "ok": evaluation["review_activity_ok"],
+        "codex_review_in_progress": evaluation["codex_review_in_progress"],
+        "reactions": evaluation["codex_review_in_progress_reactions"],
+        "invalid_reaction_ids": evaluation[
+            "invalid_review_activity_reaction_ids"
+        ],
+        "meaning": (
+            "A current PR-level EYES reaction from a configured Codex identity "
+            "is wait-only in-progress evidence, never approval evidence."
+        ),
     }
     result["approval"] = {
         "ok": True,
@@ -461,6 +474,8 @@ def build_preflight(
         blockers.append("checkpoint_invalid")
     if checkpoint_info["recovery_required"]:
         blockers.append("active_batch_recovery_required")
+    if not evaluation["review_activity_ok"]:
+        blockers.append("review_activity_evidence_invalid")
     if not installed["ok"]:
         blockers.append("installed_skill_verification_failed")
     if not installed["running_from_verified_installation"]:

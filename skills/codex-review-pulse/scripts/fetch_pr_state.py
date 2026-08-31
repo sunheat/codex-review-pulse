@@ -7,6 +7,7 @@ import argparse
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 import json
+import os
 import re
 from pathlib import Path
 import subprocess
@@ -14,20 +15,50 @@ import sys
 from typing import Any, Callable
 
 from checkpoint_store import checkpoint_path, load_checkpoint, save_checkpoint
-from recurring_contract import assert_mutation_authority, load_mutation_run_contract
-from state_model import DEFAULT_CODEX_LOGINS, evaluate_snapshot, unique_logins
+from state_model import (
+    DEFAULT_CODEX_LOGINS,
+    canonical_repository,
+    evaluate_snapshot,
+    unique_logins,
+)
 
 
-def run(command: list[str], stdin: str | None = None) -> str:
-    process = subprocess.run(command, input=stdin, capture_output=True, text=True)
+def _github_cli_command() -> list[str]:
+    """Return the GitHub CLI command, with a narrow network-free test hook."""
+    fixture_script = os.environ.get("CODEX_REVIEW_PULSE_GH_SCRIPT")
+    if fixture_script:
+        return [sys.executable, fixture_script]
+    return ["gh"]
+
+
+def run(
+    command: list[str],
+    stdin: str | None = None,
+    *,
+    cwd: str | Path | None = None,
+) -> str:
+    if command and command[0] == "gh":
+        command = [*_github_cli_command(), *command[1:]]
+    process = subprocess.run(
+        command,
+        input=stdin,
+        capture_output=True,
+        text=True,
+        cwd=str(cwd) if cwd is not None else None,
+    )
     if process.returncode != 0:
         raise RuntimeError(f"Command failed: {' '.join(command)}\n{process.stderr.strip()}")
     return process.stdout
 
 
-def run_json(command: list[str], stdin: str | None = None) -> dict[str, Any]:
+def run_json(
+    command: list[str],
+    stdin: str | None = None,
+    *,
+    cwd: str | Path | None = None,
+) -> dict[str, Any]:
     try:
-        return json.loads(run(command, stdin))
+        return json.loads(run(command, stdin, cwd=cwd))
     except json.JSONDecodeError as error:
         raise RuntimeError(f"Command did not return JSON: {' '.join(command)}") from error
 
@@ -176,11 +207,31 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
 }
 """
 
+EYES_REACTIONS_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reactions(first: 100, after: $cursor, content: EYES) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id content createdAt user { login } }
+      }
+    }
+  }
+}
+"""
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--repo", help="Canonical base repository as OWNER/REPO")
-    parser.add_argument("--pr", type=int, help="Pull request number")
+    parser.add_argument(
+        "--repo",
+        help="Canonical base repository as OWNER/REPO; omitted fields are inferred from the current PR checkout",
+    )
+    parser.add_argument(
+        "--pr",
+        type=int,
+        help="Pull request number; omitted fields are inferred from the current PR checkout",
+    )
     parser.add_argument(
         "--reviewer-login", action="append", dest="reviewer_logins", metavar="LOGIN",
         help="Targeted Codex root-author login; repeat for multiple identities",
@@ -202,20 +253,42 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_target(repo_arg: str | None, pr_arg: int | None) -> tuple[str, str, int]:
+def resolve_target(
+    repo_arg: str | None,
+    pr_arg: int | None,
+    *,
+    repository_path: str | Path = ".",
+) -> tuple[str, str, int]:
+    """Resolve one canonical PR target, preferring explicit CLI fields."""
     repository = repo_arg
     if repository is None:
-        repository = run_json(["gh", "repo", "view", "--json", "nameWithOwner"])[
-            "nameWithOwner"
-        ]
-    if repository.count("/") != 1:
-        raise RuntimeError("--repo must be OWNER/REPO")
-    owner, repo = repository.split("/", 1)
+        repository = run_json(
+            ["gh", "repo", "view", "--json", "nameWithOwner"],
+            cwd=repository_path,
+        ).get("nameWithOwner")
+    if not isinstance(repository, str):
+        raise RuntimeError("GitHub CLI did not identify the checkout repository")
+    try:
+        canonical = canonical_repository(repository)
+    except ValueError as error:
+        raise RuntimeError("--repo must be OWNER/REPO") from error
+
     number = pr_arg
     if number is None:
-        number = int(run_json(["gh", "pr", "view", "--json", "number"])["number"])
-    if number < 1:
-        raise RuntimeError("--pr must be positive")
+        pr_command = ["gh", "pr", "view"]
+        if repo_arg is not None:
+            pr_command.extend(["--repo", canonical])
+        pr_command.extend(["--json", "number"])
+        current = run_json(
+            pr_command,
+            cwd=repository_path,
+        )
+        number = current.get("number")
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        raise RuntimeError(
+            "GitHub CLI did not identify a unique current PR; pass --repo OWNER/REPO and --pr NUMBER"
+        )
+    owner, repo = canonical.split("/", 1)
     return owner, repo, number
 
 
@@ -305,6 +378,10 @@ def fetch_stable_snapshot(
         REACTIONS_QUERY, "reactions", owner, repo, number,
         graphql_call=request,
     )
+    eyes_reactions = fetch_connection(
+        EYES_REACTIONS_QUERY, "reactions", owner, repo, number,
+        graphql_call=graphql_call,
+    )
     reviews = fetch_connection(
         REVIEWS_QUERY, "reviews", owner, repo, number,
         graphql_call=request,
@@ -330,6 +407,7 @@ def fetch_stable_snapshot(
         "pull_request": pull_request,
         "review_threads": review_threads,
         "thumbs_up_reactions": thumbs_up_reactions,
+        "eyes_reactions": eyes_reactions,
         "reviews": reviews,
         "conversation_comments": conversation_comments,
         "server_time": server_time,
@@ -339,13 +417,18 @@ def fetch_stable_snapshot(
 def main() -> None:
     args = parse_args()
     run(["gh", "auth", "status"])
-    owner, repo, number = resolve_target(args.repo, args.pr)
+    owner, repo, number = resolve_target(
+        args.repo,
+        args.pr,
+        repository_path=args.repository_path,
+    )
 
     snapshot = fetch_stable_snapshot(owner, repo, number, require_server_time=True)
     pull_request = snapshot["pull_request"]
     canonical_repo = snapshot["repository"]
     review_threads = snapshot["review_threads"]
     thumbs_up_reactions = snapshot["thumbs_up_reactions"]
+    eyes_reactions = snapshot["eyes_reactions"]
     conversation_comments = snapshot["conversation_comments"]
     reviews = snapshot["reviews"]
 
@@ -358,6 +441,8 @@ def main() -> None:
         )
     contract = None
     if args.run_contract:
+        from recurring_contract import assert_mutation_authority, load_mutation_run_contract
+
         contract = load_mutation_run_contract(
             args.run_contract,
             repository_path=args.repository_path,
@@ -383,6 +468,7 @@ def main() -> None:
         pull_request_state=pull_request["state"],
         review_threads=review_threads,
         reactions=thumbs_up_reactions,
+        review_activity_reactions=eyes_reactions,
         reviews=reviews,
         conversation_comments=conversation_comments,
         reviewer_logins=reviewer_logins,
@@ -414,6 +500,19 @@ def main() -> None:
         "targeted_unresolved_thread_ids": evaluation["targeted_unresolved_thread_ids"],
         "non_target_unresolved_threads": evaluation["non_target_unresolved_threads"],
         "thumbs_up_reactions": thumbs_up_reactions,
+        "eyes_reactions": eyes_reactions,
+        "codex_review_in_progress": evaluation["codex_review_in_progress"],
+        "codex_review_in_progress_reactions": evaluation[
+            "codex_review_in_progress_reactions"
+        ],
+        "review_in_progress_reaction_ids": [
+            reaction["id"]
+            for reaction in evaluation["codex_review_in_progress_reactions"]
+        ],
+        "review_activity_ok": evaluation["review_activity_ok"],
+        "invalid_review_activity_reaction_ids": evaluation[
+            "invalid_review_activity_reaction_ids"
+        ],
         "qualifying_approval_reactions": evaluation["qualifying_approval_reactions"],
         "qualifying_current_head_approval_reviews": evaluation[
             "qualifying_current_head_approval_reviews"

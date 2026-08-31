@@ -24,7 +24,11 @@ from heartbeat_tick import (  # noqa: E402
 )
 from manage_pilot_install import MANIFEST_NAME  # noqa: E402
 from recurring_contract import (  # noqa: E402
+    DEFAULT_CADENCE_SECONDS,
+    DEFAULT_MAXIMUM_RUNTIME_DAYS,
+    DEFAULT_MAXIMUM_WAKES,
     RunContractDriftError,
+    apply_run_contract_defaults,
     assert_mutation_authority,
     contract_authority_anchor_path,
     contract_authority_digest,
@@ -44,7 +48,7 @@ def git_init(path: Path) -> None:
     subprocess.run(["git", "init", str(path)], check=True, capture_output=True, text=True)
 
 
-def create_installation(path: Path, *, version: str = "0.3.1") -> None:
+def create_installation(path: Path, *, version: str = "0.4.0") -> None:
     source = path.parent / "source"
     git_init(source)
     subprocess.run(
@@ -125,12 +129,13 @@ def create_contract(repository_path: Path, installation: Path, **changes: object
         "reviewer_logins": ["chatgpt-codex-connector"],
         "approval_logins": ["chatgpt-codex-connector"],
         "expected_installation": {
-            "version": "0.3.1",
+            "version": "0.4.0",
             "source_commit": manifest["source_commit"],
             "source_repository": str((installation.parent / "source").resolve()),
             "skill_path": str(installation.resolve()),
         },
         "mutation_scope": scope,
+        "cadence_seconds": 600,
         "maximum_wakes": 3,
         "review_trigger_head_oid": None,
         "expires_at": "2026-08-26T00:00:00+00:00",
@@ -167,6 +172,9 @@ def observation(**changes: object) -> dict:
         "approval_status": "awaiting_current_head_approval",
         "approval_evidence_ids": [],
         "head_repository": "Owner/Repo",
+        "review_activity_ok": True,
+        "codex_review_in_progress": False,
+        "review_in_progress_reaction_ids": [],
         "server_time": NOW,
         "review_activity_ok": True,
         "codex_review_in_progress": False,
@@ -629,6 +637,49 @@ class TriggerAuthorityTests(unittest.TestCase):
 
 
 class HeartbeatTickTests(unittest.TestCase):
+    def test_omitted_recurring_bounds_resolve_to_safe_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            partial = json.loads(contract_path.read_text(encoding="utf-8"))
+            for key in ("cadence_seconds", "maximum_wakes", "expires_at", "wait_policy"):
+                partial.pop(key)
+
+            resolved = apply_run_contract_defaults(partial, now=NOW)
+            normalized = validate_run_contract(resolved, repository_path=repository)
+
+            self.assertEqual(normalized["cadence_seconds"], DEFAULT_CADENCE_SECONDS)
+            self.assertEqual(normalized["maximum_wakes"], DEFAULT_MAXIMUM_WAKES)
+            self.assertEqual(
+                normalized["expires_at"],
+                "2026-09-24T00:20:00+00:00",
+            )
+            self.assertEqual(DEFAULT_MAXIMUM_RUNTIME_DAYS, 30)
+            self.assertEqual(
+                normalized["wait_policy"],
+                {
+                    "minimum_server_wait_seconds": DEFAULT_CADENCE_SECONDS,
+                    "minimum_stable_observations": 2,
+                },
+            )
+
+    def test_default_resolution_preserves_explicit_bounds(self) -> None:
+        explicit = {
+            "cadence_seconds": 1200,
+            "maximum_wakes": 4,
+            "expires_at": "2026-08-27T00:00:00+00:00",
+            "wait_policy": {
+                "minimum_server_wait_seconds": 1800,
+                "minimum_stable_observations": 3,
+            },
+        }
+
+        self.assertEqual(apply_run_contract_defaults(explicit, now=NOW), explicit)
+
     def test_authority_digest_is_canonical_and_covers_every_mutable_category(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             repository = Path(directory_name) / "repo"
@@ -678,6 +729,7 @@ class HeartbeatTickTests(unittest.TestCase):
             trigger_variant["review_trigger_head_oid"] = "c" * 40
             variants.append(("scope_review_trigger", trigger_variant))
             changed("wake_budget", "maximum_wakes", 4)
+            changed("cadence", "cadence_seconds", 601)
             changed("trigger_head", "review_trigger_head_oid", "d" * 40)
             changed("expiration", "expires_at", "2026-08-27T00:00:00Z")
             changed("runner", "runner_identity", "operator-b")
@@ -986,9 +1038,72 @@ class HeartbeatTickTests(unittest.TestCase):
             paths = expected_runtime_paths("Owner/Repo", 17, repository_path=repository)
             self.assertEqual(result["next_action"], "WAIT_REVIEW")
             self.assertEqual(result["wake_count"], 1)
+            self.assertEqual(result["cadence_seconds"], 600)
             self.assertFalse(Path(paths["lease"]).exists())
             state = json.loads(Path(paths["run_state"]).read_text(encoding="utf-8"))
             self.assertEqual(state["wake_count"], 1)
+
+    def test_unrestricted_trigger_authority_records_once_for_current_head(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            payload = json.loads(contract_path.read_text(encoding="utf-8"))
+            payload["mutation_scope"]["review_trigger"] = True
+            self.assertIsNone(payload["review_trigger_head_oid"])
+            contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            first = plan_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                observation=observation(),
+                now=NOW,
+                owner_token="owner-a",
+                checkout_inspector=checkout_ok,
+                runtime_script_path=verified_runtime(installation),
+            )
+            self.assertEqual(first["next_action"], "WAIT_REVIEW")
+            later = "2026-08-25T00:30:00+00:00"
+            second = plan_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                observation=observation(server_time=later),
+                now=later,
+                owner_token="owner-b",
+                checkout_inspector=checkout_ok,
+                runtime_script_path=verified_runtime(installation),
+            )
+            self.assertEqual(second["next_action"], "REQUEST_REVIEW")
+
+            recorded = record_trigger(
+                contract_path=contract_path,
+                repository_path=repository,
+                owner_token="owner-b",
+                evidence={
+                    "attempted_head_oid": "HEAD1",
+                    "head_before": "HEAD1",
+                    "head_after": "HEAD1",
+                    "comment_node_id": "IC_1",
+                    "created_at": later,
+                },
+                now=later,
+                runtime_script_path=verified_runtime(installation),
+            )
+            self.assertEqual(recorded["status"], "emitted")
+            completed = complete_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                owner_token="owner-b",
+                final_observation=observation(server_time=later),
+                now=later,
+                mutation_occurred=True,
+                runtime_script_path=verified_runtime(installation),
+            )
+            self.assertEqual(completed["next_action"], "WAIT_REVIEW")
+            self.assertEqual(completed["reason_code"], "server_wait_budget_pending")
 
     def test_final_wait_pauses_without_allowing_an_extra_wake(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:

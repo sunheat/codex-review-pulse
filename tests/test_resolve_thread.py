@@ -331,9 +331,9 @@ class ResolveThreadScopeTests(unittest.TestCase):
         ]), patch("resolve_thread.load_checkpoint", return_value=checkpoint), patch(
             "resolve_thread.validate_checkpoint"
         ), patch(
-            "resolve_thread.load_mutation_run_contract", return_value=contract
+            "recurring_contract.load_mutation_run_contract", return_value=contract
         ), patch(
-            "resolve_thread.assert_mutation_authority", side_effect=authority
+            "recurring_contract.assert_mutation_authority", side_effect=authority
         ), patch(
             "resolve_thread.resolve_exact_thread",
             return_value={"id": "T1", "isResolved": True, "alreadyResolved": True},

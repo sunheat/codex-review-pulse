@@ -93,6 +93,7 @@ class GithubServerTimeTests(unittest.TestCase):
                 "2026-08-30T16:04:52+00:00",
                 "2026-08-30T16:04:53+00:00",
                 "2026-08-30T16:04:54+00:00",
+                "2026-08-30T16:04:55+00:00",
             ]
         )
 
@@ -114,7 +115,7 @@ class GithubServerTimeTests(unittest.TestCase):
             graphql_call=with_server_time,
         )
 
-        self.assertEqual(snapshot["server_time"], "2026-08-30T16:04:54+00:00")
+        self.assertEqual(snapshot["server_time"], "2026-08-30T16:04:55+00:00")
 
 
 if __name__ == "__main__":

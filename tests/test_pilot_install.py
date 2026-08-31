@@ -34,7 +34,7 @@ def git(repository: Path, *arguments: str) -> str:
     return process.stdout.strip()
 
 
-def create_source(repository: Path, version: str = "0.3.1") -> str:
+def create_source(repository: Path, version: str = "0.4.0") -> str:
     git(repository, "init")
     git(repository, "config", "user.email", "tests@example.test")
     git(repository, "config", "user.name", "Test Runner")
@@ -71,7 +71,7 @@ class PilotInstallTests(unittest.TestCase):
             self.assertTrue(target.is_dir())
             verified = verify_installation(
                 target,
-                expected_version="0.3.1",
+                expected_version="0.4.0",
                 expected_source_commit=first_commit,
             )
             self.assertTrue(verified["ok"], verified["errors"])
@@ -155,7 +155,7 @@ class PilotInstallTests(unittest.TestCase):
 
             result = verify_installation(
                 target,
-                expected_version="0.3.1",
+                expected_version="0.4.0",
                 expected_source_commit=commit,
             )
             self.assertFalse(result["ok"])
@@ -263,7 +263,7 @@ class PilotInstallTests(unittest.TestCase):
 
             result = verify_installation(
                 target,
-                expected_version="0.3.1",
+                expected_version="0.4.0",
                 expected_source_commit=commit,
             )
             self.assertFalse(result["ok"])

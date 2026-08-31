@@ -2,9 +2,19 @@
 
 ## Scope and evidence baseline
 
-This phase promotes one verified supervised cycle into a release candidate for
-a small, explicitly bounded recurring pilot on one GitHub pull request. It does
-not claim long-term unattended operation.
+This document describes the optional hardened recurring compatibility layer. It
+is not the default product path. The real 0.4.0 black-box pilot failed: the
+old heartbeat activated before wake completion, used fixed-cadence overlap
+during a 26-minute wake, allowed a 300-second lease to expire during
+validation, counted a second plan for one host wake, and continued after
+`PAUSE_BLOCKED` through generated recovery authorization. Version `0.4.0` is
+not a publishable final recurring release.
+
+The public path is `skills/codex-review-pulse/scripts/pulse.py`. It does not
+require the run contract, immutable installation, preflight, authority digest,
+or renewable lease described here. Both modes retain Codex-only targeting,
+stable head snapshots, frozen batches, exact resolution, one aggregate
+publication, and unrelated-work protection.
 
 The preceding `0.2.0` supervised pilot completed against
 `sunheat/job-hunter#2` from source commit
@@ -113,8 +123,9 @@ The run contract is the only recurring authorization input. It fixes:
 - installed skill version, source commit, independently bound source repository,
   and independent installation path;
 - separate booleans for recurring execution, code edits, exact resolution,
-  commit, push, and one review trigger bound to an exact head OID;
-- maximum wakes and optional expiration;
+  commit, push, and a one-per-head review trigger, optionally narrowed to one
+  exact head OID;
+- cadence, maximum wakes, and expiration;
 - runner, automation, and user-authorization identities;
 - connector capability and deterministic wait policy; and
 - checkpoint, lease, and recurring-state paths.
@@ -126,19 +137,28 @@ text, and lease ownership are evidence, not authority. A new permission needs
 a new explicit user authorization and contract.
 
 Before wake one, create the scheduled task paused, place its final task
-identity in `automation_identity`, validate the complete contract, and only
-then activate it. The first plan creates the target-independent authority
+identity in `automation_identity`, and validate the complete contract. The
+scheduled wake must pause the heartbeat again before PR work; never activate it
+before wake work is complete. The first plan creates the target-independent authority
 anchor, and the first run-state write stores the same canonical SHA-256 digest
 of the complete normalized contract. Every later doctor, plan, trigger record,
 completion, checkpoint mutation, stable fetch, and exact resolution checks
 that binding. Drift in the PR target, identity sets, installation provenance,
 mutation scope, wake/deadline, trigger head, runner/task/authorization identity,
-connector/wait policy, or runtime paths returns `run_contract_drift` before
+connector/cadence/wait policy, or runtime paths returns `run_contract_drift` before
 checkpoint or GitHub mutation, releases the originally anchored lease, and
 does so even when the changed contract is unreadable or invalid. It does not
 create state or a lease for a newly named target. A live contract is
 never amended; a changed authority needs
 a separately authorized run.
+
+When an explicitly hardened request omits bounds, the compatibility layer
+resolves them once before
+the authority digest is persisted: 600-second cadence, 100 maximum wakes, and
+an expiration 30 days after contract creation. It also defaults the stalled
+classifier to a 600-second minimum server wait and two stable observations.
+The resolved absolute deadline and all other values are explicit contract
+fields after default resolution.
 
 See [ADR 0006](../adr/0006-bounded-run-contract.md).
 
@@ -149,8 +169,8 @@ The public next-action enum is:
 | Action | Meaning |
 | --- | --- |
 | `RUN_BATCH` | One stable targeted set is available and required mutations are authorized. |
-| `WAIT_REVIEW` | No targeted work or terminal proof exists; wait without mutation. |
-| `REQUEST_REVIEW` | A deterministic wait boundary is satisfied and one explicitly authorized manual trigger is available. |
+| `WAIT_REVIEW` | Codex review is in progress or the stable wait boundary is pending; wait without mutation. |
+| `REQUEST_REVIEW` | A deterministic idle boundary is satisfied and one authorized trigger remains for this head. |
 | `STOP_TERMINAL` | Current-head Codex approval is proven and targeted unresolved count is zero. |
 | `STOP_CLOSED` | The PR is closed or merged. |
 | `PAUSE_RECOVERY` | Durable batch, publication, head, or prior failure evidence needs explicit recovery. |
@@ -163,24 +183,44 @@ checked before the wake/deadline stop because no mutation is needed. Every
 wake performs at most one plan and at most one frozen batch. Artifacts caused
 by a batch push belong to the next wake.
 
+`WAIT_REVIEW` ends the current model turn. The orchestration layer schedules one
+next wake no earlier than `wake_completed_at + cadence_seconds`; it must not
+poll, sleep, or run another observation cycle in the same turn. Pausing and
+reactivating a fixed RRULE is not assumed to reset its clock. If the host cannot
+re-anchor a completion-relative wake, the run remains `PAUSED` instead of
+emulating recurrence in a local loop.
+
 ## Connector and trigger boundary
 
 OpenAI documents manual review requests through the exact PR comment
 `@codex review` and automatic reviews configured in Codex settings. The public
 documentation does not expose a GitHub API object that proves repository
-connector installation, the setting's current value, a push-triggered review
-expectation, or a connector event bound to a head OID.
+connector installation or the setting's current value for a head OID.
 
-Therefore connector capability defaults to `unknown` and may only be supplied
-as explicit operator configuration. `unknown` never becomes “stalled” and
-never permits an automatic trigger. This release does not post a trigger.
-`REQUEST_REVIEW` is a human-confirmation action. Trigger authorization names
-one exact current head and does not carry forward after a head change. If the
-operator separately posts the one authorized comment, `record-trigger` accepts
-injected GitHub evidence only after the caller brackets the operation with head reads. It
-stores the comment node ID, GitHub `created_at`, attempted head, and before/after
-heads. The same head can never receive a second recorded attempt; a head change
-during the operation is latched as recovery.
+The connector lifecycle used here is operator-verified behavior, not a public
+OpenAI API guarantee: Codex adds a PR-level `EYES` reaction while reviewing,
+removes it when finished, then exposes either unresolved review threads or a
+thumbs-up result. The stable GraphQL snapshot fetches the `EYES` connection
+inside the same head-OID bracket as threads and approval evidence. Only a
+configured Codex identity qualifies. Presence is safe without head binding
+because it can only delay mutation; it never proves approval. Removal changes
+the observation fingerprint and begins a new stable idle boundary.
+
+Connector capability remains descriptive operator configuration and does not
+grant mutation authority. Under an explicitly hardened request, the immutable
+mutation scope authorizes one `@codex review` request per current-head epoch
+after the configured stable server-time boundary. `REQUEST_REVIEW` brackets the post with head reads and `record-trigger`
+stores the returned comment node ID, GitHub `created_at`, attempted head, and
+before/after heads. A null trigger-head restriction permits this guarded policy
+across the bounded run; a non-null value narrows it to one exact head. The same
+head can never receive a second recorded attempt, and head movement during the
+operation is latched as recovery.
+
+After the trigger, the runner completes from a fresh snapshot, reanchors one
+heartbeat at least one cadence after completion, and ends the current turn. If that next
+wake still contains no configured-Codex `EYES`, targeted thread, or current-head
+approval, the run pauses as `review_trigger_did_not_start`, removes or pauses
+the heartbeat, and reports a summary for user intervention.
 
 GitHub's create-comment response supplies a node ID and server creation time,
 and creating an issue/PR comment requires write permission and triggers
@@ -192,21 +232,21 @@ Official GitHub source:
 
 ## Deterministic stalled-review policy
 
-Stalled is a local run-control classification, not a claim about GitHub, Codex,
-or pull-request correctness. It requires all of the following:
+The stable wait boundary is a local run-control classification, not a claim
+about GitHub, Codex, or pull-request correctness. It requires all of the
+following:
 
 - a stable current-head snapshot and healthy authentication/API evidence;
-- explicitly configured connector capability other than `unknown`;
-- a current-head batch-publication or authorized-trigger event with a GitHub
-  server timestamp;
+- a current-head batch-publication, authorized-trigger, or first stable idle
+  observation with a GitHub server timestamp;
 - no later relevant current-head Codex review, thread, or approval event;
 - the configured minimum number of identical stable observations; and
 - a supplied server-time observation at or beyond the configured wait budget.
 
 PR `updatedAt`, commit `authoredDate`, an old reaction, absence of comments,
 or local elapsed time cannot independently satisfy the classifier. When
-current server-time evidence or connector capability is unavailable, the
-action remains `WAIT_REVIEW` or pauses for the operator.
+current server-time evidence is unavailable, the action remains `WAIT_REVIEW`
+or pauses for the operator.
 
 See [ADR 0007](../adr/0007-stalled-review-and-trigger-policy.md).
 
@@ -218,13 +258,16 @@ advance, lease loss, invalid contract/checkpoint/run-state schema,
 installation drift, and authentication/API failure all pause. The recurring
 state keeps a durable failure latch, while the existing checkpoint keeps exact
 batch evidence. A later wake cannot clear either merely because the lease is
-free. `clear_failure_latch` requires a new recovery authorization identifier;
-batch recovery still follows the core checkpoint contract.
+free. A plain `recovery_authorization_id` is not authority; clearing requires
+a new user turn or separately verifiable external authorization. Batch
+recovery still follows the core checkpoint contract.
 
 ## Pilot acceptance boundary
 
-Version `0.3.1` has operator-provided evidence for a complete two-wake pilot
-and is ready for repeatable, manually reviewed bounded pilots after
+Version `0.3.1` has historical operator-provided evidence for a complete
+two-wake pilot. The 0.4.0 black-box pilot failure above means the hardened
+recurring controller is not a publishable final release; it requires
+revalidation after the P0 lifecycle fixes before
 temporary-directory installation lifecycle tests, network-free concurrency
 and evaluator tests, and an independent forward test. Long-term unattended
 operation remains blocked by the absence of a public connector-status and

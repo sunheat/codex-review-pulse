@@ -3,11 +3,19 @@
 ## Scope
 
 This phase turned the completed core state model into a release candidate for
-one manually supervised GitHub pilot. That pilot has now completed
-successfully. The design remains the single-cycle foundation for the bounded
-recurring extension and does not by itself create an unattended heartbeat.
+one manually supervised GitHub pilot. That historical pilot completed
+successfully, but the later real 0.4.0 black-box recurring pilot failed. The
+failure showed early heartbeat activation, fixed-cadence overlap during a
+26-minute wake, expiry of a 300-second lease during validation, duplicate plan
+counting for one host wake, and continued publication after `PAUSE_BLOCKED`.
+Version `0.4.0` is therefore not a publishable final recurring release.
 
-The release candidate adds three boundaries:
+The public product now uses the Codex-first `scripts/pulse.py` control surface.
+This design remains an opt-in hardened compatibility reference, not a default
+prerequisite, and it must obey the same paused-before-work,
+one-wake/one-plan, completion-relative, fail-closed lifecycle.
+
+The historical supervised phase added three boundaries:
 
 1. approval evidence is audited against GitHub's documented object model;
 2. the pilot runs from a commit-pinned independent skill copy; and

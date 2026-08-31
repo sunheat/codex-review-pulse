@@ -115,9 +115,9 @@ class RunnerLeaseTests(unittest.TestCase):
                 now=NOW,
                 duration_seconds=300,
             )
-            for duration in (29, 3601, 0, -1):
+            for duration in (29, 86401, 0, -1):
                 with self.subTest(duration=duration):
-                    with self.assertRaisesRegex(ValueError, "between 30 and 3600"):
+                    with self.assertRaisesRegex(ValueError, "between 30 and 86400"):
                         renew_lease(
                             path,
                             repository="Owner/Repo",

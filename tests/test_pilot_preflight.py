@@ -46,7 +46,7 @@ def which(name: str) -> str:
     return f"C:/tools/{name}.exe"
 
 
-def create_installation(root: Path, *, version: str = "0.3.1") -> str:
+def create_installation(root: Path, *, version: str = "0.4.0") -> str:
     source = root / "source"
     subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
     subprocess.run(
@@ -99,9 +99,10 @@ def create_installation(root: Path, *, version: str = "0.3.1") -> str:
 
 
 class FakeSnapshot:
-    def __init__(self, *, mixed_head: bool = False) -> None:
+    def __init__(self, *, mixed_head: bool = False, eyes: bool = False) -> None:
         self.meta_calls = 0
         self.mixed_head = mixed_head
+        self.eyes = eyes
         self.calls: list[str] = []
 
     def __call__(
@@ -134,7 +135,18 @@ class FakeSnapshot:
             nodes = []
         elif "reactions(" in query:
             connection_name = "reactions"
-            nodes = []
+            nodes = (
+                [
+                    {
+                        "id": "EYES1",
+                        "content": "EYES",
+                        "createdAt": "2026-08-25T00:00:00Z",
+                        "user": {"login": "chatgpt-codex-connector"},
+                    }
+                ]
+                if self.eyes and "content: EYES" in query
+                else []
+            )
         elif "reviews(" in query:
             connection_name = "reviews"
             nodes = []
@@ -171,7 +183,7 @@ def run_preflight(
         approval_logins=None,
         state_file=state_file or directory / "state.json",
         install_root=install_root,
-        expected_skill_version="0.3.1",
+        expected_skill_version="0.4.0",
         expected_source_commit=expected_commit,
         single_runner_confirmed=True,
         runtime_skill_path=installation_path(install_root),
@@ -182,6 +194,19 @@ def run_preflight(
 
 
 class PilotPreflightTests(unittest.TestCase):
+    def test_codex_eyes_is_reported_as_wait_only_review_activity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            result = run_preflight(
+                Path(directory_name), graphql_call=FakeSnapshot(eyes=True)
+            )
+        self.assertTrue(result["ready_for_supervised_pilot"])
+        self.assertTrue(result["review_activity"]["ok"])
+        self.assertTrue(result["review_activity"]["codex_review_in_progress"])
+        self.assertEqual(
+            [item["id"] for item in result["review_activity"]["reactions"]],
+            ["EYES1"],
+        )
+
     def test_no_override_verifies_the_executing_alternate_installation(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             directory = Path(directory_name)
@@ -196,7 +221,7 @@ class PilotPreflightTests(unittest.TestCase):
                 approval_logins=None,
                 state_file=directory / "state.json",
                 install_root=None,
-                expected_skill_version="0.3.1",
+                expected_skill_version="0.4.0",
                 expected_source_commit=expected_commit,
                 single_runner_confirmed=True,
                 runtime_skill_path=alternate,
@@ -250,7 +275,7 @@ class PilotPreflightTests(unittest.TestCase):
                 approval_logins=None,
                 state_file=directory / "state.json",
                 install_root=None,
-                expected_skill_version="0.3.1",
+                expected_skill_version="0.4.0",
                 expected_source_commit=expected_commit,
                 single_runner_confirmed=True,
                 runtime_skill_path=alternate,
@@ -360,7 +385,7 @@ class PilotPreflightTests(unittest.TestCase):
                 approval_logins=None,
                 state_file=directory / "state.json",
                 install_root=install_root,
-                expected_skill_version="0.3.1",
+                expected_skill_version="0.4.0",
                 expected_source_commit=expected_commit,
                 single_runner_confirmed=True,
                 runtime_skill_path=ROOT / "skills" / "codex-review-pulse",
@@ -384,7 +409,7 @@ class PilotPreflightTests(unittest.TestCase):
                 approval_logins=None,
                 state_file=directory / "state.json",
                 install_root=None,
-                expected_skill_version="0.3.1",
+                expected_skill_version="0.4.0",
                 expected_source_commit=EXPECTED_COMMIT,
                 single_runner_confirmed=True,
                 runtime_skill_path=ROOT / "skills" / "codex-review-pulse",
@@ -413,7 +438,7 @@ class PilotPreflightTests(unittest.TestCase):
                 approval_logins=None,
                 state_file=None,
                 install_root=install_root,
-                expected_skill_version="0.3.1",
+                expected_skill_version="0.4.0",
                 expected_source_commit=expected_commit,
                 single_runner_confirmed=True,
                 runtime_skill_path=installation_path(install_root),
