@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Review Pulse"
+  short_description: "Run safe supervised or bounded Codex PR review cycles"
+  default_prompt: "Use $codex-review-pulse for one supervised cycle, or prepare an explicitly bounded recurring pilot for this GitHub pull request."
