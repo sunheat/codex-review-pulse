@@ -203,6 +203,34 @@ def _execution_source_status(
     }
 
 
+def _completion_head_expectation(
+    state: dict[str, Any], checkpoint: dict[str, Any]
+) -> dict[str, Any]:
+    inflight = state.get("inflight_action")
+    if not isinstance(inflight, dict):
+        raise ValueError("No retained action is available for completion")
+    action_head = inflight.get("head_oid")
+    if not isinstance(action_head, str) or not action_head:
+        raise ValueError("Retained action has no expected head OID")
+
+    expected_heads = [action_head]
+    if inflight.get("next_action") == NextAction.RUN_BATCH.value:
+        batch = checkpoint.get("active_batch")
+        publication = batch.get("publication") if isinstance(batch, dict) else None
+        published_commit = (
+            publication.get("published_commit")
+            if isinstance(publication, dict)
+            and publication.get("status") == "succeeded"
+            else None
+        )
+        if isinstance(published_commit, str) and published_commit:
+            expected_heads.append(published_commit)
+    return {
+        "action": inflight.get("next_action"),
+        "expected_head_oids": sorted(set(expected_heads)),
+    }
+
+
 def _redact_lease(lease: dict[str, Any]) -> dict[str, Any]:
     """Return status evidence without exposing the mutation capability token."""
     return {key: value for key, value in lease.items() if key != "owner_token"}
@@ -819,6 +847,62 @@ def complete_tick(
             "next_action": NextAction.PAUSE_BLOCKED.value,
             "reason_code": "snapshot_evidence_unavailable",
             "details": str(error),
+            "mutation_occurred": mutation_occurred,
+            "recommended_heartbeat_disposition": "pause",
+            "lease": {"status": "released"},
+        }
+    try:
+        head_expectation = _completion_head_expectation(state, checkpoint)
+        observed_head = final_observation.get("head_oid")
+        expected_heads = head_expectation["expected_head_oids"]
+        if not isinstance(observed_head, str) or not any(
+            observed_head.casefold() == expected.casefold()
+            for expected in expected_heads
+        ):
+            raise ValueError(
+                "Final observation head does not match the retained action or published commit"
+            )
+    except ValueError as error:
+        evidence = {
+            "observed_head_oid": final_observation.get("head_oid"),
+            "expected_head_oids": (
+                head_expectation["expected_head_oids"]
+                if "head_expectation" in locals()
+                else []
+            ),
+            "action": (
+                head_expectation.get("action")
+                if "head_expectation" in locals()
+                else None
+            ),
+        }
+        state = latch_failure(
+            state,
+            reason_code="unexpected_remote_head_advance",
+            observed_at=now,
+            details={**evidence, "error": str(error)},
+        )
+        state["inflight_action"] = None
+        state["last_result"] = {
+            "next_action": NextAction.PAUSE_RECOVERY.value,
+            "reason_code": "unexpected_remote_head_advance",
+            "recorded_at": now,
+            "mutation_occurred": mutation_occurred,
+            "evidence": evidence,
+        }
+        save_checkpoint(state_path, state)
+        release_lease(
+            contract["paths"]["lease"],
+            repository=contract["repository"],
+            pr_number=contract["pull_request_number"],
+            owner_token=owner_token,
+        )
+        return {
+            "schema_version": 1,
+            "run_status": "paused",
+            "next_action": NextAction.PAUSE_RECOVERY.value,
+            "reason_code": "unexpected_remote_head_advance",
+            "details": evidence,
             "mutation_occurred": mutation_occurred,
             "recommended_heartbeat_disposition": "pause",
             "lease": {"status": "released"},

@@ -104,6 +104,29 @@ class RunnerLeaseTests(unittest.TestCase):
             )
             self.assertFalse(path.exists())
 
+    def test_renew_rejects_duration_outside_acquisition_bounds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "runner.lease.json"
+            acquire_lease(
+                path,
+                repository="Owner/Repo",
+                pr_number=17,
+                owner_token="owner-a",
+                now=NOW,
+                duration_seconds=300,
+            )
+            for duration in (29, 3601, 0, -1):
+                with self.subTest(duration=duration):
+                    with self.assertRaisesRegex(ValueError, "between 30 and 3600"):
+                        renew_lease(
+                            path,
+                            repository="Owner/Repo",
+                            pr_number=17,
+                            owner_token="owner-a",
+                            now=NOW + timedelta(seconds=1),
+                            duration_seconds=duration,
+                        )
+
     def test_stale_lease_is_recovered_without_pid_assumptions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "runner.lease.json"

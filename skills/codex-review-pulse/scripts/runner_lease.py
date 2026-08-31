@@ -17,6 +17,8 @@ from state_model import canonical_repository
 
 
 LEASE_SCHEMA_VERSION = 1
+MIN_LEASE_DURATION_SECONDS = 30
+MAX_LEASE_DURATION_SECONDS = 3600
 
 
 def _utc(value: str | datetime) -> datetime:
@@ -32,6 +34,18 @@ def _utc(value: str | datetime) -> datetime:
 
 def _format(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()
+
+
+def _validate_duration_seconds(duration_seconds: int) -> None:
+    if (
+        not isinstance(duration_seconds, int)
+        or isinstance(duration_seconds, bool)
+        or not MIN_LEASE_DURATION_SECONDS <= duration_seconds <= MAX_LEASE_DURATION_SECONDS
+    ):
+        raise ValueError(
+            "Lease duration must be between "
+            f"{MIN_LEASE_DURATION_SECONDS} and {MAX_LEASE_DURATION_SECONDS} seconds"
+        )
 
 
 @contextmanager
@@ -120,8 +134,7 @@ def acquire_lease(
 ) -> dict[str, Any]:
     if not owner_token:
         raise ValueError("Lease owner token is required")
-    if not isinstance(duration_seconds, int) or not 30 <= duration_seconds <= 3600:
-        raise ValueError("Lease duration must be between 30 and 3600 seconds")
+    _validate_duration_seconds(duration_seconds)
     lease_path = Path(path)
     current_time = _utc(now)
     with _operation_lock(lease_path):
@@ -154,6 +167,7 @@ def renew_lease(
     now: str | datetime,
     duration_seconds: int,
 ) -> dict[str, Any]:
+    _validate_duration_seconds(duration_seconds)
     lease_path = Path(path)
     current_time = _utc(now)
     with _operation_lock(lease_path):

@@ -211,6 +211,159 @@ def classify_current_head_approval_reviews(
     return qualifying, excluded
 
 
+def _event_timestamp(item: dict[str, Any], *fields: str) -> str | None:
+    for field in fields:
+        value = item.get(field)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _event_author(item: dict[str, Any]) -> str | None:
+    author = item.get("author")
+    return normalize_login(author.get("login") if isinstance(author, dict) else None)
+
+
+def _derive_batch_publication_event(
+    checkpoint: dict[str, Any] | None,
+    *,
+    head_oid: str,
+    observed_at: str | None,
+) -> dict[str, Any] | None:
+    """Bind a published batch to its first authoritative current-head observation."""
+    if not isinstance(checkpoint, dict):
+        return None
+    previous_snapshot = checkpoint.get("latest_target_snapshot")
+    previous_event = (
+        previous_snapshot.get("batch_publication_event")
+        if isinstance(previous_snapshot, dict)
+        else None
+    )
+    if (
+        isinstance(previous_event, dict)
+        and previous_event.get("head_oid") == head_oid
+        and isinstance(previous_event.get("created_at"), str)
+        and previous_event["created_at"]
+    ):
+        return deepcopy(previous_event)
+
+    batch = checkpoint.get("active_batch")
+    publication = batch.get("publication") if isinstance(batch, dict) else None
+    if not isinstance(publication, dict):
+        return None
+    if publication.get("status") != "succeeded":
+        return None
+    if publication.get("published_commit") != head_oid:
+        return None
+    if not isinstance(observed_at, str) or not observed_at:
+        return None
+    return {
+        "kind": "batch_publication",
+        "head_oid": head_oid,
+        "commit_oid": head_oid,
+        "created_at": observed_at,
+    }
+
+
+def _derive_relevant_codex_events(
+    *,
+    review_threads: Iterable[dict[str, Any]],
+    reviews: Iterable[dict[str, Any]],
+    conversation_comments: Iterable[dict[str, Any]],
+    reviewer_logins: Iterable[str],
+    approval_logins: Iterable[str],
+    head_oid: str,
+) -> list[dict[str, Any]]:
+    """Normalize current-head Codex activity from the authoritative snapshot."""
+    actor_keys = set(reviewer_logins) | set(approval_logins)
+    events: list[dict[str, Any]] = []
+
+    for review in reviews:
+        if not isinstance(review, dict):
+            continue
+        commit = review.get("commit")
+        commit_oid = commit.get("oid") if isinstance(commit, dict) else None
+        event_id = review.get("id")
+        author = _event_author(review)
+        created_at = _event_timestamp(review, "submittedAt", "updatedAt")
+        if (
+            commit_oid == head_oid
+            and isinstance(event_id, str)
+            and event_id
+            and author in actor_keys
+            and created_at is not None
+        ):
+            events.append(
+                {
+                    "kind": "review",
+                    "id": event_id,
+                    "head_oid": head_oid,
+                    "login": author,
+                    "created_at": created_at,
+                }
+            )
+
+    for thread in review_threads:
+        if not isinstance(thread, dict) or thread.get("isOutdated") is True:
+            continue
+        thread_id = thread.get("id")
+        comments_connection = thread.get("comments")
+        comments = (
+            comments_connection.get("nodes")
+            if isinstance(comments_connection, dict)
+            else []
+        ) or []
+        for comment in comments:
+            if not isinstance(comment, dict):
+                continue
+            event_id = comment.get("id")
+            author = _event_author(comment)
+            created_at = _event_timestamp(comment, "createdAt", "updatedAt")
+            if (
+                isinstance(event_id, str)
+                and event_id
+                and author in actor_keys
+                and created_at is not None
+            ):
+                events.append(
+                    {
+                        "kind": "review_thread",
+                        "id": event_id,
+                        "thread_id": thread_id,
+                        "head_oid": head_oid,
+                        "login": author,
+                        "created_at": created_at,
+                    }
+                )
+
+    for comment in conversation_comments:
+        if not isinstance(comment, dict):
+            continue
+        event_id = comment.get("id")
+        author = _event_author(comment)
+        created_at = _event_timestamp(comment, "createdAt", "updatedAt")
+        if (
+            isinstance(event_id, str)
+            and event_id
+            and author in actor_keys
+            and created_at is not None
+        ):
+            events.append(
+                {
+                    "kind": "conversation_comment",
+                    "id": event_id,
+                    "head_oid": head_oid,
+                    "login": author,
+                    "created_at": created_at,
+                }
+            )
+
+    unique: dict[tuple[str, str], dict[str, Any]] = {}
+    for event in events:
+        unique[(event["kind"], event["id"])] = event
+    return [unique[key] for key in sorted(unique)]
+
+
 def empty_checkpoint(repository: str, pr_number: int) -> dict[str, Any]:
     if pr_number < 1:
         raise ValueError("Pull request number must be positive")
@@ -244,6 +397,7 @@ def evaluate_snapshot(
     review_threads: Iterable[dict[str, Any]],
     reactions: Iterable[dict[str, Any]],
     reviews: Iterable[dict[str, Any]] = (),
+    conversation_comments: Iterable[dict[str, Any]] = (),
     reviewer_logins: Iterable[str] | None = None,
     approval_logins: Iterable[str] | None = None,
     checkpoint: dict[str, Any] | None = None,
@@ -253,6 +407,9 @@ def evaluate_snapshot(
     """Evaluate one network snapshot and return result plus next checkpoint."""
     if not isinstance(head_oid, str) or not head_oid:
         raise ValueError("Current head OID is required")
+    review_threads = list(review_threads)
+    reviews = list(reviews)
+    conversation_comments = list(conversation_comments)
     reviewers = unique_logins(reviewer_logins, label="reviewer")
     approvers = unique_logins(approval_logins, label="approval")
     targeted_ids, non_target = classify_unresolved_threads(
@@ -263,6 +420,19 @@ def evaluate_snapshot(
     )
     qualifying_reviews, excluded_approval_reviews = (
         classify_current_head_approval_reviews(reviews, approvers, head_oid)
+    )
+    batch_publication_event = _derive_batch_publication_event(
+        checkpoint,
+        head_oid=head_oid,
+        observed_at=observed_at,
+    )
+    relevant_codex_events = _derive_relevant_codex_events(
+        review_threads=review_threads,
+        reviews=reviews,
+        conversation_comments=conversation_comments,
+        reviewer_logins=reviewers,
+        approval_logins=approvers,
+        head_oid=head_oid,
     )
     current_ids = {reaction["id"] for reaction in qualifying}
 
@@ -336,8 +506,8 @@ def evaluate_snapshot(
         "codex_review_in_progress": False,
         "review_activity_ok": True,
         "review_in_progress_reaction_ids": [],
-        "batch_publication_event": None,
-        "relevant_codex_events": [],
+        "batch_publication_event": batch_publication_event,
+        "relevant_codex_events": relevant_codex_events,
         "snapshot_stable": True,
         "mixed_head": False,
         "auth_ok": True,
@@ -371,6 +541,8 @@ def evaluate_snapshot(
         "approval_epoch_transition": epoch_transition,
         "cold_start": cold_start,
         "codex_terminal": codex_terminal,
+        "batch_publication_event": batch_publication_event,
+        "relevant_codex_events": relevant_codex_events,
     }
     return result, next_checkpoint
 

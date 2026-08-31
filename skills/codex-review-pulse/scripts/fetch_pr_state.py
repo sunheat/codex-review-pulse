@@ -384,6 +384,7 @@ def main() -> None:
         review_threads=review_threads,
         reactions=thumbs_up_reactions,
         reviews=reviews,
+        conversation_comments=conversation_comments,
         reviewer_logins=reviewer_logins,
         approval_logins=approval_logins,
         checkpoint=previous_checkpoint,
@@ -442,8 +443,8 @@ def main() -> None:
         "review_activity_ok": True,
         "codex_review_in_progress": False,
         "review_in_progress_reaction_ids": [],
-        "batch_publication_event": None,
-        "relevant_codex_events": [],
+        "batch_publication_event": evaluation["batch_publication_event"],
+        "relevant_codex_events": evaluation["relevant_codex_events"],
         "server_time": observed_at,
     }
     print(json.dumps(result, indent=2))

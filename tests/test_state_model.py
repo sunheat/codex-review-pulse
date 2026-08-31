@@ -69,6 +69,8 @@ def evaluate(
     reviewer_logins: list[str] | None = None,
     approval_logins: list[str] | None = None,
     reviews: list[dict] | None = None,
+    conversation_comments: list[dict] | None = None,
+    observed_at: str = "2026-08-25T00:00:00+00:00",
 ) -> tuple[dict, dict]:
     return evaluate_snapshot(
         repository="Owner/Repo",
@@ -78,10 +80,11 @@ def evaluate(
         review_threads=threads or [],
         reactions=reactions or [],
         reviews=reviews or [],
+        conversation_comments=conversation_comments or [],
         reviewer_logins=reviewer_logins,
         approval_logins=approval_logins,
         checkpoint=checkpoint,
-        observed_at="2026-08-25T00:00:00+00:00",
+        observed_at=observed_at,
     )
 
 
@@ -153,6 +156,72 @@ class ReviewerScopeTests(unittest.TestCase):
         snapshot = checkpoint["latest_target_snapshot"]
         self.assertIsNone(snapshot["batch_publication_event"])
         self.assertEqual(snapshot["relevant_codex_events"], [])
+
+    def test_published_head_creates_a_stable_server_bound_event(self) -> None:
+        _, checkpoint = evaluate(head="OLD")
+        checkpoint["active_batch"] = {
+            "publication": {"status": "succeeded", "published_commit": "NEW"}
+        }
+
+        _, checkpoint = evaluate(
+            head="NEW",
+            checkpoint=checkpoint,
+            observed_at="2026-08-25T00:01:00+00:00",
+        )
+        event = checkpoint["latest_target_snapshot"]["batch_publication_event"]
+        self.assertEqual(event["head_oid"], "NEW")
+        self.assertEqual(event["commit_oid"], "NEW")
+        self.assertEqual(event["created_at"], "2026-08-25T00:01:00+00:00")
+
+        _, checkpoint = evaluate(
+            head="NEW",
+            checkpoint=checkpoint,
+            observed_at="2026-08-25T00:02:00+00:00",
+        )
+        self.assertEqual(
+            checkpoint["latest_target_snapshot"]["batch_publication_event"]["created_at"],
+            "2026-08-25T00:01:00+00:00",
+        )
+
+    def test_relevant_codex_events_are_derived_from_current_head_evidence(self) -> None:
+        result, _ = evaluate(
+            head="HEAD",
+            threads=[
+                {
+                    "id": "THREAD",
+                    "isResolved": False,
+                    "isOutdated": False,
+                    "comments": {
+                        "nodes": [
+                            {
+                                "id": "THREAD_COMMENT",
+                                "author": {"login": "chatgpt-codex-connector[bot]"},
+                                "createdAt": "2026-08-25T00:01:00+00:00",
+                            }
+                        ]
+                    },
+                }
+            ],
+            reviews=[
+                {
+                    "id": "REVIEW",
+                    "author": {"login": "chatgpt-codex-connector"},
+                    "commit": {"oid": "HEAD"},
+                    "submittedAt": "2026-08-25T00:02:00+00:00",
+                }
+            ],
+            conversation_comments=[
+                {
+                    "id": "COMMENT",
+                    "author": {"login": "chatgpt-codex-connector"},
+                    "createdAt": "2026-08-25T00:03:00+00:00",
+                }
+            ],
+        )
+        self.assertEqual(
+            [event["id"] for event in result["relevant_codex_events"]],
+            ["COMMENT", "REVIEW", "THREAD_COMMENT"],
+        )
 
 
 class ApprovalEpochTests(unittest.TestCase):
