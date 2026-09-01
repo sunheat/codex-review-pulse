@@ -538,9 +538,11 @@ def evaluate_snapshot(
         "head_repository": head_repository or canonical_repository(repository),
         "pull_request_state": pull_request_state,
         "approval_status": approval_status,
-        "codex_review_in_progress": False,
-        "review_activity_ok": True,
-        "review_in_progress_reaction_ids": [],
+        "codex_review_in_progress": bool(review_activity),
+        "review_activity_ok": not invalid_review_activity_ids,
+        "review_in_progress_reaction_ids": [
+            reaction["id"] for reaction in review_activity
+        ],
         "batch_publication_event": batch_publication_event,
         "relevant_codex_events": relevant_codex_events,
         "snapshot_stable": True,

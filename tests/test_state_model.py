@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from io import StringIO
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,7 +14,11 @@ SCRIPTS = ROOT / "skills" / "codex-review-pulse" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from checkpoint_store import load_checkpoint, save_checkpoint  # noqa: E402
-from fetch_pr_state import select_evaluation_identities, verify_stable_head  # noqa: E402
+from fetch_pr_state import (  # noqa: E402
+    main as fetch_pr_state_main,
+    select_evaluation_identities,
+    verify_stable_head,
+)
 from state_model import (  # noqa: E402
     classify_unresolved_threads,
     empty_checkpoint,
@@ -143,6 +149,15 @@ class ReviewerScopeTests(unittest.TestCase):
         self.assertEqual(result["approval_status"], "awaiting_current_head_approval")
         self.assertFalse(result["codex_terminal"])
 
+    def test_latest_snapshot_preserves_review_activity_evidence(self) -> None:
+        _, checkpoint = evaluate(
+            head="A", review_activity_reactions=[eyes_reaction("E1")]
+        )
+        snapshot = checkpoint["latest_target_snapshot"]
+        self.assertTrue(snapshot["review_activity_ok"])
+        self.assertTrue(snapshot["codex_review_in_progress"])
+        self.assertEqual(snapshot["review_in_progress_reaction_ids"], ["E1"])
+
     def test_invalid_eyes_reaction_id_fails_activity_evidence_closed(self) -> None:
         conflicting = eyes_reaction("E1")
         other = eyes_reaction("E1")
@@ -197,6 +212,63 @@ class ReviewerScopeTests(unittest.TestCase):
         snapshot = checkpoint["latest_target_snapshot"]
         self.assertIsNone(snapshot["batch_publication_event"])
         self.assertEqual(snapshot["relevant_codex_events"], [])
+
+    def test_fetch_cli_preserves_review_activity_in_flat_evidence(self) -> None:
+        snapshot = {
+            "repository": "Owner/Repo",
+            "pull_request": {
+                "number": 17,
+                "state": "OPEN",
+                "headRefOid": "A",
+                "headRepository": {"nameWithOwner": "Owner/Repo"},
+            },
+            "review_threads": [],
+            "thumbs_up_reactions": [],
+            "eyes_reactions": [eyes_reaction("E1")],
+            "reviews": [],
+            "conversation_comments": [],
+            "server_time": "2026-08-25T00:00:00+00:00",
+        }
+
+        def fake_run(
+            command: list[str],
+            stdin: str | None = None,
+            *,
+            cwd: str | Path | None = None,
+        ) -> str:
+            del stdin, cwd
+            if command == ["gh", "auth", "status"]:
+                return ""
+            if command == ["gh", "api", "user", "--jq", ".login"]:
+                return "sunheat\n"
+            raise AssertionError(f"Unexpected command: {command}")
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state_file = Path(temporary_directory) / "checkpoint.json"
+            with (
+                patch("fetch_pr_state.run", side_effect=fake_run),
+                patch("fetch_pr_state.fetch_stable_snapshot", return_value=snapshot),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "fetch_pr_state.py",
+                        "--repo",
+                        "Owner/Repo",
+                        "--pr",
+                        "17",
+                        "--state-file",
+                        str(state_file),
+                    ],
+                ),
+                patch("sys.stdout", new_callable=StringIO) as output,
+            ):
+                fetch_pr_state_main()
+
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["review_activity_ok"])
+        self.assertTrue(result["codex_review_in_progress"])
+        self.assertEqual(result["review_in_progress_reaction_ids"], ["E1"])
 
     def test_published_head_creates_a_stable_server_bound_event(self) -> None:
         _, checkpoint = evaluate(head="OLD")

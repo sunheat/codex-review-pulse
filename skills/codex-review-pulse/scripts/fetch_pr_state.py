@@ -539,9 +539,12 @@ def main() -> None:
             for item in evaluation["non_target_unresolved_threads"]
             if isinstance(item, dict) and isinstance(item.get("id"), str)
         ],
-        "review_activity_ok": True,
-        "codex_review_in_progress": False,
-        "review_in_progress_reaction_ids": [],
+        "review_activity_ok": evaluation["review_activity_ok"],
+        "codex_review_in_progress": evaluation["codex_review_in_progress"],
+        "review_in_progress_reaction_ids": [
+            reaction["id"]
+            for reaction in evaluation["codex_review_in_progress_reactions"]
+        ],
         "batch_publication_event": evaluation["batch_publication_event"],
         "relevant_codex_events": evaluation["relevant_codex_events"],
         "server_time": observed_at,
