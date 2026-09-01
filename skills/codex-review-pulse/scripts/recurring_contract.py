@@ -7,9 +7,11 @@ import argparse
 from datetime import UTC, datetime, timedelta
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 from typing import Any
 
 from checkpoint_store import checkpoint_path, runtime_artifact_path
@@ -381,12 +383,37 @@ def validate_contract_authority_binding(
 def load_run_contract(
     path: str | Path, *, repository_path: str | Path | None = None
 ) -> dict[str, Any]:
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    contract_path = Path(path)
+    payload = json.loads(contract_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("Run-contract root must be an object")
-    return validate_run_contract(
-        apply_run_contract_defaults(payload), repository_path=repository_path
-    )
+    resolved = apply_run_contract_defaults(payload)
+    normalized = validate_run_contract(resolved, repository_path=repository_path)
+    if resolved != payload:
+        temporary_name: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=contract_path.parent,
+                prefix=f".{contract_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as stream:
+                temporary_name = stream.name
+                json.dump(resolved, stream, indent=2, sort_keys=True)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_name, contract_path)
+            temporary_name = None
+        finally:
+            if temporary_name is not None:
+                try:
+                    Path(temporary_name).unlink()
+                except FileNotFoundError:
+                    pass
+    return normalized
 
 
 def load_mutation_run_contract(

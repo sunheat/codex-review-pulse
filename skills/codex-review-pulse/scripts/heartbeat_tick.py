@@ -988,7 +988,7 @@ def complete_tick(
     contract_path: str | Path,
     repository_path: str | Path,
     owner_token: str,
-    wake_id: str | None = None,
+    wake_id: str,
     final_observation: dict[str, Any],
     now: str,
     mutation_occurred: bool,
@@ -996,6 +996,8 @@ def complete_tick(
     runtime_script_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Persist final evidence for the retained lease and release it safely."""
+    if not isinstance(wake_id, str) or not wake_id.strip():
+        raise ValueError("A non-empty wake_id is required for completion")
     try:
         contract = load_mutation_run_contract(
             contract_path,
@@ -1273,7 +1275,7 @@ def parse_args() -> argparse.Namespace:
     trigger.add_argument("--evidence", required=True, type=Path)
     complete = commands.add_parser("complete")
     complete.add_argument("--owner-token", required=True)
-    complete.add_argument("--wake-id")
+    complete.add_argument("--wake-id", required=True)
     complete.add_argument("--observation", required=True, type=Path)
     complete.add_argument("--now")
     complete.add_argument("--mutation-occurred", action="store_true")

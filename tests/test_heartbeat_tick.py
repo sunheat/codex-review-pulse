@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 import json
+from io import StringIO
 from pathlib import Path
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from checkpoint_store import load_checkpoint, save_checkpoint  # noqa: E402
 from heartbeat_tick import (  # noqa: E402
     complete_tick,
     doctor,
+    parse_args,
     plan_tick as _plan_tick,
     record_trigger,
 )
@@ -293,6 +295,8 @@ class SnapshotBindingTests(unittest.TestCase):
                 observation=observation(targeted_thread_ids=["T1"]),
                 now=NOW,
                 owner_token="owner-a",
+                wake_id="wake-1",
+                pause_heartbeat=lambda: True,
                 checkout_inspector=checkout_ok,
                 runtime_script_path=verified_runtime(installation),
             )
@@ -305,6 +309,7 @@ class SnapshotBindingTests(unittest.TestCase):
                 contract_path=contract_path,
                 repository_path=repository,
                 owner_token="owner-a",
+                wake_id="wake-1",
                 final_observation=observation(
                     targeted_thread_ids=[], approval_status="approved_current_head"
                 ),
@@ -368,6 +373,8 @@ class SnapshotBindingTests(unittest.TestCase):
                 observation=observation(targeted_thread_ids=["T1"]),
                 now=NOW,
                 owner_token="owner-a",
+                wake_id="wake-1",
+                pause_heartbeat=lambda: True,
                 checkout_inspector=checkout_ok,
                 runtime_script_path=verified_runtime(installation),
             )
@@ -391,6 +398,7 @@ class SnapshotBindingTests(unittest.TestCase):
                 contract_path=contract_path,
                 repository_path=repository,
                 owner_token="owner-a",
+                wake_id="wake-1",
                 final_observation=observation(
                     head_oid="HEAD3", targeted_thread_ids=["T1"]
                 ),
@@ -423,6 +431,8 @@ class SnapshotBindingTests(unittest.TestCase):
                 observation=observation(targeted_thread_ids=["T1"]),
                 now=NOW,
                 owner_token="owner-a",
+                wake_id="wake-1",
+                pause_heartbeat=lambda: True,
                 checkout_inspector=checkout_ok,
                 runtime_script_path=verified_runtime(installation),
             )
@@ -443,6 +453,7 @@ class SnapshotBindingTests(unittest.TestCase):
                 contract_path=contract_path,
                 repository_path=repository,
                 owner_token="owner-a",
+                wake_id="wake-1",
                 final_observation=observation(head_oid="HEAD1", targeted_thread_ids=["T1"]),
                 now="2026-08-25T00:20:30+00:00",
                 mutation_occurred=True,
@@ -688,6 +699,25 @@ class HeartbeatTickTests(unittest.TestCase):
                 DEFAULT_CADENCE_SECONDS,
             )
 
+    def test_loading_omitted_expiry_materializes_one_stable_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            payload = json.loads(contract_path.read_text(encoding="utf-8"))
+            payload.pop("expires_at")
+            contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            first = load_run_contract(contract_path, repository_path=repository)
+            persisted = json.loads(contract_path.read_text(encoding="utf-8"))
+            second = load_run_contract(contract_path, repository_path=repository)
+
+            self.assertEqual(first["expires_at"], persisted["expires_at"])
+            self.assertEqual(first["expires_at"], second["expires_at"])
+
     def test_default_resolution_preserves_explicit_bounds(self) -> None:
         explicit = {
             "cadence_seconds": 1200,
@@ -700,6 +730,30 @@ class HeartbeatTickTests(unittest.TestCase):
         }
 
         self.assertEqual(apply_run_contract_defaults(explicit, now=NOW), explicit)
+
+    def test_complete_parser_requires_a_wake_id(self) -> None:
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "heartbeat_tick.py",
+                    "--contract",
+                    "contract.json",
+                    "--repository-path",
+                    "repo",
+                    "complete",
+                    "--owner-token",
+                    "owner",
+                    "--observation",
+                    "observation.json",
+                ],
+            ),
+            patch("sys.stderr", new_callable=StringIO),
+        ):
+            with self.assertRaises(SystemExit) as error:
+                parse_args()
+        self.assertEqual(error.exception.code, 2)
 
     def test_authority_digest_is_canonical_and_covers_every_mutable_category(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
@@ -849,6 +903,8 @@ class HeartbeatTickTests(unittest.TestCase):
                 observation=observation(targeted_thread_ids=["T1"]),
                 now=NOW,
                 owner_token="secret-owner-token",
+                wake_id="wake-1",
+                pause_heartbeat=lambda: True,
                 checkout_inspector=checkout_ok,
                 runtime_script_path=verified_runtime(installation),
             )
@@ -872,6 +928,7 @@ class HeartbeatTickTests(unittest.TestCase):
                 contract_path=contract_path,
                 repository_path=repository,
                 owner_token="secret-owner-token",
+                wake_id="wake-1",
                 final_observation=observation(),
                 now="2026-08-25T00:20:30+00:00",
                 mutation_occurred=False,
@@ -966,6 +1023,8 @@ class HeartbeatTickTests(unittest.TestCase):
                 observation=observation(targeted_thread_ids=["T1"]),
                 now=NOW,
                 owner_token="owner-a",
+                wake_id="wake-1",
+                pause_heartbeat=lambda: True,
                 checkout_inspector=checkout_ok,
                 runtime_script_path=verified_runtime(installation),
             )
@@ -1262,6 +1321,8 @@ class HeartbeatTickTests(unittest.TestCase):
                 observation=observation(targeted_thread_ids=["T1"]),
                 now=NOW,
                 owner_token="owner-a",
+                wake_id="wake-1",
+                pause_heartbeat=lambda: True,
                 checkout_inspector=checkout_ok,
                 runtime_script_path=verified_runtime(installation),
             )
@@ -1303,6 +1364,7 @@ class HeartbeatTickTests(unittest.TestCase):
                 contract_path=contract_path,
                 repository_path=repository,
                 owner_token="owner-a",
+                wake_id="wake-1",
                 final_observation=observation(targeted_thread_ids=["T1"]),
                 now="2026-08-25T00:21:00+00:00",
                 mutation_occurred=True,
@@ -1379,6 +1441,8 @@ class HeartbeatTickTests(unittest.TestCase):
                 observation=observation(targeted_thread_ids=["T1"]),
                 now=NOW,
                 owner_token="owner-a",
+                wake_id="wake-1",
+                pause_heartbeat=lambda: True,
                 checkout_inspector=checkout_ok,
                 runtime_script_path=verified_runtime(installation),
             )
@@ -1391,6 +1455,7 @@ class HeartbeatTickTests(unittest.TestCase):
                 contract_path=contract_path,
                 repository_path=repository,
                 owner_token="owner-a",
+                wake_id="wake-1",
                 final_observation=observation(),
                 now="2026-08-25T00:20:30+00:00",
                 mutation_occurred=False,
@@ -1414,6 +1479,8 @@ class HeartbeatTickTests(unittest.TestCase):
                 observation=observation(targeted_thread_ids=["T1"]),
                 now=NOW,
                 owner_token="owner-a",
+                wake_id="wake-1",
+                pause_heartbeat=lambda: True,
                 lease_duration_seconds=30,
                 checkout_inspector=checkout_ok,
                 runtime_script_path=verified_runtime(installation),
@@ -1423,6 +1490,7 @@ class HeartbeatTickTests(unittest.TestCase):
                 contract_path=contract_path,
                 repository_path=repository,
                 owner_token="owner-a",
+                wake_id="wake-1",
                 final_observation=observation(),
                 now="2026-08-25T00:20:31+00:00",
                 mutation_occurred=False,

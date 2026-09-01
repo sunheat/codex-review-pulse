@@ -656,10 +656,15 @@ def record_thread_outcome(
     if thread_id not in batch["targeted_thread_ids"]:
         raise ValueError("Thread outcome is not part of the frozen target set")
     outcomes = batch.setdefault("thread_outcomes", {})
-    outcomes[thread_id] = {
+    outcome = {
         "classification": classification,
         "reference": reference,
     }
+    if thread_id in batch.get("resolved_thread_ids", []):
+        if outcomes.get(thread_id) == outcome:
+            return result
+        raise ValueError("Cannot change a thread outcome after exact resolution")
+    outcomes[thread_id] = outcome
     return result
 
 

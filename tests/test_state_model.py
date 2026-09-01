@@ -343,6 +343,30 @@ class ReviewerScopeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "published commit is required"):
             record_publication_success(checkpoint)
 
+    def test_resolved_thread_outcome_is_idempotent_but_immutable(self) -> None:
+        checkpoint = freeze_batch(empty_checkpoint("Owner/Repo", 17), "HEAD1", ["T1"])
+        checkpoint = record_thread_outcome(
+            checkpoint,
+            thread_id="T1",
+            classification="no-fix",
+            reference="validated",
+        )
+        checkpoint = record_resolved_thread(checkpoint, "T1")
+
+        replay = record_thread_outcome(
+            checkpoint,
+            thread_id="T1",
+            classification="no-fix",
+            reference="validated",
+        )
+        self.assertEqual(replay, checkpoint)
+        with self.assertRaisesRegex(ValueError, "after exact resolution"):
+            record_thread_outcome(
+                checkpoint,
+                thread_id="T1",
+                classification="fix-now",
+            )
+
     def test_relevant_codex_events_are_derived_from_current_head_evidence(self) -> None:
         result, _ = evaluate(
             head="HEAD",
