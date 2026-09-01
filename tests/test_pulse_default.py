@@ -786,6 +786,89 @@ class DefaultLifecycleTests(unittest.TestCase):
             pulse.record_snapshot(state, snapshot(targeted=["T1"]), wake_id="wake-1", now=NOW)
         self.assertIsNone(state.get("active_batch"))
 
+    def test_paused_result_preserves_prior_thread_resolution_mutation(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(
+            state,
+            snapshot(targeted=["T1", "T2"]),
+            wake_id="wake-1",
+            now=NOW,
+        )
+        state, _ = pulse.freeze_default_batch(state, wake_id="wake-1")
+        state, _ = pulse.record_default_outcome(
+            state,
+            wake_id="wake-1",
+            thread_id="T1",
+            classification="no-fix",
+            reference="false positive",
+            now=NOW,
+        )
+
+        def graphql_call(query: str, variables: dict[str, object]) -> dict[str, object]:
+            if "resolveReviewThread" in query:
+                return {
+                    "data": {
+                        "resolveReviewThread": {
+                            "thread": {"id": variables["threadId"], "isResolved": True}
+                        }
+                    }
+                }
+            return {
+                "data": {
+                    "repository": {
+                        "nameWithOwner": "owner/repo",
+                        "pullRequest": {
+                            "number": 17,
+                            "headRefOid": "HEAD1",
+                            "reviewThreads": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": [
+                                    {
+                                        "id": "T1",
+                                        "isResolved": False,
+                                        "comments": {
+                                            "nodes": [
+                                                {"author": {"login": "chatgpt-codex-connector"}}
+                                            ]
+                                        },
+                                    },
+                                    {
+                                        "id": "T2",
+                                        "isResolved": False,
+                                        "comments": {
+                                            "nodes": [
+                                                {"author": {"login": "chatgpt-codex-connector"}}
+                                            ]
+                                        },
+                                    }
+                                ],
+                            },
+                        },
+                    }
+                }
+            }
+
+        state, resolved = pulse.resolve_default_thread(
+            state,
+            wake_id="wake-1",
+            thread_id="T1",
+            graphql_call=graphql_call,
+        )
+        self.assertTrue(resolved["mutation_occurred"])
+
+        state, paused = pulse.record_default_outcome(
+            state,
+            wake_id="wake-1",
+            thread_id="T2",
+            classification="ambiguous",
+            reference="uncertain finding",
+            now=NOW,
+        )
+        self.assertEqual(paused["next_action"], "PAUSE_BLOCKED")
+        self.assertEqual(paused["reason_code"], "ambiguous_thread_outcome")
+        self.assertTrue(paused["mutation_occurred"])
+        self.assertTrue(state["last_wake_result"]["mutation_occurred"])
+
     def test_duplicate_snapshot_does_not_plan_or_increment_wake(self) -> None:
         state, _ = started()
         state, first = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)

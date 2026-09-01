@@ -389,6 +389,10 @@ def _pause(
 ) -> dict[str, Any]:
     """Make pause absorbing for the current wake and persist its evidence."""
     active_wake_id = state.get("active_wake_id")
+    mutation_occurred = bool(mutation_occurred) or bool(
+        state.get("wake_mutation_occurred")
+    )
+    _note_wake_mutation(state, mutation_occurred)
     result = _decision(
         action,
         reason_code,
