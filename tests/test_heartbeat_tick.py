@@ -667,6 +667,27 @@ class HeartbeatTickTests(unittest.TestCase):
                 },
             )
 
+    def test_loading_schema_one_contract_resolves_omitted_cadence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            payload = json.loads(contract_path.read_text(encoding="utf-8"))
+            payload.pop("cadence_seconds")
+            contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            normalized = load_run_contract(contract_path, repository_path=repository)
+
+            self.assertEqual(normalized["schema_version"], 1)
+            self.assertEqual(normalized["cadence_seconds"], DEFAULT_CADENCE_SECONDS)
+            self.assertEqual(
+                normalized["wait_policy"]["minimum_server_wait_seconds"],
+                DEFAULT_CADENCE_SECONDS,
+            )
+
     def test_default_resolution_preserves_explicit_bounds(self) -> None:
         explicit = {
             "cadence_seconds": 1200,

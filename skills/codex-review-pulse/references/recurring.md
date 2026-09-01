@@ -83,7 +83,7 @@ Create a JSON object with schema version 1 and validate it before scheduling:
     "generic_reviewer_handling": false,
     "non_target_thread_resolution": false
   },
-  "review_trigger_head_oid": null,
+  "review_trigger_head_oid": "0123456789abcdef0123456789abcdef01234567",
   "cadence_seconds": 600,
   "maximum_wakes": 100,
   "expires_at": "2026-09-24T00:00:00+00:00",
@@ -225,9 +225,11 @@ short recurring request, `REQUEST_REVIEW` authorizes the runner to post that
 exact comment once for the current head. Read the full head OID immediately
 before and after posting, inject the returned GitHub comment node ID and server
 `created_at` into `record-trigger`, then complete from a fresh stable snapshot.
-A null `review_trigger_head_oid` permits this one-per-head policy throughout the
-bounded run; a non-null value narrows it to one exact head. The same head cannot
-receive a second recorded attempt. A changed after-head latches recovery.
+When `mutation_scope.review_trigger` is enabled, `review_trigger_head_oid` must
+be the exact full OID of the head authorized for that trigger. The same head
+cannot receive a second recorded attempt. A changed after-head latches
+recovery. A null `review_trigger_head_oid` is valid only when review-trigger
+authority is disabled.
 
 The operator-verified lifecycle is: configured-Codex `EYES` means review in
 progress and is wait-only; after it disappears, targeted unresolved threads

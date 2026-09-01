@@ -384,7 +384,9 @@ def load_run_contract(
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("Run-contract root must be an object")
-    return validate_run_contract(payload, repository_path=repository_path)
+    return validate_run_contract(
+        apply_run_contract_defaults(payload), repository_path=repository_path
+    )
 
 
 def load_mutation_run_contract(
