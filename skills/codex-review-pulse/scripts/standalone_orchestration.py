@@ -177,6 +177,7 @@ class StandaloneInvocation:
         self.wake_id: str | None = None
         self.started = False
         self.ended = False
+        self._completion_attempted = False
         self._busy = False
         self._lock = RLock()
 
@@ -222,12 +223,23 @@ class StandaloneInvocation:
                 except Exception:
                     pause_confirmed = False
                 if not pause_confirmed:
-                    return self._end(
-                        {
-                            "next_action": "PAUSE_BLOCKED",
-                            "reason_code": "standalone_task_pause_unconfirmed",
-                        }
-                    )
+                    try:
+                        result = self.begin_wake(self.wake_id, self.now, False)
+                    except Exception:
+                        return self._end(
+                            {
+                                "next_action": "PAUSE_RECOVERY",
+                                "reason_code": "pause_failure_persistence_failed",
+                            }
+                        )
+                    if not isinstance(result, Mapping) or "next_action" not in result:
+                        return self._end(
+                            {
+                                "next_action": "PAUSE_RECOVERY",
+                                "reason_code": "pause_failure_persistence_failed",
+                            }
+                        )
+                    return self._end(result)
                 try:
                     checkpoint = self.host.read_checkpoint_directly()
                 except Exception:
@@ -263,8 +275,13 @@ class StandaloneInvocation:
                 raise StandaloneInvocationError(
                     f"The action {action!r} is not eligible for a standalone successor"
                 )
+            if self._completion_attempted:
+                raise StandaloneInvocationError(
+                    "The standalone invocation already attempted complete-wake"
+                )
             if isinstance(cadence_seconds, bool) or cadence_seconds <= 0:
                 raise ValueError("Cadence must be positive")
+            self._completion_attempted = True
             completion = _utc(now)
             expected_first_run = _ceil_to_second(
                 completion + timedelta(seconds=cadence_seconds)
@@ -295,12 +312,17 @@ class StandaloneInvocation:
                 successor_id = None
                 actual_first_run = None
 
-            result = self.complete_wake(
-                self.wake_id,
-                now,
-                lambda _expected: actual_first_run,
-                successor_id,
-            )
+            try:
+                result = self.complete_wake(
+                    self.wake_id,
+                    now,
+                    lambda _expected: actual_first_run,
+                    successor_id,
+                )
+            except Exception:
+                self.ended = True
+                raise
             if not isinstance(result, Mapping) or "next_action" not in result:
+                self.ended = True
                 raise StandaloneInvocationError("complete-wake returned an invalid result")
             return self._end(result)

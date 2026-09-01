@@ -54,10 +54,10 @@ may plan once; duplicate plan/snapshot calls return the prior result or reject
 without incrementing the count. A stale marker returns `PAUSE_RECOVERY` and
 never auto-takes over.
 
-The initial user turn is wake 1. Heartbeat creation/update stays `PAUSED`.
-Each scheduled wake pauses the heartbeat before PR work and stops if that pause
-cannot be confirmed. Final `WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head
-`REQUEST_REVIEW` may reanchor a next wake at
+The initial user turn is wake 1. Standalone task creation stays `PAUSED`.
+Each scheduled wake pauses the delivered standalone task before PR work and
+stops if that pause cannot be confirmed. Final `WAIT_REVIEW`, `WAIT_RETRY`, or
+successful same-head `REQUEST_REVIEW` may create one standalone successor at
 `wake_completed_at + cadence_seconds`; `STOP_*`, `PAUSE_*`, recovery, closed,
 expired, lease-loss, and unknown results remain paused. Pause is absorbing and
 the default path has no automatic recovery-latch clearing operation.
@@ -119,10 +119,11 @@ pilot evidence that changes this phase boundary.
 The standard autonomous default request authorizes PR-scoped implementation and
 test edits, repair of stale PR-scoped expectations, recoverable retries, commit
 and push per aggregate batch, exact target-thread resolution, one review
-trigger per head, and creation/update/pause/reanchor of one same-task heartbeat
-until a Codex-specific stop or hard blocker. Prompt policy can narrow this
-scope. It never authorizes issue creation, merge, auto-merge, changing a PR
-base, force-push, non-target mutations, or unrelated work. Stage explicit paths.
+trigger per head, and creation of one standalone successor task plus the
+required pause/reanchor handoff per rearmable wake until a Codex-specific stop
+or hard blocker. Prompt policy can narrow this scope. It never authorizes issue
+creation, merge, auto-merge, changing a PR base, force-push, non-target
+mutations, or unrelated work. Stage explicit paths.
 
 Tests must not perform live GitHub mutations. Use fixtures and injected GraphQL
 callables for mutation-path coverage.

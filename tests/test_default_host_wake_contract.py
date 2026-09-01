@@ -68,6 +68,7 @@ class InMemoryHost:
         schedule_fails: bool = False,
         first_run: str | None = None,
         pause_succeeds: bool = True,
+        complete_raises: bool = False,
     ) -> None:
         self.state = deepcopy(state)
         self._wake_ids = iter(wake_ids)
@@ -78,6 +79,7 @@ class InMemoryHost:
         self.schedule_fails = schedule_fails
         self.first_run = first_run
         self.pause_succeeds = pause_succeeds
+        self.complete_raises = complete_raises
         self.created_tasks: dict[str, dict[str, object]] = {}
 
     def new_opaque_wake_id(self) -> str:
@@ -176,6 +178,8 @@ class HostInvocation:
         scheduled_task_id: str | None,
     ) -> dict[str, object]:
         self.host.operations.append(("complete-wake", scheduled_task_id or "unconfirmed"))
+        if self.host.complete_raises:
+            raise RuntimeError("checkpoint persistence failed")
         self.host.state, result = pulse.complete_wake(
             self.host.state or {},
             wake_id=wake_id,
@@ -375,8 +379,28 @@ class DefaultHostWakeContractTests(unittest.TestCase):
 
         result = invocation.begin()
 
-        self.assertEqual(result["reason_code"], "standalone_task_pause_unconfirmed")
-        self.assertEqual(host.operations, [("pause-task", "task-1")])
+        self.assertEqual(result["reason_code"], "heartbeat_pause_unconfirmed")
+        self.assertEqual(host.state["scheduled_task_disposition"], "PAUSED")
+        self.assertEqual(host.state["failure_latch"]["reason_code"], "heartbeat_pause_unconfirmed")
+        self.assertEqual(host.operations, [("pause-task", "task-1"), ("begin-wake", "fresh-wake-2")])
+
+    def test_completion_callback_failure_ends_invocation_without_duplicate_successor(self) -> None:
+        host = InMemoryHost(
+            state=waiting_checkpoint(),
+            wake_ids=("fresh-wake-2",),
+            complete_raises=True,
+        )
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+        invocation.begin()
+        invocation.snapshot()
+
+        with self.assertRaises(RuntimeError):
+            invocation.complete(reanchor_succeeds=True)
+
+        self.assertTrue(invocation.ended)
+        self.assertEqual(len(host.created_tasks), 1)
+        with self.assertRaises(StandaloneInvocationError):
+            invocation.complete(reanchor_succeeds=True)
 
     def test_premature_fresh_id_latches_and_reuse_is_idempotent(self) -> None:
         state = waiting_checkpoint()
