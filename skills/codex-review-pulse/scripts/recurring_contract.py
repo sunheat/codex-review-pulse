@@ -438,9 +438,17 @@ def load_mutation_run_contract(
     repository_path: str | Path | None,
     owner_token: str,
 ) -> dict[str, Any]:
-    """Load mutation authority and release its anchored lease on invalid drift."""
+    """Load explicit mutation authority without migrating the contract file."""
     try:
-        return materialize_run_contract_defaults(path, repository_path=repository_path)
+        contract_path = Path(path)
+        payload = json.loads(contract_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("Run-contract root must be an object")
+        if apply_run_contract_defaults(payload) != payload:
+            raise ValueError(
+                "Run-contract defaults require explicit materialization before mutation"
+            )
+        return validate_run_contract(payload, repository_path=repository_path)
     except Exception as error:
         release_anchored_lease(path, owner_token=owner_token)
         raise RunContractDriftError(

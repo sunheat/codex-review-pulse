@@ -181,6 +181,32 @@ class ReviewerScopeTests(unittest.TestCase):
         self.assertFalse(result["codex_review_in_progress"])
         self.assertEqual(result["invalid_review_activity_reaction_ids"], ["E1"])
 
+    def test_malformed_eyes_content_or_timestamp_fails_activity_evidence_closed(self) -> None:
+        for field in ("content", "createdAt"):
+            for value in (None, ""):
+                with self.subTest(field=field, value=value):
+                    malformed = eyes_reaction("E1")
+                    malformed[field] = value
+                    result, _ = evaluate(
+                        head="A",
+                        review_activity_reactions=[malformed],
+                    )
+                    self.assertFalse(result["review_activity_ok"])
+                    self.assertFalse(result["codex_review_in_progress"])
+                    self.assertEqual(
+                        result["invalid_review_activity_reaction_ids"], ["E1"]
+                    )
+
+    def test_unnormalizable_eyes_author_fails_activity_evidence_closed(self) -> None:
+        malformed = eyes_reaction("E1", "[bot]")
+        result, _ = evaluate(
+            head="A",
+            review_activity_reactions=[malformed],
+        )
+        self.assertFalse(result["review_activity_ok"])
+        self.assertFalse(result["codex_review_in_progress"])
+        self.assertEqual(result["invalid_review_activity_reaction_ids"], ["E1"])
+
     def test_human_thread_cannot_be_added_to_frozen_target_set(self) -> None:
         _, checkpoint = evaluate(head="A", threads=self.threads)
         with self.assertRaisesRegex(ValueError, "latest targeted snapshot"):

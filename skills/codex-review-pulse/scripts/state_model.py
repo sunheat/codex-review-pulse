@@ -127,18 +127,30 @@ def _classify_identity_reactions(
     qualifying: list[dict[str, Any]] = []
     for reaction_id in sorted(by_id):
         items = by_id[reaction_id]
-        raw_logins = [
-            (item.get("user") or {}).get("login")
-            for item in items
-        ]
-        if any(not isinstance(login, str) or not login.strip() for login in raw_logins):
-            invalid_ids.add(reaction_id)
+        normalized_items: list[tuple[str, str, str, dict[str, Any]]] = []
+        for item in items:
+            user = item.get("user") if isinstance(item, dict) else None
+            raw_login = user.get("login") if isinstance(user, dict) else None
+            identity = normalize_login(raw_login)
+            content = item.get("content") if isinstance(item, dict) else None
+            created_at = item.get("createdAt") if isinstance(item, dict) else None
+            if (
+                identity is None
+                or not isinstance(content, str)
+                or not content.strip()
+                or not isinstance(created_at, str)
+                or not created_at.strip()
+            ):
+                invalid_ids.add(reaction_id)
+                break
+            normalized_items.append((identity, content, created_at, item))
+        if len(normalized_items) != len(items):
             continue
-        identities = {
-            normalize_login((item.get("user") or {}).get("login")) for item in items
+        identities = {identity for identity, _, _, _ in normalized_items}
+        contents = {content for _, content, _, _ in normalized_items}
+        created_at_values = {
+            created_at for _, _, created_at, _ in normalized_items
         }
-        contents = {item.get("content") for item in items}
-        created_at_values = {item.get("createdAt") for item in items}
         if (
             len(identities) != 1
             or len(contents) != 1
@@ -150,17 +162,14 @@ def _classify_identity_reactions(
         content = next(iter(contents))
         if identity in allowed_keys and content == expected_content:
             source = min(
-                items,
-                key=lambda item: (
-                    str(item.get("createdAt") or ""),
-                    str((item.get("user") or {}).get("login") or ""),
-                ),
+                normalized_items,
+                key=lambda item: (item[2], item[0]),
             )
             qualifying.append(
                 {
                     "id": reaction_id,
                     "content": expected_content,
-                    "createdAt": source.get("createdAt"),
+                    "createdAt": source[2],
                     "login": identity,
                 }
             )

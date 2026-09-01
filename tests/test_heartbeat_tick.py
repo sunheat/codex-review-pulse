@@ -36,6 +36,7 @@ from recurring_contract import (  # noqa: E402
     contract_authority_digest,
     expected_runtime_paths,
     load_run_contract,
+    load_mutation_run_contract,
     materialize_run_contract_defaults,
     validate_run_contract,
 )
@@ -743,6 +744,30 @@ class HeartbeatTickTests(unittest.TestCase):
             )
             self.assertEqual(persisted["expires_at"], migrated["expires_at"])
             self.assertEqual(reloaded["expires_at"], migrated["expires_at"])
+
+    def test_mutation_loader_rejects_unmaterialized_defaults_without_rewriting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            payload = json.loads(contract_path.read_text(encoding="utf-8"))
+            payload.pop("expires_at")
+            contract_path.write_text(json.dumps(payload), encoding="utf-8")
+            before = contract_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                RunContractDriftError, "run contract is unreadable or invalid"
+            ):
+                load_mutation_run_contract(
+                    contract_path,
+                    repository_path=repository,
+                    owner_token="owner-a",
+                )
+
+            self.assertEqual(contract_path.read_bytes(), before)
 
     def test_default_resolution_preserves_explicit_bounds(self) -> None:
         explicit = {
