@@ -883,6 +883,50 @@ class HeartbeatTickTests(unittest.TestCase):
             self.assertEqual(state_path.read_bytes(), before)
             self.assertFalse(Path(payload["paths"]["lease"]).exists())
 
+    def test_wake_identity_mismatch_does_not_release_the_current_wake_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            planned = plan_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                observation=observation(targeted_thread_ids=["T1"]),
+                now=NOW,
+                owner_token="owner-a",
+                wake_id="wake-b",
+                pause_heartbeat=lambda: True,
+                checkout_inspector=checkout_ok,
+                runtime_script_path=verified_runtime(installation),
+            )
+            self.assertEqual(planned["next_action"], "RUN_BATCH")
+            contract = load_run_contract(contract_path, repository_path=repository)
+            lease_path = Path(contract["paths"]["lease"])
+            state_path = Path(contract["paths"]["run_state"])
+            state_before = state_path.read_bytes()
+
+            mismatched = complete_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                owner_token="owner-a",
+                wake_id="wake-a",
+                final_observation=observation(targeted_thread_ids=["T1"]),
+                now="2026-08-25T00:20:30+00:00",
+                mutation_occurred=False,
+                runtime_script_path=verified_runtime(installation),
+            )
+
+            self.assertEqual(mismatched["next_action"], "PAUSE_RECOVERY")
+            self.assertEqual(mismatched["reason_code"], "wake_identity_mismatch")
+            self.assertEqual(mismatched["lease"]["status"], "unchanged")
+            self.assertTrue(lease_path.exists())
+            self.assertEqual(lease_path.read_text().count("owner-a"), 1)
+            self.assertEqual(state_path.read_bytes(), state_before)
+            self.assertEqual(json.loads(state_path.read_text())["active_wake_id"], "wake-b")
+
     def test_doctor_is_read_only_and_does_not_create_lease(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             repository = Path(directory_name) / "repo"

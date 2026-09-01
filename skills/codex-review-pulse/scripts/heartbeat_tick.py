@@ -1066,12 +1066,6 @@ def complete_tick(
                     "mutation_occurred": False,
                     "lease": {"status": "not_owned"},
                 }
-            release_lease(
-                contract["paths"]["lease"],
-                repository=contract["repository"],
-                pr_number=contract["pull_request_number"],
-                owner_token=owner_token,
-            )
             return {
                 "schema_version": 1,
                 "run_status": "paused",
@@ -1080,7 +1074,7 @@ def complete_tick(
                 "wake_id": wake_id,
                 "mutation_occurred": mutation_occurred,
                 "recommended_heartbeat_disposition": "pause",
-                "lease": {"status": "released"},
+                "lease": {"status": "unchanged"},
             }
     if not _installation_status(contract)["ok"]:
         raise RuntimeError("Heartbeat installation verification failed")
