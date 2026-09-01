@@ -215,6 +215,67 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertTrue(result["resume_pending_batch"])
         self.assertEqual(state["last_decision"]["reason_code"], "resume_pending_batch")
 
+    def test_retry_waiting_is_a_mutation_boundary_but_can_complete(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(
+            state, snapshot(targeted=["T1"]), wake_id="wake-1", now=NOW
+        )
+        state, _ = pulse.freeze_default_batch(state, wake_id="wake-1")
+        state, _ = pulse.record_default_outcome(
+            state,
+            wake_id="wake-1",
+            thread_id="T1",
+            classification="fix-now",
+            now=NOW,
+        )
+        state, result = pulse.record_retry(
+            state,
+            wake_id="wake-1",
+            reason_code="transient_validation_failure",
+            now=NOW,
+            signature="test-failure",
+        )
+        self.assertEqual(result["next_action"], "WAIT_RETRY")
+
+        with self.assertRaisesRegex(pulse.DefaultWakeError, "terminal boundary"):
+            pulse.record_default_outcome(
+                state,
+                wake_id="wake-1",
+                thread_id="T1",
+                classification="fix-now",
+                now=NOW,
+            )
+        with self.assertRaisesRegex(pulse.DefaultWakeError, "terminal boundary"):
+            pulse.resolve_default_thread(
+                state,
+                wake_id="wake-1",
+                thread_id="T1",
+                graphql_call=lambda *_: {},
+            )
+        with self.assertRaisesRegex(pulse.DefaultWakeError, "terminal boundary"):
+            pulse.prepare_default_publication(
+                state,
+                wake_id="wake-1",
+                now=NOW,
+                actual_head_oid="HEAD1",
+            )
+        with self.assertRaisesRegex(pulse.DefaultWakeError, "terminal boundary"):
+            pulse.record_publication_result(
+                state,
+                wake_id="wake-1",
+                status="succeeded",
+                now=NOW,
+                published_commit="HEAD1",
+            )
+
+        state, completed = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:01:00+00:00",
+            schedule_next_wake=lambda expected: expected,
+        )
+        self.assertEqual(completed["next_action"], "WAIT_RETRY")
+
     def test_retry_resume_preserves_frozen_targets_when_review_threads_disappear(self) -> None:
         state, _ = started()
         state, _ = pulse.record_snapshot(
@@ -1092,7 +1153,9 @@ class DefaultLifecycleTests(unittest.TestCase):
             },
         )
         self.assertEqual(result["reason_code"], "review_trigger_recorded")
-        state, _ = pulse.complete_wake(state, wake_id="wake-2", now="2026-08-26T00:12:00+00:00", schedule_next_wake=lambda expected: expected)
+        self.assertTrue(result["mutation_occurred"])
+        state, completed = pulse.complete_wake(state, wake_id="wake-2", now="2026-08-26T00:12:00+00:00", schedule_next_wake=lambda expected: expected)
+        self.assertTrue(completed["mutation_occurred"])
         state, _ = started(state, wake_id="wake-3", now="2026-08-26T00:22:00+00:00")
         state, result = pulse.record_snapshot(state, snapshot(), wake_id="wake-3", now="2026-08-26T00:22:00+00:00")
         self.assertEqual(result["next_action"], "PAUSE_BLOCKED")

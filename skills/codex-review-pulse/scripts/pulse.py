@@ -396,12 +396,16 @@ def _terminal(
     return result
 
 
-def _require_active_wake(state: dict[str, Any], wake_id: str) -> None:
+def _require_active_wake(
+    state: dict[str, Any], wake_id: str, *, allow_retry_completion: bool = False
+) -> None:
     if state.get("failure_latch"):
         raise DefaultWakeError("This wake is paused by a durable recovery latch")
     if state.get("active_wake_id") != wake_id:
         raise DefaultWakeError("The requested operation is not owned by the active wake")
-    if state.get("wake_phase") in {"paused", "terminal", "completed"}:
+    if state.get("wake_phase") in {"paused", "terminal", "completed"} or (
+        state.get("wake_phase") == "retry_waiting" and not allow_retry_completion
+    ):
         raise DefaultWakeError("The current wake has already reached a terminal boundary")
 
 
@@ -1128,7 +1132,7 @@ def record_default_trigger(
             "next_action": "REQUEST_REVIEW",
             "reason_code": "review_trigger_recorded",
             "trigger": event,
-            "mutation_occurred": False,
+            "mutation_occurred": True,
         }
         _set_last_result(state, result)
     return state, result
@@ -1228,7 +1232,7 @@ def complete_wake(
         raise ValueError("Cadence must be positive")
     if state.get("last_wake_id") == wake_id and state.get("active_wake_id") is None and state.get("last_wake_result"):
         return state, deepcopy(state["last_wake_result"])
-    _require_active_wake(state, wake_id)
+    _require_active_wake(state, wake_id, allow_retry_completion=True)
     decision = state.get("last_decision") or {}
     action = decision.get("next_action")
     mutation_occurred = bool(decision.get("mutation_occurred"))
