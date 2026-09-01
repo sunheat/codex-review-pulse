@@ -1,12 +1,45 @@
 # Usage
 
-## Release-candidate boundary
+## Hardened-only boundary
 
-The core model, immutable installation, supervised preflight, and manually
-reviewed one- and two-wake live pilots are complete. Version `0.3.1` supports
-both a supervised single cycle and repeatable bounded recurring pilots. It
-does not support indefinite unattended operation, plugin packaging, or
-validated Pi portability.
+This document is an opt-in operations reference for the existing hardened
+controller. Version `0.4.0` has a real black-box pilot failure: the old
+heartbeat activated before wake completion, used fixed-cadence overlap, let a
+300-second lease expire during a long wake, double-planned one host wake, and
+continued after `PAUSE_BLOCKED`. It is not a publishable final recurring
+release. The normal user path is [`../SKILL.md`](../SKILL.md) and
+`scripts/pulse.py`; it does not require any command in this document.
+
+The standard short request selects the Codex-first default path:
+
+```text
+Automatically fix this PR's Codex review issues until no new issues appear.
+```
+
+It uses one paused-before-work wake at a time. Only a completion-relative
+`WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head `REQUEST_REVIEW` may rearm
+the next wake.
+The hardened commands below must not be used to reintroduce the old activation
+lifecycle. Repository-specific scope and trusted-input boundaries belong in
+the target repository's `AGENTS.md`.
+
+When using the default CLI directly from the target PR checkout, omit
+`--repo` and `--pr`; `pulse.py` resolves the current PR before deriving the
+Git-common-directory checkpoint path. Explicit values remain supported and
+take priority. If the checkout does not identify one PR, stop and pass both
+`--repo OWNER/REPO` and `--pr NUMBER` rather than guessing. After the first
+wake, the checkpoint's bound repository and PR are reused and explicit target
+drift is rejected.
+
+The host adapter's `--pause-confirmed` and `--schedule-reanchored` inputs are
+post-success confirmations only. They do not call or authorize a Codex
+automation operation. Pass `--schedule-reanchored` only after the task update
+succeeds and pair it with `--scheduled-first-run` containing the persisted
+first run read back from the task. The controller verifies that timestamp
+against its completion-relative expectation. Schedule timestamps are rounded
+up to the scheduler's representable precision; the ordered first-run check
+allows equality or a delay of at most one second. Comparisons without a
+logical ordering allow one second on either side.
 
 Use a clean source repository and an exact release-candidate commit throughout
 the commands below. OpenAI documents `$HOME/.agents/skills` as the user-level
@@ -31,7 +64,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
 This extracts `skills/codex-review-pulse` from the named Git commit into
 `$env:USERPROFILE\.agents\skills\codex-review-pulse`. It does not copy the
 mutable working-tree files and does not create a symlink. The installed
-manifest records version `0.3.1`, the full source commit, and SHA-256 file
+manifest records version `0.7.1`, the full source commit, and SHA-256 file
 hashes. Verification independently reconstructs that inventory from the pinned
 Git commit, so changing both an installed file and its adjacent manifest does
 not reauthorize the modified bytes.
@@ -45,7 +78,7 @@ explicit alternate configured location.
 
 ```powershell
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
-  --expected-version 0.3.1 `
+  --expected-version 0.7.1 `
   --expected-source-commit $commit
 ```
 
@@ -64,7 +97,7 @@ python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_prefligh
   --repo OWNER/REPO `
   --pr NUMBER `
   --repository-path C:\path\to\target-repository `
-  --expected-skill-version 0.3.1 `
+  --expected-skill-version 0.7.1 `
   --expected-source-commit $commit `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector `
@@ -166,10 +199,16 @@ direct current-head proof. PR-level thumbs-up reactions remain epoch based:
 Do not infer approval ordering from PR `updatedAt`, commit `authoredDate`, or a
 reaction `createdAt` alone.
 
+A configured Codex identity's PR-level `EYES` reaction is review-in-progress
+evidence only. Wait for its removal before freezing any visible partial batch.
+It is never approval; human `EYES` does not affect the loop.
+
 ## Update
 
-Commit the new release candidate and return the source repository to a clean
-state. Then:
+If a separately authorized hardened release is ever revalidated, commit that
+release and return the source repository to a clean state before updating the
+independent installation. This development phase does not authorize that
+operation. Then:
 
 ```powershell
 $newCommit = git rev-parse HEAD
@@ -196,7 +235,8 @@ unverified or foreign directory.
 
 ## Deferred modes
 
-For a finite recurring pilot, follow [recurring.md](recurring.md). Do not start
+For a specifically authorized hardened recurrence, first read
+[`hardened.md`](hardened.md) and [recurring.md](recurring.md). Do not start
 an indefinite unattended automation or Windows scheduled task. Public-API
 connector detection bound to the current head, long-term unattended approval,
 plugin packaging, Pi portability, generic reviewers/multi-forge behavior, and

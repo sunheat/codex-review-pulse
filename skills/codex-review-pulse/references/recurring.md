@@ -1,23 +1,55 @@
-# Bounded recurring pilot
+# Hardened recurring compatibility reference
 
-Read this reference only for a recurring/heartbeat request. Ordinary supervised
-single-cycle work uses [usage.md](usage.md).
+Read this document only after explicitly choosing the optional hardened mode.
+Version `0.4.0` has a real black-box pilot failure and is not a publishable
+final recurring release. The public default is `scripts/pulse.py`; it does not
+require this contract, installation, doctor, or lease protocol.
 
-## Required user inputs
+## Non-negotiable lifecycle
 
-Do not create a run contract or scheduled task until the user supplies:
+The hardened controller must follow the same lifecycle as the default path:
 
-- canonical `OWNER/REPO` and PR number;
-- reviewer and approval identities;
-- cadence, maximum wakes, and optional expiration;
-- separate authorization for recurring execution, code edits, exact thread
-  resolution, commit, and push;
-- whether one current-head `@codex review` request may be proposed;
-- runner/automation identity and notification/pause preference; and
-- the exact installed version, source commit, skill path, and target checkout.
+1. The initial user turn is wake 1. Create/update the same-task heartbeat in
+   `PAUSED`, never `ACTIVE` before work begins.
+2. A scheduled wake's first scheduler operation pauses its heartbeat. If the
+   host cannot confirm that pause, return `PAUSE_BLOCKED` and perform no PR
+   mutation.
+3. A persistent `wake_id` binds one host invocation. A repeated plan with the
+   same ID returns the prior result or rejects and never increments
+   `wake_count`. Renewal, refresh, completion, and recovery inspection do not
+   call plan again.
+4. A stale or incomplete marker returns `PAUSE_RECOVERY`; it never auto-
+   recovers or takes over another wake.
+5. The wake runs one stable decision and at most one frozen batch. Exact
+   outcomes are persisted before exact resolution; aggregate publication is at
+   most one commit and one push.
+6. Only `WAIT_REVIEW`, or a successful same-head `REQUEST_REVIEW`, may set
+   `next_not_before` to `wake_completed_at + cadence_seconds` and rearm the
+   heartbeat. Every other result stays `PAUSED`.
 
-Issue creation, merge, auto-merge, base change, force-push, generic reviewer
-handling, and non-target resolution remain prohibited in this release.
+The old rule “doctor succeeds, then immediately activate the heartbeat” is
+removed. A fixed RRULE is not assumed to reset when paused and reactivated; the
+host must re-anchor or remain paused with a blocker.
+
+## Contract and installation
+
+The existing `recurring_contract.py`, `manage_pilot_install.py`,
+`pilot_preflight.py`, and `runner_lease.py` remain available for compatibility
+testing and future supervised revalidation. Their detailed command examples
+are in [`usage.md`](usage.md). They are not default prerequisites.
+
+The hardened lease must cover the complete possible wake or be renewed by an
+independent, verified operation. Lease loss is `PAUSE_CONCURRENT` or
+`PAUSE_RECOVERY`; it cannot be followed by another plan, latch clearing, or
+publication. A plain `recovery_authorization_id` is not authority. Recovery
+requires a new user interaction or a separately verifiable external source.
+
+## Deferred boundary
+
+This phase does not approve indefinite unattended operation, a production
+scheduled-task integration, unknown connector capability, Pi portability,
+plugin packaging, generic reviewers, multi-forge behavior, or
+`gh-address-comments` reuse/vendor policy.
 
 ## Run contract
 
@@ -31,7 +63,7 @@ Create a JSON object with schema version 1 and validate it before scheduling:
   "reviewer_logins": ["chatgpt-codex-connector"],
   "approval_logins": ["chatgpt-codex-connector"],
   "expected_installation": {
-    "version": "0.3.1",
+    "version": "0.4.0",
     "source_commit": "0123456789abcdef0123456789abcdef01234567",
     "source_repository": "C:\\Users\\USER\\git\\codex-review-pulse",
     "skill_path": "C:\\Users\\USER\\.agents\\skills\\codex-review-pulse"
@@ -42,7 +74,7 @@ Create a JSON object with schema version 1 and validate it before scheduling:
     "resolve_threads": true,
     "commit": true,
     "push": true,
-    "review_trigger": false,
+    "review_trigger": true,
     "issue_creation": false,
     "merge": false,
     "auto_merge": false,
@@ -51,15 +83,16 @@ Create a JSON object with schema version 1 and validate it before scheduling:
     "generic_reviewer_handling": false,
     "non_target_thread_resolution": false
   },
-  "review_trigger_head_oid": null,
-  "maximum_wakes": 3,
-  "expires_at": "2026-08-26T00:00:00+00:00",
+  "review_trigger_head_oid": "0123456789abcdef0123456789abcdef01234567",
+  "cadence_seconds": 600,
+  "maximum_wakes": 100,
+  "expires_at": "2026-09-24T00:00:00+00:00",
   "runner_identity": "operator-runner",
   "automation_identity": "codex-task-id",
   "authorization_id": "user-approved-pilot-1",
   "connector_capability": "unknown",
   "wait_policy": {
-    "minimum_server_wait_seconds": 900,
+    "minimum_server_wait_seconds": 600,
     "minimum_stable_observations": 2
   },
   "paths": {
@@ -71,7 +104,16 @@ Create a JSON object with schema version 1 and validate it before scheduling:
 ```
 
 Derive paths with `recurring_contract.expected_runtime_paths` or inspect a
-validated example in a temporary target repository. Validate:
+validated example in a temporary target repository. For a partial contract
+whose bounds were omitted, resolve and validate the defaults once:
+
+```powershell
+python scripts/recurring_contract.py C:\controlled\run-contract.partial.json `
+  --repository-path C:\path\to\target `
+  --apply-defaults > C:\controlled\run-contract.json
+```
+
+Validate an already explicit contract:
 
 ```powershell
 python scripts/recurring_contract.py C:\controlled\run-contract.json `
@@ -79,8 +121,12 @@ python scripts/recurring_contract.py C:\controlled\run-contract.json `
 ```
 
 `connector_capability` stays `unknown` unless an operator explicitly supplies
-`manual_trigger` or `automatic_review` from settings they control. Do not infer
-it from GitHub text or reviewer identity.
+`manual_trigger` or `automatic_review` from settings they control. It is
+descriptive evidence, but the recurring controller permits `REQUEST_REVIEW`
+only for the explicitly known `manual_trigger` capability. Unknown or
+`automatic_review` capability pauses for operator action. Trigger authority
+also comes from the immutable mutation scope and is guarded once per exact
+current-head epoch.
 
 ## Read-only doctor
 
@@ -121,6 +167,8 @@ The observation is evidence, not authority. Include:
 - current PR state and full head OID;
 - exact targeted and non-target thread ID lists;
 - approval status and evidence IDs;
+- `review_activity_ok`, `codex_review_in_progress`, and the exact qualifying
+  configured-Codex `EYES` reaction IDs;
 - local checkout integrity;
 - relevant current-head Codex events and GitHub server timestamps;
 - a current-head batch-publication event when one exists; and
@@ -172,20 +220,37 @@ and releases the lease. A later wake must not retry it.
 
 ## Review request
 
-OpenAI documents the exact manual request as `@codex review`, but this release
-does not post it. `REQUEST_REVIEW` means pause for human confirmation. If the
-user separately authorizes and performs it, the contract must name that exact
-current head OID; a later head requires new authorization. Bracket the comment
-operation with current-head reads and inject the returned GitHub comment node
-ID and server `created_at` into `record-trigger`. The same head cannot receive a second
-recorded attempt. A changed after-head latches recovery.
+OpenAI documents the exact manual request as `@codex review`. Under the standard
+short recurring request, `REQUEST_REVIEW` authorizes the runner to post that
+exact comment once for the current head. Read the full head OID immediately
+before and after posting, inject the returned GitHub comment node ID and server
+`created_at` into `record-trigger`, then complete from a fresh stable snapshot.
+When `mutation_scope.review_trigger` is enabled, `review_trigger_head_oid` must
+be the exact full OID of the head authorized for that trigger. The same head
+cannot receive a second recorded attempt. A changed after-head latches
+recovery. A null `review_trigger_head_oid` is valid only when review-trigger
+authority is disabled.
+
+The operator-verified lifecycle is: configured-Codex `EYES` means review in
+progress and is wait-only; after it disappears, targeted unresolved threads
+mean run one frozen batch; current-head approval means stop; and none of those
+states, after the stable server-time boundary, means emit the single trigger.
+After a trigger, always end the turn and wait at least one cadence. If the next
+wake still has no `EYES`, targeted thread, or approval, pause as
+`review_trigger_did_not_start` and summarize for user intervention.
 
 ## Stop and pause
 
 - Complete on `STOP_TERMINAL` or `STOP_CLOSED`.
 - Keep the scheduled task active only for `WAIT_REVIEW` and within the bounded
   contract.
+- On `WAIT_REVIEW`, schedule the single next heartbeat at least
+  `cadence_seconds` later and end the current turn. Never poll, sleep, or begin
+  another wake in that turn.
 - Pause on every `PAUSE_*` result or any unrecognized action/reason code.
-- Treat `REQUEST_REVIEW` as a human checkpoint, not mutation permission.
+- On `REQUEST_REVIEW`, post and durably record only the authorized exact
+  `@codex review` comment, then schedule one cadence and end the turn.
+- On `review_trigger_did_not_start`, pause the heartbeat and report the trigger
+  node, head, timestamps, and final stable snapshot; never retry that head.
 - Review every bounded pilot and its terminal pause/cleanup evidence. This
   version is not approved for indefinite unattended recurrence.

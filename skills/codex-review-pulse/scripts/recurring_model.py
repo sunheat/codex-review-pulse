@@ -69,6 +69,16 @@ def empty_run_state(contract: dict[str, Any]) -> dict[str, Any]:
         "failure_latch": None,
         "inflight_action": None,
         "last_result": None,
+        # These fields are used only when the optional hardened controller is
+        # invoked with an explicit host wake identity.  The Codex-first path
+        # keeps the same lifecycle in pulse.py without importing this module.
+        "active_wake_id": None,
+        "wake_phase": "idle",
+        "wake_started_at": None,
+        "wake_completed_at": None,
+        "next_not_before": None,
+        "scheduled_task_disposition": "PAUSED",
+        "last_wake_id": None,
     }
 
 
@@ -89,6 +99,8 @@ def validate_run_state(
         raise ValueError("Run-state wake count is invalid")
     if not isinstance(state.get("trigger_events", {}), dict):
         raise ValueError("Run-state trigger events are invalid")
+    if state.get("scheduled_task_disposition", "PAUSED") not in {"PAUSED", "ACTIVE"}:
+        raise ValueError("Run-state scheduled task disposition is invalid")
     return state
 
 
@@ -101,6 +113,10 @@ def observation_fingerprint(observation: dict[str, Any]) -> str:
         "non_target_thread_ids": sorted(observation.get("non_target_thread_ids") or []),
         "approval_status": observation.get("approval_status"),
         "approval_evidence_ids": sorted(observation.get("approval_evidence_ids") or []),
+        "codex_review_in_progress": observation.get("codex_review_in_progress", False),
+        "review_in_progress_reaction_ids": sorted(
+            observation.get("review_in_progress_reaction_ids") or []
+        ),
         "relevant_event_ids": sorted(
             event.get("id")
             for event in observation.get("relevant_codex_events") or []
@@ -125,6 +141,11 @@ def advance_observation_state(
         "head_oid": observation.get("head_oid"),
         "fingerprint": fingerprint,
         "count": int(previous.get("count", 0)) + 1 if same else 1,
+        "first_server_observed_at": (
+            previous.get("first_server_observed_at")
+            if same
+            else observation.get("server_time")
+        ),
         "server_observed_at": observation.get("server_time"),
     }
     return result
@@ -185,11 +206,24 @@ def latch_failure(
 
 
 def clear_failure_latch(
-    state: dict[str, Any], *, recovery_authorization_id: str
+    state: dict[str, Any],
+    *,
+    recovery_authorization_id: str,
+    authorization_source: str | None = None,
+    authorization_verified: bool = False,
 ) -> dict[str, Any]:
-    """Clear a latch only through a separately identified recovery operation."""
-    if not recovery_authorization_id.strip():
-        raise ValueError("Explicit recovery authorization is required")
+    """Clear a latch only with verifiable, external recovery authority.
+
+    A scheduled agent-provided string is evidence, not authorization.  The
+    optional hardened controller may clear a latch only when a new user turn
+    or an isolated external authority has verified the authorization.
+    """
+    if (
+        not recovery_authorization_id.strip()
+        or authorization_source not in {"user_interaction", "external_authority"}
+        or authorization_verified is not True
+    ):
+        raise ValueError("Verified user or external recovery authorization is required")
     result = deepcopy(state)
     result["failure_latch"] = None
     result["last_recovery_authorization_id"] = recovery_authorization_id
@@ -199,9 +233,6 @@ def clear_failure_latch(
 def classify_stalled_review(
     *, contract: dict[str, Any], observation: dict[str, Any], state: dict[str, Any]
 ) -> dict[str, Any]:
-    capability = contract["connector_capability"]
-    if capability == "unknown":
-        return {"stalled": False, "reason_code": "connector_capability_unknown"}
     if not observation.get("api_ok", False) or not observation.get("auth_ok", False):
         return {"stalled": False, "reason_code": "github_health_unavailable"}
     server_time = observation.get("server_time")
@@ -221,6 +252,14 @@ def classify_stalled_review(
     trigger = state.get("trigger_events", {}).get(head_oid)
     if isinstance(trigger, dict) and trigger.get("status") == "emitted":
         boundaries.append((_utc(trigger["created_at"]), "authorized_trigger"))
+    # Publication and trigger timestamps are authoritative server boundaries.
+    # The first stable idle observation is only a cold-start fallback; letting
+    # a later observation replace a known mutation boundary would restart the
+    # wait budget every time observation resumes.
+    if not boundaries:
+        first_idle_observation = stable.get("first_server_observed_at")
+        if isinstance(first_idle_observation, str):
+            boundaries.append((_utc(first_idle_observation), "idle_observation"))
     if not boundaries:
         return {"stalled": False, "reason_code": "wait_boundary_missing"}
     boundary_time, boundary_kind = max(boundaries)
@@ -284,6 +323,12 @@ def evaluate_recurring_action(
         return _decision(NextAction.PAUSE_BLOCKED, "install_provenance_drift", latch=True)
     if not observation.get("local_checkout_ok", True):
         return _decision(NextAction.PAUSE_BLOCKED, "local_checkout_drift", latch=True)
+    if not observation.get("review_activity_ok", True):
+        return _decision(
+            NextAction.PAUSE_BLOCKED,
+            "review_activity_evidence_invalid",
+            latch=True,
+        )
     recovery = observation.get("recovery_status", "none")
     if recovery != "none":
         return _decision(
@@ -299,7 +344,11 @@ def evaluate_recurring_action(
     if pr_state in {"CLOSED", "MERGED"}:
         return _decision(NextAction.STOP_CLOSED, "pull_request_closed_or_merged")
     targeted = observation.get("targeted_thread_ids") or []
-    if observation.get("approval_status") == "approved_current_head" and not targeted:
+    if (
+        observation.get("approval_status") == "approved_current_head"
+        and not targeted
+        and not observation.get("codex_review_in_progress", False)
+    ):
         return _decision(NextAction.STOP_TERMINAL, "current_head_approval_proven")
 
     expires_at = contract.get("expires_at")
@@ -307,6 +356,15 @@ def evaluate_recurring_action(
         return _decision(NextAction.PAUSE_EXPIRED, "run_deadline_expired")
     if state.get("wake_count", 0) > contract["maximum_wakes"]:
         return _decision(NextAction.PAUSE_EXPIRED, "wake_budget_exhausted")
+
+    if observation.get("codex_review_in_progress", False):
+        return _decision(
+            NextAction.WAIT_REVIEW,
+            "codex_review_in_progress",
+            review_in_progress_reaction_ids=sorted(
+                observation.get("review_in_progress_reaction_ids") or []
+            ),
+        )
 
     if targeted:
         required = ("code_edits", "resolve_threads", "commit", "push")
@@ -320,23 +378,34 @@ def evaluate_recurring_action(
         return _decision(NextAction.RUN_BATCH, "targeted_work_available")
 
     head_oid = observation.get("head_oid")
-    trigger = state.get("trigger_events", {}).get(head_oid)
-    if isinstance(trigger, dict):
-        return _decision(
-            NextAction.WAIT_REVIEW,
-            "authorized_review_request_already_emitted",
-            trigger_state=trigger,
-        )
-
     stalled = classify_stalled_review(
         contract=contract, observation=observation, state=state
     )
     if stalled["stalled"]:
-        if (
-            contract["connector_capability"] == "manual_trigger"
-            and contract["mutation_scope"]["review_trigger"]
-            and contract.get("review_trigger_head_oid") == head_oid
-        ):
+        trigger = state.get("trigger_events", {}).get(head_oid)
+        if isinstance(trigger, dict) and trigger.get("status") == "emitted":
+            return _decision(
+                NextAction.PAUSE_BLOCKED,
+                "review_trigger_did_not_start",
+                trigger_state=trigger,
+                stalled_review=stalled,
+            )
+        restricted_head = contract.get("review_trigger_head_oid")
+        capability = contract.get("connector_capability")
+        if not contract["mutation_scope"]["review_trigger"]:
+            return _decision(
+                NextAction.PAUSE_BLOCKED,
+                "review_trigger_not_authorized",
+                stalled_review=stalled,
+            )
+        if capability != "manual_trigger":
+            return _decision(
+                NextAction.PAUSE_BLOCKED,
+                "review_trigger_capability_not_authorized",
+                connector_capability=capability,
+                stalled_review=stalled,
+            )
+        if restricted_head is not None and restricted_head == head_oid:
             return _decision(
                 NextAction.REQUEST_REVIEW,
                 "authorized_single_trigger_available",
@@ -344,12 +413,7 @@ def evaluate_recurring_action(
             )
         return _decision(
             NextAction.PAUSE_BLOCKED,
-            (
-                "review_trigger_head_not_authorized"
-                if contract["mutation_scope"]["review_trigger"]
-                and contract.get("review_trigger_head_oid") != head_oid
-                else "stalled_review_requires_operator"
-            ),
+            "review_trigger_head_not_authorized",
             stalled_review=stalled,
         )
 

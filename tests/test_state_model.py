@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from io import StringIO
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,7 +14,11 @@ SCRIPTS = ROOT / "skills" / "codex-review-pulse" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from checkpoint_store import load_checkpoint, save_checkpoint  # noqa: E402
-from fetch_pr_state import select_evaluation_identities, verify_stable_head  # noqa: E402
+from fetch_pr_state import (  # noqa: E402
+    main as fetch_pr_state_main,
+    select_evaluation_identities,
+    verify_stable_head,
+)
 from state_model import (  # noqa: E402
     classify_unresolved_threads,
     empty_checkpoint,
@@ -61,11 +67,21 @@ def reaction(reaction_id: str, login: str = "chatgpt-codex-connector") -> dict:
     }
 
 
+def eyes_reaction(reaction_id: str, login: str = "chatgpt-codex-connector") -> dict:
+    return {
+        "id": reaction_id,
+        "content": "EYES",
+        "createdAt": "2026-08-25T00:00:00Z",
+        "user": {"login": login},
+    }
+
+
 def evaluate(
     *,
     head: str,
     threads: list[dict] | None = None,
     reactions: list[dict] | None = None,
+    review_activity_reactions: list[dict] | None = None,
     checkpoint: dict | None = None,
     reviewer_logins: list[str] | None = None,
     approval_logins: list[str] | None = None,
@@ -80,6 +96,7 @@ def evaluate(
         pull_request_state="OPEN",
         review_threads=threads or [],
         reactions=reactions or [],
+        review_activity_reactions=review_activity_reactions or [],
         reviews=reviews or [],
         conversation_comments=conversation_comments or [],
         reviewer_logins=reviewer_logins,
@@ -114,6 +131,81 @@ class ReviewerScopeTests(unittest.TestCase):
         self.assertEqual(reasons["T_HUMAN"], "non_target_root_author")
         self.assertEqual(reasons["T_UNKNOWN"], "unknown_root_author")
         self.assertEqual(reasons["T_NO_COMMENTS"], "unknown_root_author")
+
+    def test_codex_eyes_is_wait_only_review_activity_evidence(self) -> None:
+        result, _ = evaluate(
+            head="A",
+            review_activity_reactions=[
+                eyes_reaction("E1", "CHATGPT-CODEX-CONNECTOR[bot]"),
+                eyes_reaction("E2", "human-reviewer"),
+            ],
+        )
+        self.assertTrue(result["review_activity_ok"])
+        self.assertTrue(result["codex_review_in_progress"])
+        self.assertEqual(
+            [item["id"] for item in result["codex_review_in_progress_reactions"]],
+            ["E1"],
+        )
+        self.assertEqual(result["approval_status"], "awaiting_current_head_approval")
+        self.assertFalse(result["codex_terminal"])
+
+    def test_latest_snapshot_preserves_review_activity_evidence(self) -> None:
+        _, checkpoint = evaluate(
+            head="A", review_activity_reactions=[eyes_reaction("E1")]
+        )
+        snapshot = checkpoint["latest_target_snapshot"]
+        self.assertTrue(snapshot["review_activity_ok"])
+        self.assertTrue(snapshot["codex_review_in_progress"])
+        self.assertEqual(snapshot["review_in_progress_reaction_ids"], ["E1"])
+
+    def test_invalid_eyes_reaction_id_fails_activity_evidence_closed(self) -> None:
+        conflicting = eyes_reaction("E1")
+        other = eyes_reaction("E1")
+        other["createdAt"] = "2026-08-25T00:01:00Z"
+        result, _ = evaluate(
+            head="A",
+            review_activity_reactions=[conflicting, other],
+        )
+        self.assertFalse(result["review_activity_ok"])
+        self.assertFalse(result["codex_review_in_progress"])
+        self.assertEqual(result["invalid_review_activity_reaction_ids"], ["E1"])
+
+    def test_missing_eyes_author_fails_activity_evidence_closed(self) -> None:
+        malformed = eyes_reaction("E1")
+        malformed["user"] = {"login": None}
+        result, _ = evaluate(
+            head="A",
+            review_activity_reactions=[malformed],
+        )
+        self.assertFalse(result["review_activity_ok"])
+        self.assertFalse(result["codex_review_in_progress"])
+        self.assertEqual(result["invalid_review_activity_reaction_ids"], ["E1"])
+
+    def test_malformed_eyes_content_or_timestamp_fails_activity_evidence_closed(self) -> None:
+        for field in ("content", "createdAt"):
+            for value in (None, ""):
+                with self.subTest(field=field, value=value):
+                    malformed = eyes_reaction("E1")
+                    malformed[field] = value
+                    result, _ = evaluate(
+                        head="A",
+                        review_activity_reactions=[malformed],
+                    )
+                    self.assertFalse(result["review_activity_ok"])
+                    self.assertFalse(result["codex_review_in_progress"])
+                    self.assertEqual(
+                        result["invalid_review_activity_reaction_ids"], ["E1"]
+                    )
+
+    def test_unnormalizable_eyes_author_fails_activity_evidence_closed(self) -> None:
+        malformed = eyes_reaction("E1", "[bot]")
+        result, _ = evaluate(
+            head="A",
+            review_activity_reactions=[malformed],
+        )
+        self.assertFalse(result["review_activity_ok"])
+        self.assertFalse(result["codex_review_in_progress"])
+        self.assertEqual(result["invalid_review_activity_reaction_ids"], ["E1"])
 
     def test_human_thread_cannot_be_added_to_frozen_target_set(self) -> None:
         _, checkpoint = evaluate(head="A", threads=self.threads)
@@ -157,6 +249,63 @@ class ReviewerScopeTests(unittest.TestCase):
         snapshot = checkpoint["latest_target_snapshot"]
         self.assertIsNone(snapshot["batch_publication_event"])
         self.assertEqual(snapshot["relevant_codex_events"], [])
+
+    def test_fetch_cli_preserves_review_activity_in_flat_evidence(self) -> None:
+        snapshot = {
+            "repository": "Owner/Repo",
+            "pull_request": {
+                "number": 17,
+                "state": "OPEN",
+                "headRefOid": "A",
+                "headRepository": {"nameWithOwner": "Owner/Repo"},
+            },
+            "review_threads": [],
+            "thumbs_up_reactions": [],
+            "eyes_reactions": [eyes_reaction("E1")],
+            "reviews": [],
+            "conversation_comments": [],
+            "server_time": "2026-08-25T00:00:00+00:00",
+        }
+
+        def fake_run(
+            command: list[str],
+            stdin: str | None = None,
+            *,
+            cwd: str | Path | None = None,
+        ) -> str:
+            del stdin, cwd
+            if command == ["gh", "auth", "status"]:
+                return ""
+            if command == ["gh", "api", "user", "--jq", ".login"]:
+                return "sunheat\n"
+            raise AssertionError(f"Unexpected command: {command}")
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state_file = Path(temporary_directory) / "checkpoint.json"
+            with (
+                patch("fetch_pr_state.run", side_effect=fake_run),
+                patch("fetch_pr_state.fetch_stable_snapshot", return_value=snapshot),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "fetch_pr_state.py",
+                        "--repo",
+                        "Owner/Repo",
+                        "--pr",
+                        "17",
+                        "--state-file",
+                        str(state_file),
+                    ],
+                ),
+                patch("sys.stdout", new_callable=StringIO) as output,
+            ):
+                fetch_pr_state_main()
+
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["review_activity_ok"])
+        self.assertTrue(result["codex_review_in_progress"])
+        self.assertEqual(result["review_in_progress_reaction_ids"], ["E1"])
 
     def test_published_head_creates_a_stable_server_bound_event(self) -> None:
         _, checkpoint = evaluate(head="OLD")
@@ -219,6 +368,30 @@ class ReviewerScopeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "published commit is required"):
             record_publication_success(checkpoint)
+
+    def test_resolved_thread_outcome_is_idempotent_but_immutable(self) -> None:
+        checkpoint = freeze_batch(empty_checkpoint("Owner/Repo", 17), "HEAD1", ["T1"])
+        checkpoint = record_thread_outcome(
+            checkpoint,
+            thread_id="T1",
+            classification="no-fix",
+            reference="validated",
+        )
+        checkpoint = record_resolved_thread(checkpoint, "T1")
+
+        replay = record_thread_outcome(
+            checkpoint,
+            thread_id="T1",
+            classification="no-fix",
+            reference="validated",
+        )
+        self.assertEqual(replay, checkpoint)
+        with self.assertRaisesRegex(ValueError, "after exact resolution"):
+            record_thread_outcome(
+                checkpoint,
+                thread_id="T1",
+                classification="fix-now",
+            )
 
     def test_relevant_codex_events_are_derived_from_current_head_evidence(self) -> None:
         result, _ = evaluate(

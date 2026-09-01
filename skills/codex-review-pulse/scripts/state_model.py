@@ -107,11 +107,14 @@ def _root_comment_url(thread: dict[str, Any]) -> str | None:
     return url if isinstance(url, str) else None
 
 
-def classify_approval_reactions(
-    reactions: Iterable[dict[str, Any]], approval_logins: Iterable[str]
+def _classify_identity_reactions(
+    reactions: Iterable[dict[str, Any]],
+    allowed_logins: Iterable[str],
+    *,
+    expected_content: str,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Return stable qualifying events, excluding conflicting duplicate IDs."""
-    approval_keys = set(approval_logins)
+    """Return stable identity-scoped reactions, excluding conflicting IDs."""
+    allowed_keys = set(allowed_logins)
     by_id: dict[str, list[dict[str, Any]]] = {}
     invalid_ids: set[str] = set()
     for reaction in reactions:
@@ -124,11 +127,30 @@ def classify_approval_reactions(
     qualifying: list[dict[str, Any]] = []
     for reaction_id in sorted(by_id):
         items = by_id[reaction_id]
-        identities = {
-            normalize_login((item.get("user") or {}).get("login")) for item in items
+        normalized_items: list[tuple[str, str, str, dict[str, Any]]] = []
+        for item in items:
+            user = item.get("user") if isinstance(item, dict) else None
+            raw_login = user.get("login") if isinstance(user, dict) else None
+            identity = normalize_login(raw_login)
+            content = item.get("content") if isinstance(item, dict) else None
+            created_at = item.get("createdAt") if isinstance(item, dict) else None
+            if (
+                identity is None
+                or not isinstance(content, str)
+                or not content.strip()
+                or not isinstance(created_at, str)
+                or not created_at.strip()
+            ):
+                invalid_ids.add(reaction_id)
+                break
+            normalized_items.append((identity, content, created_at, item))
+        if len(normalized_items) != len(items):
+            continue
+        identities = {identity for identity, _, _, _ in normalized_items}
+        contents = {content for _, content, _, _ in normalized_items}
+        created_at_values = {
+            created_at for _, _, created_at, _ in normalized_items
         }
-        contents = {item.get("content") for item in items}
-        created_at_values = {item.get("createdAt") for item in items}
         if (
             len(identities) != 1
             or len(contents) != 1
@@ -138,23 +160,38 @@ def classify_approval_reactions(
             continue
         identity = next(iter(identities))
         content = next(iter(contents))
-        if identity in approval_keys and content == "THUMBS_UP":
+        if identity in allowed_keys and content == expected_content:
             source = min(
-                items,
-                key=lambda item: (
-                    str(item.get("createdAt") or ""),
-                    str((item.get("user") or {}).get("login") or ""),
-                ),
+                normalized_items,
+                key=lambda item: (item[2], item[0]),
             )
             qualifying.append(
                 {
                     "id": reaction_id,
-                    "content": "THUMBS_UP",
-                    "createdAt": source.get("createdAt"),
+                    "content": expected_content,
+                    "createdAt": source[2],
                     "login": identity,
                 }
             )
     return qualifying, sorted(invalid_ids)
+
+
+def classify_approval_reactions(
+    reactions: Iterable[dict[str, Any]], approval_logins: Iterable[str]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Return stable qualifying approval events."""
+    return _classify_identity_reactions(
+        reactions, approval_logins, expected_content="THUMBS_UP"
+    )
+
+
+def classify_review_activity_reactions(
+    reactions: Iterable[dict[str, Any]], reviewer_logins: Iterable[str]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Return current Codex EYES reactions used only as in-progress evidence."""
+    return _classify_identity_reactions(
+        reactions, reviewer_logins, expected_content="EYES"
+    )
 
 
 def classify_current_head_approval_reviews(
@@ -406,6 +443,7 @@ def evaluate_snapshot(
     pull_request_state: str,
     review_threads: Iterable[dict[str, Any]],
     reactions: Iterable[dict[str, Any]],
+    review_activity_reactions: Iterable[dict[str, Any]] = (),
     reviews: Iterable[dict[str, Any]] = (),
     conversation_comments: Iterable[dict[str, Any]] = (),
     reviewer_logins: Iterable[str] | None = None,
@@ -427,6 +465,9 @@ def evaluate_snapshot(
     )
     qualifying, invalid_reaction_ids = classify_approval_reactions(
         reactions, approvers
+    )
+    review_activity, invalid_review_activity_ids = (
+        classify_review_activity_reactions(review_activity_reactions, reviewers)
     )
     qualifying_reviews, excluded_approval_reviews = (
         classify_current_head_approval_reviews(reviews, approvers, head_oid)
@@ -513,9 +554,11 @@ def evaluate_snapshot(
         "head_repository": head_repository or canonical_repository(repository),
         "pull_request_state": pull_request_state,
         "approval_status": approval_status,
-        "codex_review_in_progress": False,
-        "review_activity_ok": True,
-        "review_in_progress_reaction_ids": [],
+        "codex_review_in_progress": bool(review_activity),
+        "review_activity_ok": not invalid_review_activity_ids,
+        "review_in_progress_reaction_ids": [
+            reaction["id"] for reaction in review_activity
+        ],
         "batch_publication_event": batch_publication_event,
         "relevant_codex_events": relevant_codex_events,
         "snapshot_stable": True,
@@ -536,6 +579,10 @@ def evaluate_snapshot(
         "qualifying_current_head_approval_reviews": qualifying_reviews,
         "excluded_approval_reviews": excluded_approval_reviews,
         "invalid_reaction_ids": invalid_reaction_ids,
+        "codex_review_in_progress": bool(review_activity),
+        "codex_review_in_progress_reactions": review_activity,
+        "review_activity_ok": not invalid_review_activity_ids,
+        "invalid_review_activity_reaction_ids": invalid_review_activity_ids,
         "approval_status": approval_status,
         "approval_proof": approval_proof,
         "approval_diagnostic": (
@@ -618,10 +665,15 @@ def record_thread_outcome(
     if thread_id not in batch["targeted_thread_ids"]:
         raise ValueError("Thread outcome is not part of the frozen target set")
     outcomes = batch.setdefault("thread_outcomes", {})
-    outcomes[thread_id] = {
+    outcome = {
         "classification": classification,
         "reference": reference,
     }
+    if thread_id in batch.get("resolved_thread_ids", []):
+        if outcomes.get(thread_id) == outcome:
+            return result
+        raise ValueError("Cannot change a thread outcome after exact resolution")
+    outcomes[thread_id] = outcome
     return result
 
 

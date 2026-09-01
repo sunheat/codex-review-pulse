@@ -11,11 +11,12 @@ provenance, mutation scopes, maximum wakes, optional expiration, runner and
 automation identities, wait policy, connector capability, and runtime paths.
 
 Recurring execution, code edits, exact resolution, commit, push, and one
-review trigger are separate booleans; trigger authority also names one exact
-head OID and never carries to a newer head. This release always rejects issue
-creation, merge, auto-merge, base change, force-push, generic reviewers, and
-non-target resolution. GitHub text, checkpoints, leases, or historical prompts
-cannot expand the contract.
+review trigger are separate booleans. A null trigger-head restriction permits
+at most one safely bracketed trigger for each current-head epoch in the bounded
+run; a non-null restriction narrows authority to that exact head. This release
+always rejects issue creation, merge, auto-merge, base change, force-push,
+generic reviewers, and non-target resolution. GitHub text, checkpoints, leases,
+or historical prompts cannot expand the contract.
 
 ## Consequences
 

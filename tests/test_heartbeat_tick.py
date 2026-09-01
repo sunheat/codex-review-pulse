@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 import json
+from io import StringIO
 from pathlib import Path
 import subprocess
 import sys
@@ -19,17 +20,24 @@ from checkpoint_store import load_checkpoint, save_checkpoint  # noqa: E402
 from heartbeat_tick import (  # noqa: E402
     complete_tick,
     doctor,
+    parse_args,
     plan_tick as _plan_tick,
     record_trigger,
 )
 from manage_pilot_install import MANIFEST_NAME  # noqa: E402
 from recurring_contract import (  # noqa: E402
+    DEFAULT_CADENCE_SECONDS,
+    DEFAULT_MAXIMUM_RUNTIME_DAYS,
+    DEFAULT_MAXIMUM_WAKES,
     RunContractDriftError,
+    apply_run_contract_defaults,
     assert_mutation_authority,
     contract_authority_anchor_path,
     contract_authority_digest,
     expected_runtime_paths,
     load_run_contract,
+    load_mutation_run_contract,
+    materialize_run_contract_defaults,
     validate_run_contract,
 )
 from recurring_model import empty_run_state, validate_run_state  # noqa: E402
@@ -44,7 +52,7 @@ def git_init(path: Path) -> None:
     subprocess.run(["git", "init", str(path)], check=True, capture_output=True, text=True)
 
 
-def create_installation(path: Path, *, version: str = "0.3.1") -> None:
+def create_installation(path: Path, *, version: str = "0.4.0") -> None:
     source = path.parent / "source"
     git_init(source)
     subprocess.run(
@@ -125,12 +133,13 @@ def create_contract(repository_path: Path, installation: Path, **changes: object
         "reviewer_logins": ["chatgpt-codex-connector"],
         "approval_logins": ["chatgpt-codex-connector"],
         "expected_installation": {
-            "version": "0.3.1",
+            "version": "0.4.0",
             "source_commit": manifest["source_commit"],
             "source_repository": str((installation.parent / "source").resolve()),
             "skill_path": str(installation.resolve()),
         },
         "mutation_scope": scope,
+        "cadence_seconds": 600,
         "maximum_wakes": 3,
         "review_trigger_head_oid": None,
         "expires_at": "2026-08-26T00:00:00+00:00",
@@ -167,6 +176,9 @@ def observation(**changes: object) -> dict:
         "approval_status": "awaiting_current_head_approval",
         "approval_evidence_ids": [],
         "head_repository": "Owner/Repo",
+        "review_activity_ok": True,
+        "codex_review_in_progress": False,
+        "review_in_progress_reaction_ids": [],
         "server_time": NOW,
         "review_activity_ok": True,
         "codex_review_in_progress": False,
@@ -285,6 +297,8 @@ class SnapshotBindingTests(unittest.TestCase):
                 observation=observation(targeted_thread_ids=["T1"]),
                 now=NOW,
                 owner_token="owner-a",
+                wake_id="wake-1",
+                pause_heartbeat=lambda: True,
                 checkout_inspector=checkout_ok,
                 runtime_script_path=verified_runtime(installation),
             )
@@ -297,6 +311,7 @@ class SnapshotBindingTests(unittest.TestCase):
                 contract_path=contract_path,
                 repository_path=repository,
                 owner_token="owner-a",
+                wake_id="wake-1",
                 final_observation=observation(
                     targeted_thread_ids=[], approval_status="approved_current_head"
                 ),
@@ -360,6 +375,8 @@ class SnapshotBindingTests(unittest.TestCase):
                 observation=observation(targeted_thread_ids=["T1"]),
                 now=NOW,
                 owner_token="owner-a",
+                wake_id="wake-1",
+                pause_heartbeat=lambda: True,
                 checkout_inspector=checkout_ok,
                 runtime_script_path=verified_runtime(installation),
             )
@@ -383,6 +400,7 @@ class SnapshotBindingTests(unittest.TestCase):
                 contract_path=contract_path,
                 repository_path=repository,
                 owner_token="owner-a",
+                wake_id="wake-1",
                 final_observation=observation(
                     head_oid="HEAD3", targeted_thread_ids=["T1"]
                 ),
@@ -415,6 +433,8 @@ class SnapshotBindingTests(unittest.TestCase):
                 observation=observation(targeted_thread_ids=["T1"]),
                 now=NOW,
                 owner_token="owner-a",
+                wake_id="wake-1",
+                pause_heartbeat=lambda: True,
                 checkout_inspector=checkout_ok,
                 runtime_script_path=verified_runtime(installation),
             )
@@ -435,6 +455,7 @@ class SnapshotBindingTests(unittest.TestCase):
                 contract_path=contract_path,
                 repository_path=repository,
                 owner_token="owner-a",
+                wake_id="wake-1",
                 final_observation=observation(head_oid="HEAD1", targeted_thread_ids=["T1"]),
                 now="2026-08-25T00:20:30+00:00",
                 mutation_occurred=True,
@@ -629,6 +650,162 @@ class TriggerAuthorityTests(unittest.TestCase):
 
 
 class HeartbeatTickTests(unittest.TestCase):
+    def test_omitted_recurring_bounds_resolve_to_safe_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            partial = json.loads(contract_path.read_text(encoding="utf-8"))
+            for key in ("cadence_seconds", "maximum_wakes", "expires_at", "wait_policy"):
+                partial.pop(key)
+
+            resolved = apply_run_contract_defaults(partial, now=NOW)
+            normalized = validate_run_contract(resolved, repository_path=repository)
+
+            self.assertEqual(normalized["cadence_seconds"], DEFAULT_CADENCE_SECONDS)
+            self.assertEqual(normalized["maximum_wakes"], DEFAULT_MAXIMUM_WAKES)
+            self.assertEqual(
+                normalized["expires_at"],
+                "2026-09-24T00:20:00+00:00",
+            )
+            self.assertEqual(DEFAULT_MAXIMUM_RUNTIME_DAYS, 30)
+            self.assertEqual(
+                normalized["wait_policy"],
+                {
+                    "minimum_server_wait_seconds": DEFAULT_CADENCE_SECONDS,
+                    "minimum_stable_observations": 2,
+                },
+            )
+
+    def test_loading_schema_one_contract_resolves_omitted_cadence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            payload = json.loads(contract_path.read_text(encoding="utf-8"))
+            payload.pop("cadence_seconds")
+            contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            normalized = load_run_contract(contract_path, repository_path=repository)
+
+            self.assertEqual(normalized["schema_version"], 1)
+            self.assertEqual(normalized["cadence_seconds"], DEFAULT_CADENCE_SECONDS)
+            self.assertEqual(
+                normalized["wait_policy"]["minimum_server_wait_seconds"],
+                DEFAULT_CADENCE_SECONDS,
+            )
+
+    def test_loading_omitted_expiry_is_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            payload = json.loads(contract_path.read_text(encoding="utf-8"))
+            payload.pop("expires_at")
+            contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            before = contract_path.read_bytes()
+            first = load_run_contract(contract_path, repository_path=repository)
+            second = load_run_contract(contract_path, repository_path=repository)
+
+            self.assertEqual(contract_path.read_bytes(), before)
+            self.assertIsNotNone(first["expires_at"])
+            self.assertIsNotNone(second["expires_at"])
+
+    def test_contract_default_materialization_is_an_explicit_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            payload = json.loads(contract_path.read_text(encoding="utf-8"))
+            payload.pop("expires_at")
+            contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            migrated = materialize_run_contract_defaults(
+                contract_path, repository_path=repository, now=NOW
+            )
+            persisted = json.loads(contract_path.read_text(encoding="utf-8"))
+            reloaded = load_run_contract(contract_path, repository_path=repository)
+
+            self.assertEqual(
+                migrated["expires_at"], "2026-09-24T00:20:00+00:00"
+            )
+            self.assertEqual(persisted["expires_at"], migrated["expires_at"])
+            self.assertEqual(reloaded["expires_at"], migrated["expires_at"])
+
+    def test_mutation_loader_rejects_unmaterialized_defaults_without_rewriting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            payload = json.loads(contract_path.read_text(encoding="utf-8"))
+            payload.pop("expires_at")
+            contract_path.write_text(json.dumps(payload), encoding="utf-8")
+            before = contract_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                RunContractDriftError, "run contract is unreadable or invalid"
+            ):
+                load_mutation_run_contract(
+                    contract_path,
+                    repository_path=repository,
+                    owner_token="owner-a",
+                )
+
+            self.assertEqual(contract_path.read_bytes(), before)
+
+    def test_default_resolution_preserves_explicit_bounds(self) -> None:
+        explicit = {
+            "cadence_seconds": 1200,
+            "maximum_wakes": 4,
+            "expires_at": "2026-08-27T00:00:00+00:00",
+            "wait_policy": {
+                "minimum_server_wait_seconds": 1800,
+                "minimum_stable_observations": 3,
+            },
+        }
+
+        self.assertEqual(apply_run_contract_defaults(explicit, now=NOW), explicit)
+
+    def test_complete_parser_requires_a_wake_id(self) -> None:
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "heartbeat_tick.py",
+                    "--contract",
+                    "contract.json",
+                    "--repository-path",
+                    "repo",
+                    "complete",
+                    "--owner-token",
+                    "owner",
+                    "--observation",
+                    "observation.json",
+                ],
+            ),
+            patch("sys.stderr", new_callable=StringIO),
+        ):
+            with self.assertRaises(SystemExit) as error:
+                parse_args()
+        self.assertEqual(error.exception.code, 2)
+
     def test_authority_digest_is_canonical_and_covers_every_mutable_category(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             repository = Path(directory_name) / "repo"
@@ -678,6 +855,7 @@ class HeartbeatTickTests(unittest.TestCase):
             trigger_variant["review_trigger_head_oid"] = "c" * 40
             variants.append(("scope_review_trigger", trigger_variant))
             changed("wake_budget", "maximum_wakes", 4)
+            changed("cadence", "cadence_seconds", 601)
             changed("trigger_head", "review_trigger_head_oid", "d" * 40)
             changed("expiration", "expires_at", "2026-08-27T00:00:00Z")
             changed("runner", "runner_identity", "operator-b")
@@ -776,6 +954,8 @@ class HeartbeatTickTests(unittest.TestCase):
                 observation=observation(targeted_thread_ids=["T1"]),
                 now=NOW,
                 owner_token="secret-owner-token",
+                wake_id="wake-1",
+                pause_heartbeat=lambda: True,
                 checkout_inspector=checkout_ok,
                 runtime_script_path=verified_runtime(installation),
             )
@@ -799,6 +979,7 @@ class HeartbeatTickTests(unittest.TestCase):
                 contract_path=contract_path,
                 repository_path=repository,
                 owner_token="secret-owner-token",
+                wake_id="wake-1",
                 final_observation=observation(),
                 now="2026-08-25T00:20:30+00:00",
                 mutation_occurred=False,
@@ -809,6 +990,50 @@ class HeartbeatTickTests(unittest.TestCase):
             self.assertNotIn("secret-owner-token", json.dumps(completed))
             self.assertEqual(state_path.read_bytes(), before)
             self.assertFalse(Path(payload["paths"]["lease"]).exists())
+
+    def test_wake_identity_mismatch_does_not_release_the_current_wake_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            planned = plan_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                observation=observation(targeted_thread_ids=["T1"]),
+                now=NOW,
+                owner_token="owner-a",
+                wake_id="wake-b",
+                pause_heartbeat=lambda: True,
+                checkout_inspector=checkout_ok,
+                runtime_script_path=verified_runtime(installation),
+            )
+            self.assertEqual(planned["next_action"], "RUN_BATCH")
+            contract = load_run_contract(contract_path, repository_path=repository)
+            lease_path = Path(contract["paths"]["lease"])
+            state_path = Path(contract["paths"]["run_state"])
+            state_before = state_path.read_bytes()
+
+            mismatched = complete_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                owner_token="owner-a",
+                wake_id="wake-a",
+                final_observation=observation(targeted_thread_ids=["T1"]),
+                now="2026-08-25T00:20:30+00:00",
+                mutation_occurred=False,
+                runtime_script_path=verified_runtime(installation),
+            )
+
+            self.assertEqual(mismatched["next_action"], "PAUSE_RECOVERY")
+            self.assertEqual(mismatched["reason_code"], "wake_identity_mismatch")
+            self.assertEqual(mismatched["lease"]["status"], "unchanged")
+            self.assertTrue(lease_path.exists())
+            self.assertEqual(lease_path.read_text().count("owner-a"), 1)
+            self.assertEqual(state_path.read_bytes(), state_before)
+            self.assertEqual(json.loads(state_path.read_text())["active_wake_id"], "wake-b")
 
     def test_doctor_is_read_only_and_does_not_create_lease(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
@@ -849,6 +1074,8 @@ class HeartbeatTickTests(unittest.TestCase):
                 observation=observation(targeted_thread_ids=["T1"]),
                 now=NOW,
                 owner_token="owner-a",
+                wake_id="wake-1",
+                pause_heartbeat=lambda: True,
                 checkout_inspector=checkout_ok,
                 runtime_script_path=verified_runtime(installation),
             )
@@ -986,9 +1213,113 @@ class HeartbeatTickTests(unittest.TestCase):
             paths = expected_runtime_paths("Owner/Repo", 17, repository_path=repository)
             self.assertEqual(result["next_action"], "WAIT_REVIEW")
             self.assertEqual(result["wake_count"], 1)
+            self.assertEqual(result["cadence_seconds"], 600)
             self.assertFalse(Path(paths["lease"]).exists())
             state = json.loads(Path(paths["run_state"]).read_text(encoding="utf-8"))
             self.assertEqual(state["wake_count"], 1)
+
+    def test_trigger_authority_requires_an_exact_head(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            payload = json.loads(contract_path.read_text(encoding="utf-8"))
+            payload["mutation_scope"]["review_trigger"] = True
+            contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            result = plan_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                observation=observation(),
+                now=NOW,
+                owner_token="owner-a",
+                checkout_inspector=checkout_ok,
+                runtime_script_path=verified_runtime(installation),
+            )
+            self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+            self.assertEqual(result["reason_code"], "run_contract_drift")
+
+    def test_pause_failure_does_not_overwrite_state_while_another_lease_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            _seed_persisted_snapshot(contract_path, observation())
+            contract = load_run_contract(contract_path, repository_path=repository)
+            state_path = Path(contract["paths"]["run_state"])
+            save_checkpoint(state_path, empty_run_state(contract))
+            before = state_path.read_bytes()
+            lease_path = Path(contract["paths"]["lease"])
+            acquire_lease(
+                lease_path,
+                repository="owner/repo",
+                pr_number=17,
+                owner_token="owner-a",
+                now=NOW,
+                duration_seconds=7200,
+            )
+
+            result = _plan_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                observation=observation(),
+                now=NOW,
+                owner_token="owner-b",
+                wake_id="wake-b",
+                pause_heartbeat=lambda: False,
+                checkout_inspector=checkout_ok,
+                runtime_script_path=verified_runtime(installation),
+            )
+
+            self.assertEqual(result["next_action"], "PAUSE_CONCURRENT")
+            self.assertEqual(state_path.read_bytes(), before)
+            self.assertEqual(json.loads(lease_path.read_text())["owner_token"], "owner-a")
+
+    def test_cadence_failure_rereads_state_after_acquiring_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            _seed_persisted_snapshot(contract_path, observation())
+            contract = load_run_contract(contract_path, repository_path=repository)
+            state_path = Path(contract["paths"]["run_state"])
+            raced_state = empty_run_state(contract)
+            raced_state["wake_count"] = 7
+            raced_state["last_wake_id"] = "other-wake"
+            raced_state["next_not_before"] = "2026-08-25T00:30:00+00:00"
+
+            def acquire_after_state_race(*args, **kwargs):
+                save_checkpoint(state_path, raced_state)
+                return acquire_lease(*args, **kwargs)
+
+            with patch("heartbeat_tick.acquire_lease", side_effect=acquire_after_state_race):
+                result = _plan_tick(
+                    contract_path=contract_path,
+                    repository_path=repository,
+                    observation=observation(),
+                    now=NOW,
+                    owner_token="owner-b",
+                    wake_id="wake-b",
+                    pause_heartbeat=lambda: True,
+                    checkout_inspector=checkout_ok,
+                    runtime_script_path=verified_runtime(installation),
+                )
+
+            self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+            self.assertEqual(result["reason_code"], "cadence_not_elapsed")
+            self.assertEqual(result["wake_count"], 7)
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["wake_count"], 7)
+            self.assertEqual(state["failure_latch"]["reason_code"], "cadence_not_elapsed")
 
     def test_final_wait_pauses_without_allowing_an_extra_wake(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
@@ -1027,6 +1358,37 @@ class HeartbeatTickTests(unittest.TestCase):
             self.assertEqual(fourth["next_action"], "PAUSE_EXPIRED")
             self.assertEqual(fourth["wake_count"], 3)
 
+    def test_non_retained_wake_finalizes_marker_before_releasing_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+
+            result = plan_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                observation=observation(approval_status="approved_current_head"),
+                now=NOW,
+                owner_token="owner-a",
+                wake_id="wake-1",
+                pause_heartbeat=lambda: True,
+                checkout_inspector=checkout_ok,
+                runtime_script_path=verified_runtime(installation),
+            )
+
+            self.assertEqual(result["next_action"], "STOP_TERMINAL")
+            contract = load_run_contract(contract_path, repository_path=repository)
+            state = load_checkpoint(contract["paths"]["run_state"])
+            self.assertIsNotNone(state)
+            self.assertIsNone(state["active_wake_id"])
+            self.assertIsNone(state["inflight_action"])
+            self.assertEqual(state["wake_phase"], "terminal")
+            self.assertEqual(state["last_wake_id"], "wake-1")
+            self.assertFalse(Path(contract["paths"]["lease"]).exists())
+
     def test_batch_tick_retains_lease_until_final_failure_is_latched(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             repository = Path(directory_name) / "repo"
@@ -1041,6 +1403,8 @@ class HeartbeatTickTests(unittest.TestCase):
                 observation=observation(targeted_thread_ids=["T1"]),
                 now=NOW,
                 owner_token="owner-a",
+                wake_id="wake-1",
+                pause_heartbeat=lambda: True,
                 checkout_inspector=checkout_ok,
                 runtime_script_path=verified_runtime(installation),
             )
@@ -1082,6 +1446,7 @@ class HeartbeatTickTests(unittest.TestCase):
                 contract_path=contract_path,
                 repository_path=repository,
                 owner_token="owner-a",
+                wake_id="wake-1",
                 final_observation=observation(targeted_thread_ids=["T1"]),
                 now="2026-08-25T00:21:00+00:00",
                 mutation_occurred=True,
@@ -1158,6 +1523,8 @@ class HeartbeatTickTests(unittest.TestCase):
                 observation=observation(targeted_thread_ids=["T1"]),
                 now=NOW,
                 owner_token="owner-a",
+                wake_id="wake-1",
+                pause_heartbeat=lambda: True,
                 checkout_inspector=checkout_ok,
                 runtime_script_path=verified_runtime(installation),
             )
@@ -1170,6 +1537,7 @@ class HeartbeatTickTests(unittest.TestCase):
                 contract_path=contract_path,
                 repository_path=repository,
                 owner_token="owner-a",
+                wake_id="wake-1",
                 final_observation=observation(),
                 now="2026-08-25T00:20:30+00:00",
                 mutation_occurred=False,
@@ -1193,6 +1561,8 @@ class HeartbeatTickTests(unittest.TestCase):
                 observation=observation(targeted_thread_ids=["T1"]),
                 now=NOW,
                 owner_token="owner-a",
+                wake_id="wake-1",
+                pause_heartbeat=lambda: True,
                 lease_duration_seconds=30,
                 checkout_inspector=checkout_ok,
                 runtime_script_path=verified_runtime(installation),
@@ -1202,6 +1572,7 @@ class HeartbeatTickTests(unittest.TestCase):
                 contract_path=contract_path,
                 repository_path=repository,
                 owner_token="owner-a",
+                wake_id="wake-1",
                 final_observation=observation(),
                 now="2026-08-25T00:20:31+00:00",
                 mutation_occurred=False,

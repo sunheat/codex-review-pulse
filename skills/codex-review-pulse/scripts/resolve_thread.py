@@ -5,13 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 from typing import Any, Callable
 
 from checkpoint_store import checkpoint_path, load_checkpoint, save_checkpoint
-from recurring_contract import assert_mutation_authority, load_mutation_run_contract
 from state_model import (
     DEFAULT_CODEX_LOGINS,
     canonical_repository,
@@ -49,8 +49,16 @@ mutation($threadId: ID!) {
 """
 
 
+def _github_cli_command() -> list[str]:
+    """Return the GitHub CLI command, with a narrow network-free test hook."""
+    fixture_script = os.environ.get("CODEX_REVIEW_PULSE_GH_SCRIPT")
+    if fixture_script:
+        return [sys.executable, fixture_script]
+    return ["gh"]
+
+
 def graphql(query: str, variables: dict[str, object]) -> dict[str, Any]:
-    command = ["gh", "api", "graphql", "-F", "query=@-"]
+    command = [*_github_cli_command(), "api", "graphql", "-F", "query=@-"]
     for name, value in variables.items():
         if value is not None:
             command.extend(["-F", f"{name}={value}"])
@@ -266,6 +274,8 @@ def main() -> None:
         raise RuntimeError("Recurring resolution requires both run contract and lease owner token")
     contract = None
     if args.run_contract:
+        from recurring_contract import assert_mutation_authority, load_mutation_run_contract
+
         contract = load_mutation_run_contract(
             args.run_contract,
             repository_path=args.repository_path,

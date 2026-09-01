@@ -4,11 +4,12 @@
 from __future__ import annotations
 
 import argparse
-from datetime import UTC, datetime
+from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 import sys
-from typing import Any
+from typing import Any, Callable
 
 from checkpoint_store import load_checkpoint, save_checkpoint
 from manage_pilot_install import verify_installation
@@ -46,6 +47,18 @@ def _now(value: str | None) -> str:
     if parsed.tzinfo is None:
         raise ValueError("--now must include a timezone")
     return parsed.astimezone(UTC).isoformat()
+
+
+def _pause_confirmed(callback: Callable[[], object] | None) -> bool:
+    if callback is None:
+        return False
+    try:
+        value = callback()
+    except Exception:
+        return False
+    if isinstance(value, dict):
+        return value.get("confirmed") is True
+    return value is True
 
 
 def _read_object(path: str | Path) -> dict[str, Any]:
@@ -371,6 +384,7 @@ def doctor(
         "contract": {
             "repository": contract["repository"],
             "pull_request_number": contract["pull_request_number"],
+            "cadence_seconds": contract["cadence_seconds"],
             "maximum_wakes": contract["maximum_wakes"],
             "expires_at": contract["expires_at"],
             "connector_capability": contract["connector_capability"],
@@ -393,13 +407,27 @@ def plan_tick(
     observation: dict[str, Any],
     now: str,
     owner_token: str,
-    lease_duration_seconds: int = 300,
+    wake_id: str | None = None,
+    lease_duration_seconds: int | None = None,
+    pause_heartbeat: Callable[[], object] | None = None,
     checkout_inspector=inspect_local_checkout,
     runtime_script_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Acquire authority, persist one wake, and return at most one next action."""
     if not owner_token:
         raise ValueError("An explicit lease owner token is required")
+    if wake_id is not None and not wake_id.strip():
+        raise ValueError("wake_id must not be empty")
+    effective_lease_duration = (
+        lease_duration_seconds
+        if lease_duration_seconds is not None
+        else 7200
+        if wake_id is not None
+        else 300
+    )
+    pause_confirmed = (
+        _pause_confirmed(pause_heartbeat) if wake_id is not None else True
+    )
     try:
         contract = load_mutation_run_contract(
             contract_path,
@@ -417,6 +445,68 @@ def plan_tick(
             "recommended_heartbeat_disposition": "pause",
             "lease": {"status": "released_or_absent"},
         }
+    if wake_id is not None and not pause_confirmed:
+        acquisition = acquire_lease(
+            contract["paths"]["lease"],
+            repository=contract["repository"],
+            pr_number=contract["pull_request_number"],
+            owner_token=owner_token,
+            now=now,
+            duration_seconds=effective_lease_duration,
+        )
+        if not acquisition["acquired"]:
+            lease = acquisition["lease"]
+            return {
+                "schema_version": 1,
+                "run_status": "paused",
+                "next_action": NextAction.PAUSE_CONCURRENT.value,
+                "reason_code": "concurrent_runner_lease_active",
+                "lease": {
+                    "status": "active",
+                    "expires_at": lease.get("expires_at"),
+                },
+                "mutation_occurred": False,
+                "recommended_heartbeat_disposition": "pause",
+            }
+        try:
+            state_path = Path(contract["paths"]["run_state"])
+            if state_path.exists():
+                state = validate_run_state(_read_object(state_path), contract)
+            else:
+                state = empty_run_state(contract)
+            state = latch_failure(
+                state,
+                reason_code="heartbeat_pause_unconfirmed",
+                observed_at=now,
+                details={"wake_id": wake_id},
+            )
+            state["active_wake_id"] = None
+            state["wake_phase"] = "paused"
+            state["scheduled_task_disposition"] = "PAUSED"
+            state["last_wake_id"] = wake_id
+            state["wake_completed_at"] = now
+            state["last_result"] = {
+                "next_action": NextAction.PAUSE_BLOCKED.value,
+                "reason_code": "heartbeat_pause_unconfirmed",
+                "recommended_heartbeat_disposition": "pause",
+                "wake_id": wake_id,
+            }
+            save_checkpoint(state_path, state)
+            return {
+                "schema_version": 1,
+                "run_status": "paused",
+                **state["last_result"],
+                "wake_count": state["wake_count"],
+                "mutation_occurred": False,
+                "lease": {"status": "releasing"},
+            }
+        finally:
+            release_lease(
+                contract["paths"]["lease"],
+                repository=contract["repository"],
+                pr_number=contract["pull_request_number"],
+                owner_token=owner_token,
+            )
     execution_source = _execution_source_status(contract, runtime_script_path)
     if not execution_source["ok"]:
         return {
@@ -459,13 +549,50 @@ def plan_tick(
             "lease": {"status": "released" if released else "not_owned"},
         }
     token = owner_token
+    state_path = Path(contract["paths"]["run_state"])
+    if wake_id is not None and state_path.exists():
+        try:
+            existing_state = validate_run_state(_read_object(state_path), contract)
+        except Exception as error:
+            return {
+                "schema_version": 1,
+                "run_status": "paused",
+                "next_action": NextAction.PAUSE_BLOCKED.value,
+                "reason_code": "invalid_run_state_schema",
+                "details": str(error),
+                "wake_id": wake_id,
+                "mutation_occurred": False,
+                "recommended_heartbeat_disposition": "pause",
+                "lease": {"status": "not_acquired"},
+            }
+        if (
+            existing_state.get("active_wake_id") == wake_id
+            or existing_state.get("last_wake_id") == wake_id
+        ):
+            replay = existing_state.get("last_result") or {
+                "next_action": NextAction.PAUSE_RECOVERY.value,
+                "reason_code": "wake_result_missing",
+                "recommended_heartbeat_disposition": "pause",
+            }
+            return {
+                "schema_version": 1,
+                "run_status": "paused"
+                if replay.get("recommended_heartbeat_disposition") == "pause"
+                else "active",
+                **deepcopy(replay),
+                "wake_id": wake_id,
+                "wake_count": existing_state.get("wake_count", 0),
+                "duplicate_wake": True,
+                "mutation_occurred": False,
+                "lease": {"status": "unchanged"},
+            }
     acquisition = acquire_lease(
         contract["paths"]["lease"],
         repository=contract["repository"],
         pr_number=contract["pull_request_number"],
         owner_token=token,
         now=now,
-        duration_seconds=lease_duration_seconds,
+        duration_seconds=effective_lease_duration,
     )
     if not acquisition["acquired"]:
         lease = acquisition["lease"]
@@ -513,6 +640,38 @@ def plan_tick(
         else:
             state = empty_run_state(contract)
 
+        next_not_before = state.get("next_not_before")
+        if next_not_before is not None:
+            current_time = datetime.fromisoformat(now.replace("Z", "+00:00")).astimezone(UTC)
+            if current_time < datetime.fromisoformat(next_not_before.replace("Z", "+00:00")).astimezone(UTC):
+                blocked = latch_failure(
+                    state,
+                    reason_code="cadence_not_elapsed",
+                    observed_at=now,
+                    details={"next_not_before": next_not_before, "wake_id": wake_id},
+                )
+                blocked["active_wake_id"] = None
+                blocked["wake_phase"] = "paused"
+                blocked["scheduled_task_disposition"] = "PAUSED"
+                blocked["last_wake_id"] = wake_id
+                blocked["wake_completed_at"] = now
+                blocked["last_result"] = {
+                    "next_action": NextAction.PAUSE_BLOCKED.value,
+                    "reason_code": "cadence_not_elapsed",
+                    "recommended_heartbeat_disposition": "pause",
+                    "next_not_before": next_not_before,
+                    "wake_id": wake_id,
+                }
+                save_checkpoint(state_path, blocked)
+                return {
+                    "schema_version": 1,
+                    "run_status": "paused",
+                    **blocked["last_result"],
+                    "wake_count": blocked["wake_count"],
+                    "mutation_occurred": False,
+                    "lease": {"status": "releasing"},
+                }
+
         inflight = state.get("inflight_action")
         if isinstance(inflight, dict) and inflight.get("owner_token") != token:
             state = latch_failure(
@@ -538,6 +697,38 @@ def plan_tick(
                 "lease": {"status": "releasing"},
             }
 
+        if wake_id is not None and state.get("failure_latch"):
+            result = {
+                "schema_version": 1,
+                "run_status": "paused",
+                "next_action": NextAction.PAUSE_RECOVERY.value,
+                "reason_code": "failure_latched",
+                "wake_id": wake_id,
+                "failure_latch": state["failure_latch"],
+                "mutation_occurred": False,
+                "recommended_heartbeat_disposition": "pause",
+                "lease": {"status": "releasing"},
+            }
+            return result
+        if wake_id is not None and state.get("active_wake_id") not in {None, wake_id}:
+            state = latch_failure(
+                state,
+                reason_code="incomplete_wake",
+                observed_at=now,
+                details={"active_wake_id": state.get("active_wake_id"), "wake_id": wake_id},
+            )
+            save_checkpoint(state_path, state)
+            return {
+                "schema_version": 1,
+                "run_status": "paused",
+                "next_action": NextAction.PAUSE_RECOVERY.value,
+                "reason_code": "incomplete_wake",
+                "wake_id": wake_id,
+                "mutation_occurred": False,
+                "recommended_heartbeat_disposition": "pause",
+                "lease": {"status": "releasing"},
+            }
+
         current_time = datetime.fromisoformat(now.replace("Z", "+00:00")).astimezone(UTC)
         deadline = contract.get("expires_at")
         if state["wake_count"] >= contract["maximum_wakes"] or (
@@ -555,6 +746,7 @@ def plan_tick(
                     else "run_deadline_expired"
                 ),
                 "wake_count": state["wake_count"],
+                "cadence_seconds": contract["cadence_seconds"],
                 "maximum_wakes": contract["maximum_wakes"],
                 "mutation_occurred": False,
                 "recommended_heartbeat_disposition": "pause",
@@ -600,6 +792,14 @@ def plan_tick(
 
         state = advance_observation_state(state, prepared)
         state["wake_count"] += 1
+        if wake_id is not None:
+            state["active_wake_id"] = wake_id
+            state["wake_phase"] = "planned"
+            state["wake_started_at"] = now
+            state["wake_completed_at"] = None
+            state["next_not_before"] = None
+            state["scheduled_task_disposition"] = "PAUSED"
+            state["last_wake_id"] = wake_id
         decision = evaluate_recurring_action(
             contract=contract, observation=prepared, state=state, now=now
         )
@@ -621,6 +821,8 @@ def plan_tick(
             NextAction.RUN_BATCH.value,
             NextAction.REQUEST_REVIEW.value,
         }
+        if wake_id is not None and decision["next_action"] == NextAction.WAIT_REVIEW.value:
+            retained = True
         state["inflight_action"] = (
             {
                 "next_action": decision["next_action"],
@@ -631,6 +833,17 @@ def plan_tick(
             if retained
             else None
         )
+        if wake_id is not None and not retained:
+            state["active_wake_id"] = None
+            state["wake_completed_at"] = now
+            state["next_not_before"] = None
+            state["scheduled_task_disposition"] = "PAUSED"
+            state["wake_phase"] = (
+                "terminal"
+                if decision["next_action"].startswith("STOP_")
+                else "paused"
+            )
+            state["last_wake_id"] = wake_id
         save_checkpoint(state_path, state)
         targeted = prepared.get("targeted_thread_ids") or []
         non_target = prepared.get("non_target_thread_ids") or []
@@ -660,6 +873,7 @@ def plan_tick(
             },
             "trigger_state": state.get("trigger_events", {}).get(prepared.get("head_oid")),
             "wake_count": state["wake_count"],
+            "cadence_seconds": contract["cadence_seconds"],
             "maximum_wakes": contract["maximum_wakes"],
             "mutation_occurred": False,
             "lease": {
@@ -742,7 +956,8 @@ def record_trigger(
         raise RuntimeError("Heartbeat installation verification failed")
     if not contract["mutation_scope"]["review_trigger"]:
         raise RuntimeError("Run contract does not authorize a review trigger")
-    if contract.get("review_trigger_head_oid") != evidence.get("attempted_head_oid"):
+    restricted_head = contract.get("review_trigger_head_oid")
+    if restricted_head != evidence.get("attempted_head_oid"):
         raise RuntimeError("Run contract does not authorize a trigger for this head")
     assert_lease_owner(
         contract["paths"]["lease"],
@@ -784,6 +999,7 @@ def complete_tick(
     contract_path: str | Path,
     repository_path: str | Path,
     owner_token: str,
+    wake_id: str,
     final_observation: dict[str, Any],
     now: str,
     mutation_occurred: bool,
@@ -791,6 +1007,8 @@ def complete_tick(
     runtime_script_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Persist final evidence for the retained lease and release it safely."""
+    if not isinstance(wake_id, str) or not wake_id.strip():
+        raise ValueError("A non-empty wake_id is required for completion")
     try:
         contract = load_mutation_run_contract(
             contract_path,
@@ -846,6 +1064,31 @@ def complete_tick(
             "recommended_heartbeat_disposition": "pause",
             "lease": {"status": "released"},
         }
+    if wake_id is not None:
+        if state.get("active_wake_id") != wake_id:
+            if state.get("last_wake_id") == wake_id and state.get("last_result"):
+                return {
+                    "schema_version": 1,
+                    "run_status": "paused"
+                    if state["last_result"].get("recommended_heartbeat_disposition") == "pause"
+                    else "active",
+                    **deepcopy(state["last_result"]),
+                    "wake_id": wake_id,
+                    "wake_count": state["wake_count"],
+                    "duplicate_wake": True,
+                    "mutation_occurred": False,
+                    "lease": {"status": "not_owned"},
+                }
+            return {
+                "schema_version": 1,
+                "run_status": "paused",
+                "next_action": NextAction.PAUSE_RECOVERY.value,
+                "reason_code": "wake_identity_mismatch",
+                "wake_id": wake_id,
+                "mutation_occurred": mutation_occurred,
+                "recommended_heartbeat_disposition": "pause",
+                "lease": {"status": "unchanged"},
+            }
     if not _installation_status(contract)["ok"]:
         raise RuntimeError("Heartbeat installation verification failed")
     try:
@@ -978,6 +1221,24 @@ def complete_tick(
         "mutation_occurred": mutation_occurred,
     }
     state["inflight_action"] = None
+    if wake_id is not None:
+        state["active_wake_id"] = None
+        state["wake_completed_at"] = now
+        state["last_wake_id"] = wake_id
+        state["scheduled_task_disposition"] = "PAUSED"
+        if decision["next_action"] in {NextAction.WAIT_REVIEW.value, NextAction.REQUEST_REVIEW.value}:
+            completed_at = datetime.fromisoformat(now.replace("Z", "+00:00")).astimezone(UTC)
+            state["next_not_before"] = (
+                completed_at + timedelta(seconds=contract["cadence_seconds"])
+            ).isoformat()
+            state["wake_phase"] = "completed"
+        else:
+            state["next_not_before"] = None
+            state["wake_phase"] = (
+                "paused"
+                if decision["next_action"].startswith("PAUSE_")
+                else "terminal"
+            )
     save_checkpoint(state_path, state)
     release_lease(
         contract["paths"]["lease"],
@@ -996,6 +1257,11 @@ def complete_tick(
         ),
         **decision,
         "wake_count": state["wake_count"],
+        "wake_id": wake_id,
+        "wake_completed_at": state.get("wake_completed_at"),
+        "next_not_before": state.get("next_not_before"),
+        "scheduled_task_disposition": state.get("scheduled_task_disposition", "PAUSED"),
+        "cadence_seconds": contract["cadence_seconds"],
         "mutation_occurred": mutation_occurred,
         "lease": {"status": "released"},
     }
@@ -1012,12 +1278,15 @@ def parse_args() -> argparse.Namespace:
     plan.add_argument("--observation", required=True, type=Path)
     plan.add_argument("--now")
     plan.add_argument("--owner-token", required=True)
-    plan.add_argument("--lease-duration-seconds", type=int, default=300)
+    plan.add_argument("--wake-id", required=True)
+    plan.add_argument("--pause-confirmed", action="store_true", help=argparse.SUPPRESS)
+    plan.add_argument("--lease-duration-seconds", type=int, default=7200)
     trigger = commands.add_parser("record-trigger")
     trigger.add_argument("--owner-token", required=True)
     trigger.add_argument("--evidence", required=True, type=Path)
     complete = commands.add_parser("complete")
     complete.add_argument("--owner-token", required=True)
+    complete.add_argument("--wake-id", required=True)
     complete.add_argument("--observation", required=True, type=Path)
     complete.add_argument("--now")
     complete.add_argument("--mutation-occurred", action="store_true")
@@ -1039,6 +1308,8 @@ def main() -> None:
             observation=_read_object(args.observation),
             now=now,
             owner_token=args.owner_token,
+            wake_id=args.wake_id,
+            pause_heartbeat=lambda: args.pause_confirmed,
             lease_duration_seconds=args.lease_duration_seconds,
             **common,
         )
@@ -1051,6 +1322,7 @@ def main() -> None:
     else:
         result = complete_tick(
             owner_token=args.owner_token,
+            wake_id=args.wake_id,
             final_observation=_read_object(args.observation),
             now=now,
             mutation_occurred=args.mutation_occurred,

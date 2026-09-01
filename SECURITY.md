@@ -12,11 +12,14 @@ disclosure timing will be agreed after the report is reproduced and scoped.
 
 ## Supported scope
 
-Security reports are accepted for the current `0.3.1` public release candidate,
-especially authorization-boundary bypasses, incorrect Codex thread targeting,
-unsafe GraphQL mutation scope, checkpoint or lease integrity failures, and
-commit-pinned installation verification failures.
+Security reports are accepted for the current `0.6.0` Codex-first development
+baseline, especially authorization-boundary bypasses, incorrect Codex thread
+targeting, unsafe GraphQL mutation scope, checkpoint or wake-lifecycle
+integrity failures, lease failures in the optional hardened mode, and
+commit-pinned installation verification failures. The real 0.4.0 black-box
+pilot failed; it is not a publishable final recurring release.
 
-Long-term unattended operation, automatic connector detection, generic
+Live long-term unattended operation remains a forward-pilot capability rather
+than a proven service guarantee. Automatic connector detection, generic
 reviewers, non-GitHub forges, Raspberry Pi portability, and plugin marketplace
 packaging are not supported capabilities.

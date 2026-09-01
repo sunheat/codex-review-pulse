@@ -19,6 +19,10 @@ from recurring_model import (  # noqa: E402
 )
 
 
+HEAD1 = "1" * 40
+HEAD2 = "2" * 40
+
+
 def contract(**overrides: object) -> dict:
     value = {
         "schema_version": 1,
@@ -27,7 +31,7 @@ def contract(**overrides: object) -> dict:
         "reviewer_logins": ["chatgpt-codex-connector"],
         "approval_logins": ["chatgpt-codex-connector"],
         "expected_installation": {
-            "version": "0.3.1",
+            "version": "0.4.0",
             "source_commit": "a" * 40,
             "source_repository": str((ROOT / "source").resolve()),
             "skill_path": str((ROOT / "installed" / "codex-review-pulse").resolve()),
@@ -35,6 +39,7 @@ def contract(**overrides: object) -> dict:
         "authorization_id": "auth-1",
         "runner_identity": "operator-a",
         "automation_identity": "scheduled-task-a",
+        "cadence_seconds": 600,
         "maximum_wakes": 5,
         "expires_at": "2026-08-26T00:00:00+00:00",
         "connector_capability": "unknown",
@@ -48,7 +53,7 @@ def contract(**overrides: object) -> dict:
             "resolve_threads": True,
             "commit": True,
             "push": True,
-            "review_trigger": False,
+            "review_trigger": True,
             "issue_creation": False,
             "merge": False,
             "auto_merge": False,
@@ -57,7 +62,7 @@ def contract(**overrides: object) -> dict:
             "generic_reviewer_handling": False,
             "non_target_thread_resolution": False,
         },
-        "review_trigger_head_oid": None,
+        "review_trigger_head_oid": HEAD1,
         "paths": {
             name: str((ROOT / "runtime" / f"{name}.json").resolve())
             for name in ("checkpoint", "lease", "run_state")
@@ -79,14 +84,17 @@ def observation(**overrides: object) -> dict:
         "lease_status": "owned",
         "recovery_status": "none",
         "pull_request_state": "OPEN",
-        "head_oid": "HEAD1",
+        "head_oid": HEAD1,
         "targeted_thread_ids": [],
         "non_target_thread_ids": [],
         "approval_status": "awaiting_current_head_approval",
         "approval_evidence_ids": [],
+        "review_activity_ok": True,
+        "codex_review_in_progress": False,
+        "review_in_progress_reaction_ids": [],
         "server_time": "2026-08-25T00:20:00+00:00",
         "batch_publication_event": {
-            "head_oid": "HEAD1",
+            "head_oid": HEAD1,
             "created_at": "2026-08-25T00:00:00+00:00",
         },
         "relevant_codex_events": [],
@@ -110,11 +118,49 @@ class RecurringModelTests(unittest.TestCase):
         self.state = empty_run_state(self.contract)
 
     def test_identical_snapshot_waits_for_review(self) -> None:
-        current = advance_observation_state(self.state, observation())
-        current = advance_observation_state(current, observation())
-        result = evaluated(self.contract, observation(), current)
+        early = observation(server_time="2026-08-25T00:05:00+00:00")
+        current = advance_observation_state(self.state, early)
+        current = advance_observation_state(current, early)
+        result = evaluated(self.contract, early, current)
         self.assertEqual(result["next_action"], "WAIT_REVIEW")
-        self.assertEqual(result["reason_code"], "connector_capability_unknown")
+        self.assertEqual(result["reason_code"], "server_wait_budget_pending")
+
+    def test_codex_eyes_waits_even_when_partial_threads_are_visible(self) -> None:
+        result = evaluated(
+            self.contract,
+            observation(
+                codex_review_in_progress=True,
+                review_in_progress_reaction_ids=["EYES1"],
+                targeted_thread_ids=["T1"],
+            ),
+            self.state,
+        )
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        self.assertEqual(result["reason_code"], "codex_review_in_progress")
+
+    def test_codex_eyes_waits_through_conflicting_approval_visibility(self) -> None:
+        result = evaluated(
+            self.contract,
+            observation(
+                approval_status="approved_current_head",
+                approval_evidence_ids=["REVIEW1"],
+                codex_review_in_progress=True,
+                review_in_progress_reaction_ids=["EYES1"],
+            ),
+            self.state,
+        )
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        self.assertEqual(result["reason_code"], "codex_review_in_progress")
+        self.assertEqual(result["review_in_progress_reaction_ids"], ["EYES1"])
+
+    def test_invalid_review_activity_evidence_pauses_fail_closed(self) -> None:
+        result = evaluated(
+            self.contract,
+            observation(review_activity_ok=False),
+            self.state,
+        )
+        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+        self.assertEqual(result["reason_code"], "review_activity_evidence_invalid")
 
     def test_new_targeted_thread_runs_one_batch(self) -> None:
         result = evaluated(
@@ -239,18 +285,94 @@ class RecurringModelTests(unittest.TestCase):
             "PAUSE_EXPIRED",
         )
 
-    def test_unknown_connector_fails_closed_even_after_wait_policy(self) -> None:
+    def test_idle_protocol_requests_one_automatic_trigger_after_wait_policy(self) -> None:
+        authorized = contract(connector_capability="manual_trigger")
+        state = advance_observation_state(self.state, observation())
+        state = advance_observation_state(state, observation())
+        result = evaluated(authorized, observation(), state)
+        self.assertEqual(result["next_action"], "REQUEST_REVIEW")
+        self.assertEqual(result["reason_code"], "authorized_single_trigger_available")
+
+    def test_cold_start_idle_observation_becomes_the_wait_boundary(self) -> None:
+        authorized = contract(connector_capability="manual_trigger")
+        first = observation(
+            server_time="2026-08-25T00:00:00+00:00",
+            batch_publication_event=None,
+        )
+        second = observation(
+            server_time="2026-08-25T00:10:00+00:00",
+            batch_publication_event=None,
+        )
+        state = advance_observation_state(self.state, first)
+        state = advance_observation_state(state, second)
+        result = evaluated(authorized, second, state)
+        self.assertEqual(result["next_action"], "REQUEST_REVIEW")
+        self.assertEqual(result["reason_code"], "authorized_single_trigger_available")
+
+    def test_unknown_connector_capability_blocks_review_trigger(self) -> None:
         state = advance_observation_state(self.state, observation())
         state = advance_observation_state(state, observation())
         result = evaluated(self.contract, observation(), state)
+        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+        self.assertEqual(result["reason_code"], "review_trigger_capability_not_authorized")
+        self.assertEqual(result["connector_capability"], "unknown")
+
+    def test_narrow_contract_without_trigger_authority_pauses(self) -> None:
+        narrowed = contract(
+            mutation_scope={**self.contract["mutation_scope"], "review_trigger": False}
+        )
+        state = advance_observation_state(self.state, observation())
+        state = advance_observation_state(state, observation())
+        result = evaluated(narrowed, observation(), state)
+        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+        self.assertEqual(result["reason_code"], "review_trigger_not_authorized")
+
+    def test_trigger_authority_without_exact_head_pauses(self) -> None:
+        unrestricted = contract(
+            review_trigger_head_oid=None,
+            connector_capability="manual_trigger",
+        )
+        state = advance_observation_state(self.state, observation())
+        state = advance_observation_state(state, observation())
+        result = evaluated(unrestricted, observation(), state)
+        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+        self.assertEqual(result["reason_code"], "review_trigger_head_not_authorized")
+
+    def test_emitted_trigger_that_never_starts_review_pauses_without_retry(self) -> None:
+        state = record_trigger_result(
+            self.state,
+            attempted_head_oid=HEAD1,
+            head_before=HEAD1,
+            head_after=HEAD1,
+            comment_node_id="IC_1",
+            created_at="2026-08-25T00:00:00+00:00",
+        )
+        state = advance_observation_state(state, observation())
+        state = advance_observation_state(state, observation())
+        result = evaluated(self.contract, observation(), state)
+        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+        self.assertEqual(result["reason_code"], "review_trigger_did_not_start")
+
+    def test_emitted_trigger_waits_one_full_cadence_before_pausing(self) -> None:
+        state = record_trigger_result(
+            self.state,
+            attempted_head_oid=HEAD1,
+            head_before=HEAD1,
+            head_after=HEAD1,
+            comment_node_id="IC_1",
+            created_at="2026-08-25T00:00:00+00:00",
+        )
+        early = observation(server_time="2026-08-25T00:05:00+00:00")
+        state = advance_observation_state(state, early)
+        state = advance_observation_state(state, early)
+        result = evaluated(self.contract, early, state)
         self.assertEqual(result["next_action"], "WAIT_REVIEW")
-        self.assertEqual(result["reason_code"], "connector_capability_unknown")
+        self.assertEqual(result["reason_code"], "server_wait_budget_pending")
 
     def test_server_time_and_stable_observations_are_both_required_for_trigger(self) -> None:
         authorized = contract(
+            review_trigger_head_oid=HEAD1,
             connector_capability="manual_trigger",
-            review_trigger_head_oid="HEAD1",
-            mutation_scope={**self.contract["mutation_scope"], "review_trigger": True},
         )
         one = advance_observation_state(self.state, observation())
         self.assertEqual(
@@ -277,7 +399,7 @@ class RecurringModelTests(unittest.TestCase):
             relevant_codex_events=[
                 {
                     "id": "REV1",
-                    "head_oid": "HEAD1",
+                    "head_oid": HEAD1,
                     "created_at": "2026-08-25T00:05:00+00:00",
                 }
             ]
@@ -290,9 +412,9 @@ class RecurringModelTests(unittest.TestCase):
             event_result["reason_code"], "relevant_codex_event_observed"
         )
         new_head = observation(
-            head_oid="HEAD2",
+            head_oid=HEAD2,
             batch_publication_event={
-                "head_oid": "HEAD2",
+                "head_oid": HEAD2,
                 "created_at": "2026-08-25T00:00:00+00:00",
             },
         )
@@ -305,9 +427,9 @@ class RecurringModelTests(unittest.TestCase):
     def test_trigger_idempotency_survives_restart_and_is_head_scoped(self) -> None:
         state = record_trigger_result(
             self.state,
-            attempted_head_oid="HEAD1",
-            head_before="HEAD1",
-            head_after="HEAD1",
+            attempted_head_oid=HEAD1,
+            head_before=HEAD1,
+            head_after=HEAD1,
             comment_node_id="IC_1",
             created_at="2026-08-25T00:00:00+00:00",
         )
@@ -315,33 +437,33 @@ class RecurringModelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already recorded"):
             record_trigger_result(
                 restarted,
-                attempted_head_oid="HEAD1",
-                head_before="HEAD1",
-                head_after="HEAD1",
+                attempted_head_oid=HEAD1,
+                head_before=HEAD1,
+                head_after=HEAD1,
                 comment_node_id="IC_2",
                 created_at="2026-08-25T00:01:00+00:00",
             )
         new_head = record_trigger_result(
             restarted,
-            attempted_head_oid="HEAD2",
-            head_before="HEAD2",
-            head_after="HEAD2",
+                attempted_head_oid=HEAD2,
+                head_before=HEAD2,
+                head_after=HEAD2,
             comment_node_id="IC_3",
             created_at="2026-08-25T00:02:00+00:00",
         )
-        self.assertEqual(set(new_head["trigger_events"]), {"HEAD1", "HEAD2"})
+        self.assertEqual(set(new_head["trigger_events"]), {HEAD1, HEAD2})
 
     def test_head_change_during_trigger_is_latched(self) -> None:
         state = record_trigger_result(
             self.state,
-            attempted_head_oid="HEAD1",
-            head_before="HEAD1",
-            head_after="HEAD2",
+            attempted_head_oid=HEAD1,
+            head_before=HEAD1,
+            head_after=HEAD2,
             comment_node_id="IC_1",
             created_at="2026-08-25T00:00:00+00:00",
         )
         self.assertEqual(
-            state["trigger_events"]["HEAD1"]["status"],
+            state["trigger_events"][HEAD1]["status"],
             "head_changed_during_trigger",
         )
         self.assertEqual(state["failure_latch"]["reason_code"], "trigger_head_changed")

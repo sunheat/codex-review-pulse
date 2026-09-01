@@ -12,6 +12,55 @@ It also records enough frozen-batch state to recover when validation or
 publication fails after threads have already been resolved. It does not decide
 whether a pull request is globally merge-ready.
 
+## 0.4.0 pilot failure and default boundary
+
+The real 0.4.0 black-box pilot failed. The old scheduled controller activated
+before wake completion, used fixed-cadence overlap during a 26-minute wake,
+allowed its 300-second lease to expire during validation, counted a second plan
+for one host wake, and continued after `PAUSE_BLOCKED` through generated
+recovery authorization. Version `0.4.0` is not a publishable final recurring
+release.
+
+The public Codex-first path is `scripts/pulse.py`. It reuses this core model
+without requiring the recurring contract, immutable installation, preflight,
+authority digest, or renewable lease. Its small checkpoint extension persists
+`active_wake_id`, `wake_phase`, `wake_started_at`, `wake_completed_at`,
+`next_not_before`, `scheduled_task_disposition`, and `wake_count`. The initial
+turn and each scheduled wake keep the heartbeat paused until the wake is
+complete; only `WAIT_REVIEW` or successful same-head `REQUEST_REVIEW` may
+reanchor a completion-relative next wake. The old fixed-cadence activation
+rule is not part of the default semantics. A persisted `terminal` or `closed`
+phase is absorbing across later wake IDs: `begin-wake` rejects it without
+incrementing `wake_count`; reopening requires an explicit new user instruction.
+`WAIT_RETRY` is also completion-relative: it re-arms the same frozen batch for
+the next wake without opening a second batch.
+
+## Mode ownership and change policy
+
+`scripts/pulse.py` owns ongoing product development for the default path. The
+hardened controller in `scripts/heartbeat_tick.py` is a frozen compatibility
+layer: it retains its existing safety contract and regression coverage, but it
+does not receive default features or lifecycle changes for parity.
+
+Changes to hardened mode are limited to shared-core defects that block the
+default path, security/data-integrity/compatibility fixes, and repairs needed to
+keep existing hardened regression tests operational. A shared-module change
+may require validation against both modes; that validation does not authorize
+new hardened behavior. Hardened feature development may resume only through an
+explicit tracked architecture decision or new pilot evidence that changes the
+current phase boundary.
+
+The default lifecycle persists a normalized automation policy alongside this
+state. Its autonomous profile is unbounded by default (`max_wakes`,
+`deadline_at`, and `retry_wake_limit` are `null`) and permits PR-scoped test
+repair, aggregate publication, exact resolution, review triggering, and
+recoverable retries. Prompt-derived policy overrides are canonicalized and
+hashed before work begins; configured limits end with `STOP_POLICY_LIMIT`, and
+repeated unchanged validation signatures reach `PAUSE_BLOCKED`. The
+`supervised` and `observe-only` profiles provide explicit confirmation or
+mutation-free operation. These are default-mode policy fields, not hardened
+run-contract parity.
+
 ## Separation of concerns
 
 `scripts/fetch_pr_state.py` performs read-only GitHub retrieval. It passes raw
@@ -67,6 +116,11 @@ the same reaction type again; observing the same node ID again is therefore
 not a new approval. A reaction's ID identifies its node and `createdAt`
 identifies its creation time, but neither proves which head was reviewed.
 
+PR-level `EYES` reactions are separate review-activity evidence. An `EYES`
+reaction from a configured Codex identity can only delay mutation until it is
+removed; it never proves approval. Human `EYES` is ignored, while malformed or
+conflicting reaction-node evidence fails closed.
+
 ## Reaction approval epoch
 
 An approval event is identified by its GitHub reaction node ID, content, and
@@ -104,15 +158,24 @@ verified exact resolution.
 
 If aggregate validation, commit, or push fails after resolutions, the failure
 record includes its phase, resolved IDs, pending paths, optional local commit,
-and frozen head. This checkpoint is recovery evidence; it is not permission to
-retry a mutation or create a second commit. A failed or unfinished batch cannot
-be overwritten by a different freeze; it must be recovered first.
+and frozen head. Recoverable validation or external failures are recorded as a
+`WAIT_RETRY` decision with a completion-relative next wake; the same frozen
+batch is resumed. A repeated unchanged failure reaches the configured
+no-progress pause. A hard publication failure remains recovery evidence and is
+not permission to retry a mutation or create a second commit. A failed or
+unfinished batch cannot be overwritten by a different freeze; it must be
+recovered first.
 
 ## Limits and recurring extension
 
 Atomic replacement prevents torn checkpoint files but does not itself
-serialize two independent writers. The bounded recurring layer adds a separate
-PR-scoped lease and run-state file without changing this checkpoint's schema.
+serialize two independent writers. The optional hardened recurring layer adds
+a separate PR-scoped lease and run-state file without changing this
+checkpoint's core schema. The default path uses one PR-scoped in-progress
+marker persisted through atomic checkpoint replacement; it is not a
+cross-process lock or compare-and-set mechanism. Default operation assumes one
+host/task runner per PR and pauses on detected stale or incomplete wake state
+rather than building a multi-runner lease platform.
 See [the recurring-heartbeat design](recurring-heartbeat-readiness.md).
 
 A cold start with a pre-existing reaction

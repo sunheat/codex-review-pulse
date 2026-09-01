@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 from typing import Any
 
 from checkpoint_store import checkpoint_path, runtime_artifact_path
@@ -46,10 +48,57 @@ ALWAYS_DENIED = {
     "non_target_thread_resolution",
 }
 CONNECTOR_CAPABILITIES = {"unknown", "manual_trigger", "automatic_review"}
+DEFAULT_CADENCE_SECONDS = 10 * 60
+DEFAULT_MAXIMUM_WAKES = 100
+DEFAULT_MAXIMUM_RUNTIME_DAYS = 30
+DEFAULT_MINIMUM_STABLE_OBSERVATIONS = 2
+MINIMUM_CADENCE_SECONDS = 60
 
 
 class RunContractDriftError(RuntimeError):
     """The persisted run authority no longer matches the current contract."""
+
+
+def apply_run_contract_defaults(
+    contract: dict[str, Any], *, now: str | datetime | None = None
+) -> dict[str, Any]:
+    """Resolve omitted bounded-run settings once before authority is persisted."""
+    if not isinstance(contract, dict):
+        raise ValueError("Run-contract root must be an object")
+    current_time = (
+        datetime.now(UTC)
+        if now is None
+        else (
+            now
+            if isinstance(now, datetime)
+            else datetime.fromisoformat(now.replace("Z", "+00:00"))
+        )
+    )
+    if current_time.tzinfo is None:
+        raise ValueError("Default-resolution time must include a timezone")
+    current_time = current_time.astimezone(UTC)
+
+    resolved = dict(contract)
+    resolved.setdefault("cadence_seconds", DEFAULT_CADENCE_SECONDS)
+    resolved.setdefault("maximum_wakes", DEFAULT_MAXIMUM_WAKES)
+    resolved.setdefault(
+        "expires_at",
+        (current_time + timedelta(days=DEFAULT_MAXIMUM_RUNTIME_DAYS)).isoformat(),
+    )
+    wait_policy = resolved.get("wait_policy")
+    if wait_policy is None:
+        wait_policy = {}
+    if not isinstance(wait_policy, dict):
+        raise ValueError("Run contract wait policy must be an object")
+    wait_policy = dict(wait_policy)
+    wait_policy.setdefault(
+        "minimum_server_wait_seconds", resolved["cadence_seconds"]
+    )
+    wait_policy.setdefault(
+        "minimum_stable_observations", DEFAULT_MINIMUM_STABLE_OBSERVATIONS
+    )
+    resolved["wait_policy"] = wait_policy
+    return resolved
 
 
 def _parse_timestamp(value: object, *, label: str, optional: bool = False) -> str | None:
@@ -130,14 +179,25 @@ def validate_run_contract(
     if not mutation_scope["recurring_execution"]:
         raise ValueError("Bounded recurring execution must be explicitly authorized")
     trigger_head_oid = contract.get("review_trigger_head_oid")
+    if mutation_scope["review_trigger"] and trigger_head_oid is None:
+        raise ValueError(
+            "Review-trigger head is required when review-trigger authority is enabled"
+        )
     if trigger_head_oid is not None and (
         not isinstance(trigger_head_oid, str)
         or not re.fullmatch(r"[0-9a-fA-F]{40}", trigger_head_oid)
     ):
         raise ValueError("Review-trigger head must be a full Git OID")
-    if mutation_scope["review_trigger"] and trigger_head_oid is None:
-        raise ValueError("Review-trigger authorization must name its exact head OID")
 
+    cadence_seconds = contract.get("cadence_seconds")
+    if (
+        not isinstance(cadence_seconds, int)
+        or isinstance(cadence_seconds, bool)
+        or cadence_seconds < MINIMUM_CADENCE_SECONDS
+    ):
+        raise ValueError(
+            f"cadence_seconds must be an integer of at least {MINIMUM_CADENCE_SECONDS}"
+        )
     maximum_wakes = contract.get("maximum_wakes")
     if not isinstance(maximum_wakes, int) or isinstance(maximum_wakes, bool) or maximum_wakes < 1:
         raise ValueError("maximum_wakes must be a positive integer")
@@ -187,6 +247,7 @@ def validate_run_contract(
             "repository": repository,
             "reviewer_logins": reviewers,
             "approval_logins": approvers,
+            "cadence_seconds": cadence_seconds,
             "expires_at": expires_at,
             "connector_capability": capability,
             "review_trigger_head_oid": (
@@ -325,7 +386,50 @@ def load_run_contract(
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("Run-contract root must be an object")
-    return validate_run_contract(payload, repository_path=repository_path)
+    resolved = apply_run_contract_defaults(payload)
+    return validate_run_contract(resolved, repository_path=repository_path)
+
+
+def materialize_run_contract_defaults(
+    path: str | Path,
+    *,
+    repository_path: str | Path | None = None,
+    now: str | datetime | None = None,
+) -> dict[str, Any]:
+    """Explicitly migrate omitted bounded-run settings into the contract file."""
+    contract_path = Path(path)
+    payload = json.loads(contract_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Run-contract root must be an object")
+    resolved = apply_run_contract_defaults(payload, now=now)
+    normalized = validate_run_contract(resolved, repository_path=repository_path)
+    if resolved == payload:
+        return normalized
+
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=contract_path.parent,
+            prefix=f".{contract_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary_name = stream.name
+            json.dump(resolved, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, contract_path)
+        temporary_name = None
+    finally:
+        if temporary_name is not None:
+            try:
+                Path(temporary_name).unlink()
+            except FileNotFoundError:
+                pass
+    return normalized
 
 
 def load_mutation_run_contract(
@@ -334,9 +438,17 @@ def load_mutation_run_contract(
     repository_path: str | Path | None,
     owner_token: str,
 ) -> dict[str, Any]:
-    """Load mutation authority and release its anchored lease on invalid drift."""
+    """Load explicit mutation authority without migrating the contract file."""
     try:
-        return load_run_contract(path, repository_path=repository_path)
+        contract_path = Path(path)
+        payload = json.loads(contract_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("Run-contract root must be an object")
+        if apply_run_contract_defaults(payload) != payload:
+            raise ValueError(
+                "Run-contract defaults require explicit materialization before mutation"
+            )
+        return validate_run_contract(payload, repository_path=repository_path)
     except Exception as error:
         release_anchored_lease(path, owner_token=owner_token)
         raise RunContractDriftError(
@@ -417,12 +529,28 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate a bounded recurring run contract")
     parser.add_argument("contract", type=Path)
     parser.add_argument("--repository-path", type=Path)
+    parser.add_argument(
+        "--apply-defaults",
+        action="store_true",
+        help="Resolve omitted cadence, wake, deadline, and wait-policy defaults before validation",
+    )
+    parser.add_argument(
+        "--now",
+        help="Timezone-aware ISO-8601 time used only with --apply-defaults",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    contract = load_run_contract(args.contract, repository_path=args.repository_path)
+    payload = json.loads(args.contract.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Run-contract root must be an object")
+    if args.now and not args.apply_defaults:
+        raise ValueError("--now requires --apply-defaults")
+    if args.apply_defaults:
+        payload = apply_run_contract_defaults(payload, now=args.now)
+    contract = validate_run_contract(payload, repository_path=args.repository_path)
     print(json.dumps(contract, indent=2, sort_keys=True))
 
 

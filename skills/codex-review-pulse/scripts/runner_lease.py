@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 from typing import Any, Iterator
 
 from checkpoint_store import load_checkpoint, save_checkpoint
@@ -18,7 +19,7 @@ from state_model import canonical_repository
 
 LEASE_SCHEMA_VERSION = 1
 MIN_LEASE_DURATION_SECONDS = 30
-MAX_LEASE_DURATION_SECONDS = 3600
+MAX_LEASE_DURATION_SECONDS = 86400
 
 
 def _utc(value: str | datetime) -> datetime:
@@ -53,12 +54,23 @@ def _operation_lock(lease_path: Path) -> Iterator[None]:
     """Serialize lease changes with an OS-released advisory byte-range lock."""
     lease_path.parent.mkdir(parents=True, exist_ok=True)
     guard = lease_path.with_name(lease_path.name + ".guard")
-    stream = guard.open("a+b")
     try:
-        stream.seek(0, os.SEEK_END)
-        if stream.tell() == 0:
-            stream.write(b"0")
-            stream.flush()
+        with guard.open("x+b") as initializer:
+            initializer.write(b"0")
+            initializer.flush()
+    except FileExistsError:
+        pass
+    stream = None
+    for _ in range(100):
+        candidate = guard.open("r+b")
+        if os.fstat(candidate.fileno()).st_size >= 1:
+            stream = candidate
+            break
+        candidate.close()
+        time.sleep(0.01)
+    if stream is None:
+        raise RuntimeError("Lease guard initialization did not complete")
+    try:
         stream.seek(0)
         if os.name == "nt":
             import msvcrt
@@ -239,7 +251,7 @@ def parse_args() -> argparse.Namespace:
         command = commands.add_parser(name)
         command.add_argument("--owner-token", required=True)
         command.add_argument("--now", required=True)
-        command.add_argument("--duration-seconds", type=int, default=300)
+        command.add_argument("--duration-seconds", type=int, default=7200)
     release = commands.add_parser("release")
     release.add_argument("--owner-token", required=True)
     return parser.parse_args()
