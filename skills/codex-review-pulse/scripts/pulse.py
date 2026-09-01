@@ -144,6 +144,16 @@ def _consume_policy_confirmation(state: dict[str, Any], operation: str) -> None:
         state["policy_confirmation"] = None
 
 
+def _consume_thread_resolution_confirmation(state: dict[str, Any]) -> None:
+    batch = state.get("active_batch")
+    if not isinstance(batch, dict):
+        return
+    targeted = set(batch.get("targeted_thread_ids") or [])
+    resolved = set(batch.get("resolved_thread_ids") or [])
+    if targeted and targeted.issubset(resolved):
+        _consume_policy_confirmation(state, "thread_resolution")
+
+
 def confirm_policy_operation(
     checkpoint: dict[str, Any], *, operation: str, now: str
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -345,6 +355,7 @@ def _pause(
     evidence: Any = None,
     action: str = "PAUSE_BLOCKED",
     mutation_occurred: bool = False,
+    clear_active_wake: bool = True,
 ) -> dict[str, Any]:
     """Make pause absorbing for the current wake and persist its evidence."""
     active_wake_id = state.get("active_wake_id")
@@ -358,7 +369,8 @@ def _pause(
     state["wake_phase"] = "paused"
     state["wake_completed_at"] = now
     state["next_not_before"] = None
-    state["active_wake_id"] = None
+    if clear_active_wake:
+        state["active_wake_id"] = None
     state["last_wake_id"] = active_wake_id or state.get("last_wake_id")
     if not state.get("failure_latch"):
         state["failure_latch"] = {
@@ -491,6 +503,7 @@ def begin_wake(
             now=now,
             evidence={"active_wake_id": state["active_wake_id"]},
             action="PAUSE_RECOVERY",
+            clear_active_wake=False,
         )
         return state, result
     if state.get("failure_latch"):
@@ -963,7 +976,7 @@ def resolve_default_thread(
     if thread_id not in batch.get("thread_outcomes", {}):
         raise DefaultWakeError("Record the thread outcome before exact resolution")
     if thread_id in batch.get("resolved_thread_ids", []):
-        _consume_policy_confirmation(state, "thread_resolution")
+        _consume_thread_resolution_confirmation(state)
         return state, {"id": thread_id, "isResolved": True, "alreadyResolved": True}
 
     def recheck_boundary() -> None:
@@ -983,7 +996,7 @@ def resolve_default_thread(
         graphql_call=graphql_call,
     )
     state = record_resolved_thread(state, thread_id)
-    _consume_policy_confirmation(state, "thread_resolution")
+    _consume_thread_resolution_confirmation(state)
     result = {
         "next_action": "THREAD_RESOLVED",
         "reason_code": "exact_thread_resolution_confirmed",

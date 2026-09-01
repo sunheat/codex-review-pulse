@@ -138,6 +138,24 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "maximum_wakes_reached")
         self.assertEqual(state["wake_count"], 1)
 
+    def test_incomplete_wake_pause_preserves_the_original_wake_marker(self) -> None:
+        state, _ = started()
+
+        state, result = pulse.begin_wake(
+            state,
+            wake_id="wake-2",
+            now="2026-08-26T00:01:00+00:00",
+            pause_heartbeat=lambda: True,
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "incomplete_wake")
+        self.assertEqual(state["active_wake_id"], "wake-1")
+        self.assertEqual(state["last_wake_id"], "wake-1")
+        self.assertEqual(
+            state["failure_latch"]["evidence"]["active_wake_id"], "wake-1"
+        )
+
     def test_deadline_is_optional_and_stops_before_work(self) -> None:
         state, result = pulse.begin_wake(
             empty_checkpoint("Owner/Repo", 17),
@@ -371,6 +389,105 @@ class DefaultLifecycleTests(unittest.TestCase):
             graphql_call=graphql_call,
         )
         self.assertEqual(result["next_action"], "THREAD_RESOLVED")
+        self.assertIsNone(state["policy_confirmation"])
+
+    def test_supervised_thread_confirmation_survives_until_the_batch_is_resolved(self) -> None:
+        state, _ = pulse.begin_wake(
+            empty_checkpoint("Owner/Repo", 17),
+            wake_id="wake-1",
+            now=NOW,
+            policy_overrides={"profile": "supervised"},
+            pause_heartbeat=lambda: True,
+        )
+        state, _ = pulse.record_snapshot(
+            state,
+            snapshot(targeted=["T1", "T2"]),
+            wake_id="wake-1",
+            now=NOW,
+        )
+        state, _ = pulse.freeze_default_batch(state, wake_id="wake-1")
+        state, result = pulse.record_default_outcome(
+            state,
+            wake_id="wake-1",
+            thread_id="T1",
+            classification="fix-now",
+            now=NOW,
+        )
+        self.assertEqual(result["next_action"], "PAUSE_POLICY_CONFIRMATION")
+        state, _ = pulse.confirm_policy_operation(
+            state, operation="thread_resolution", now="2026-08-26T00:01:00+00:00"
+        )
+        state, _ = started(state, wake_id="wake-2", now="2026-08-26T00:11:00+00:00")
+        state, _ = pulse.record_snapshot(
+            state,
+            snapshot(targeted=[]),
+            wake_id="wake-2",
+            now="2026-08-26T00:11:00+00:00",
+        )
+        state, _ = pulse.record_default_outcome(
+            state,
+            wake_id="wake-2",
+            thread_id="T1",
+            classification="fix-now",
+            now="2026-08-26T00:11:00+00:00",
+        )
+
+        def graphql_call(query: str, variables: dict[str, object]) -> dict[str, object]:
+            if "resolveReviewThread" in query:
+                return {
+                    "data": {
+                        "resolveReviewThread": {
+                            "thread": {"id": variables["threadId"], "isResolved": True}
+                        }
+                    }
+                }
+            return {
+                "data": {
+                    "repository": {
+                        "nameWithOwner": "owner/repo",
+                        "pullRequest": {
+                            "number": 17,
+                            "headRefOid": "HEAD1",
+                            "reviewThreads": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": [
+                                    {
+                                        "id": thread_id,
+                                        "isResolved": False,
+                                        "comments": {
+                                            "nodes": [
+                                                {"author": {"login": "chatgpt-codex-connector"}}
+                                            ]
+                                        },
+                                    }
+                                    for thread_id in ("T1", "T2")
+                                ],
+                            },
+                        },
+                    }
+                }
+            }
+
+        state, _ = pulse.resolve_default_thread(
+            state,
+            wake_id="wake-2",
+            thread_id="T1",
+            graphql_call=graphql_call,
+        )
+        self.assertIsNotNone(state["policy_confirmation"])
+        state, _ = pulse.record_default_outcome(
+            state,
+            wake_id="wake-2",
+            thread_id="T2",
+            classification="fix-now",
+            now="2026-08-26T00:11:00+00:00",
+        )
+        state, _ = pulse.resolve_default_thread(
+            state,
+            wake_id="wake-2",
+            thread_id="T2",
+            graphql_call=graphql_call,
+        )
         self.assertIsNone(state["policy_confirmation"])
 
     def test_supervised_confirmation_must_match_the_pending_operation(self) -> None:
