@@ -127,6 +127,13 @@ def _classify_identity_reactions(
     qualifying: list[dict[str, Any]] = []
     for reaction_id in sorted(by_id):
         items = by_id[reaction_id]
+        raw_logins = [
+            (item.get("user") or {}).get("login")
+            for item in items
+        ]
+        if any(not isinstance(login, str) or not login.strip() for login in raw_logins):
+            invalid_ids.add(reaction_id)
+            continue
         identities = {
             normalize_login((item.get("user") or {}).get("login")) for item in items
         }

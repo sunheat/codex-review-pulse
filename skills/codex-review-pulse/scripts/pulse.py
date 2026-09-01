@@ -1218,11 +1218,12 @@ def complete_wake(
     """Complete one wake after proving the persisted completion-relative first run."""
     now = _iso(now)
     state = ensure_default_lifecycle(checkpoint)
-    effective_cadence = (
-        state["automation_policy"]["cadence_seconds"]
-        if cadence_seconds is None
-        else cadence_seconds
-    )
+    persisted_cadence = state["automation_policy"]["cadence_seconds"]
+    if cadence_seconds is not None and cadence_seconds != persisted_cadence:
+        raise ValueError(
+            "Completion cadence must match the persisted automation policy"
+        )
+    effective_cadence = persisted_cadence
     if isinstance(effective_cadence, bool) or not isinstance(effective_cadence, int) or effective_cadence <= 0:
         raise ValueError("Cadence must be positive")
     if state.get("last_wake_id") == wake_id and state.get("active_wake_id") is None and state.get("last_wake_result"):

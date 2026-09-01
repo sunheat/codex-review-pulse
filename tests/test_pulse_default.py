@@ -138,6 +138,25 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "maximum_wakes_reached")
         self.assertEqual(state["wake_count"], 1)
 
+    def test_completion_rejects_cadence_override_that_differs_from_policy(self) -> None:
+        state, _ = pulse.begin_wake(
+            empty_checkpoint("Owner/Repo", 17),
+            wake_id="wake-1",
+            now=NOW,
+            policy_overrides={"cadence_seconds": 1200},
+            pause_heartbeat=lambda: True,
+        )
+        with self.assertRaisesRegex(ValueError, "match the persisted automation policy"):
+            pulse.complete_wake(
+                state,
+                wake_id="wake-1",
+                now="2026-08-26T00:01:00+00:00",
+                cadence_seconds=600,
+                schedule_next_wake=lambda expected: expected,
+            )
+        self.assertEqual(state["automation_policy"]["cadence_seconds"], 1200)
+        self.assertEqual(state["active_wake_id"], "wake-1")
+
     def test_incomplete_wake_pause_preserves_the_original_wake_marker(self) -> None:
         state, _ = started()
 
