@@ -81,6 +81,16 @@ def _ceil_to_second(value: datetime) -> datetime:
     return value.replace(microsecond=0)
 
 
+def _first_run_matches(expected: str, observed: object) -> bool:
+    if not isinstance(observed, str) or not observed.strip():
+        return False
+    try:
+        delta = _utc(observed) - _utc(expected)
+    except (TypeError, ValueError):
+        return False
+    return timedelta(0) <= delta <= timedelta(seconds=1)
+
+
 def _task_id(response: object) -> str:
     if isinstance(response, str) and response.strip():
         return response
@@ -110,7 +120,7 @@ def _validate_task_readback(
 
 
 def scheduled_preflight(
-    checkpoint: Mapping[str, Any], *, now: str
+    checkpoint: Mapping[str, Any], *, now: str, task_id: str | None = None
 ) -> dict[str, Any] | None:
     """Return a fail-closed result before ``begin-wake`` or ``None`` if ready."""
     try:
@@ -129,6 +139,23 @@ def scheduled_preflight(
         return {
             "next_action": "PAUSE_RECOVERY",
             "reason_code": "failure_latched",
+        }
+    if (
+        checkpoint.get("scheduled_task_disposition") != "ACTIVE"
+        or checkpoint.get("scheduled_task_id") != task_id
+        or not isinstance(task_id, str)
+        or not task_id.strip()
+    ):
+        return {
+            "next_action": "PAUSE_RECOVERY",
+            "reason_code": "scheduled_task_identity_mismatch",
+            "evidence": {
+                "delivered_task_id": task_id,
+                "scheduled_task_id": checkpoint.get("scheduled_task_id"),
+                "scheduled_task_disposition": checkpoint.get(
+                    "scheduled_task_disposition"
+                ),
+            },
         }
     next_not_before = checkpoint.get("next_not_before")
     if next_not_before:
@@ -250,7 +277,9 @@ class StandaloneInvocation:
                         }
                     )
                 try:
-                    preflight = scheduled_preflight(checkpoint, now=self.now)
+                    preflight = scheduled_preflight(
+                        checkpoint, now=self.now, task_id=self.task_id
+                    )
                 except Exception:
                     preflight = {
                         "next_action": "PAUSE_RECOVERY",
@@ -265,6 +294,30 @@ class StandaloneInvocation:
             if result.get("next_action") != "WAKE_STARTED":
                 return self._end(result)
             return dict(result)
+
+    def _finish_completion(
+        self,
+        *,
+        now: str,
+        actual_first_run: object,
+        successor_id: str | None,
+    ) -> dict[str, Any]:
+        if self.wake_id is None:
+            raise StandaloneInvocationError("complete-wake requires an active wake")
+        try:
+            result = self.complete_wake(
+                self.wake_id,
+                now,
+                lambda _expected: actual_first_run,
+                successor_id,
+            )
+        except Exception:
+            self.ended = True
+            raise
+        if not isinstance(result, Mapping) or "next_action" not in result:
+            self.ended = True
+            raise StandaloneInvocationError("complete-wake returned an invalid result")
+        return self._end(result)
 
     def complete(self, *, action: str, now: str, cadence_seconds: int) -> dict[str, Any]:
         """Create/read back one successor, complete once, and end immediately."""
@@ -287,8 +340,32 @@ class StandaloneInvocation:
                 completion + timedelta(seconds=cadence_seconds)
             ).isoformat()
 
+            if action == "RUN_BATCH":
+                try:
+                    checkpoint = self.host.read_checkpoint_directly()
+                    batch = checkpoint.get("active_batch")
+                    publication = (
+                        batch.get("publication")
+                        if isinstance(batch, Mapping)
+                        else None
+                    )
+                    publication_complete = (
+                        isinstance(publication, Mapping)
+                        and publication.get("status") == "succeeded"
+                    )
+                except Exception:
+                    publication_complete = False
+                if not publication_complete:
+                    return self._finish_completion(
+                        now=now,
+                        actual_first_run=None,
+                        successor_id=None,
+                    )
+
             successor_id: str | None = None
             actual_first_run: object = None
+            observed_first_run: object = None
+            first_run_mismatch = False
             try:
                 response = self.host.schedule_standalone_task(
                     prompt=self.prompt,
@@ -303,26 +380,28 @@ class StandaloneInvocation:
                 _validate_task_readback(
                     task, prompt=self.prompt, prompt_sha256=self.prompt_sha256
                 )
-                actual_first_run = task.get("first_run")
-                if not isinstance(actual_first_run, str) or not actual_first_run.strip():
+                observed_first_run = task.get("first_run")
+                if not isinstance(observed_first_run, str) or not observed_first_run.strip():
                     raise StandaloneInvocationError(
                         "Standalone task readback returned no persisted first run"
                     )
+                if not _first_run_matches(expected_first_run, observed_first_run):
+                    first_run_mismatch = True
+                    raise StandaloneInvocationError(
+                        "Standalone task readback returned an invalid first run"
+                    )
+                actual_first_run = observed_first_run
             except Exception:
+                if successor_id is not None:
+                    try:
+                        self.host.pause_task(successor_id)
+                    except Exception:
+                        pass
                 successor_id = None
-                actual_first_run = None
+                actual_first_run = observed_first_run if first_run_mismatch else None
 
-            try:
-                result = self.complete_wake(
-                    self.wake_id,
-                    now,
-                    lambda _expected: actual_first_run,
-                    successor_id,
-                )
-            except Exception:
-                self.ended = True
-                raise
-            if not isinstance(result, Mapping) or "next_action" not in result:
-                self.ended = True
-                raise StandaloneInvocationError("complete-wake returned an invalid result")
-            return self._end(result)
+            return self._finish_completion(
+                now=now,
+                actual_first_run=actual_first_run,
+                successor_id=successor_id,
+            )
