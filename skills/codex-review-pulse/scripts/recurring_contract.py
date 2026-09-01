@@ -383,36 +383,52 @@ def validate_contract_authority_binding(
 def load_run_contract(
     path: str | Path, *, repository_path: str | Path | None = None
 ) -> dict[str, Any]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Run-contract root must be an object")
+    resolved = apply_run_contract_defaults(payload)
+    return validate_run_contract(resolved, repository_path=repository_path)
+
+
+def materialize_run_contract_defaults(
+    path: str | Path,
+    *,
+    repository_path: str | Path | None = None,
+    now: str | datetime | None = None,
+) -> dict[str, Any]:
+    """Explicitly migrate omitted bounded-run settings into the contract file."""
     contract_path = Path(path)
     payload = json.loads(contract_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("Run-contract root must be an object")
-    resolved = apply_run_contract_defaults(payload)
+    resolved = apply_run_contract_defaults(payload, now=now)
     normalized = validate_run_contract(resolved, repository_path=repository_path)
-    if resolved != payload:
-        temporary_name: str | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=contract_path.parent,
-                prefix=f".{contract_path.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as stream:
-                temporary_name = stream.name
-                json.dump(resolved, stream, indent=2, sort_keys=True)
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary_name, contract_path)
-            temporary_name = None
-        finally:
-            if temporary_name is not None:
-                try:
-                    Path(temporary_name).unlink()
-                except FileNotFoundError:
-                    pass
+    if resolved == payload:
+        return normalized
+
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=contract_path.parent,
+            prefix=f".{contract_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary_name = stream.name
+            json.dump(resolved, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, contract_path)
+        temporary_name = None
+    finally:
+        if temporary_name is not None:
+            try:
+                Path(temporary_name).unlink()
+            except FileNotFoundError:
+                pass
     return normalized
 
 
@@ -424,7 +440,7 @@ def load_mutation_run_contract(
 ) -> dict[str, Any]:
     """Load mutation authority and release its anchored lease on invalid drift."""
     try:
-        return load_run_contract(path, repository_path=repository_path)
+        return materialize_run_contract_defaults(path, repository_path=repository_path)
     except Exception as error:
         release_anchored_lease(path, owner_token=owner_token)
         raise RunContractDriftError(

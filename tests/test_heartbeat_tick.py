@@ -36,6 +36,7 @@ from recurring_contract import (  # noqa: E402
     contract_authority_digest,
     expected_runtime_paths,
     load_run_contract,
+    materialize_run_contract_defaults,
     validate_run_contract,
 )
 from recurring_model import empty_run_state, validate_run_state  # noqa: E402
@@ -699,7 +700,7 @@ class HeartbeatTickTests(unittest.TestCase):
                 DEFAULT_CADENCE_SECONDS,
             )
 
-    def test_loading_omitted_expiry_materializes_one_stable_default(self) -> None:
+    def test_loading_omitted_expiry_is_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             repository = Path(directory_name) / "repo"
             repository.mkdir()
@@ -711,12 +712,37 @@ class HeartbeatTickTests(unittest.TestCase):
             payload.pop("expires_at")
             contract_path.write_text(json.dumps(payload), encoding="utf-8")
 
+            before = contract_path.read_bytes()
             first = load_run_contract(contract_path, repository_path=repository)
-            persisted = json.loads(contract_path.read_text(encoding="utf-8"))
             second = load_run_contract(contract_path, repository_path=repository)
 
-            self.assertEqual(first["expires_at"], persisted["expires_at"])
-            self.assertEqual(first["expires_at"], second["expires_at"])
+            self.assertEqual(contract_path.read_bytes(), before)
+            self.assertIsNotNone(first["expires_at"])
+            self.assertIsNotNone(second["expires_at"])
+
+    def test_contract_default_materialization_is_an_explicit_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+            payload = json.loads(contract_path.read_text(encoding="utf-8"))
+            payload.pop("expires_at")
+            contract_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            migrated = materialize_run_contract_defaults(
+                contract_path, repository_path=repository, now=NOW
+            )
+            persisted = json.loads(contract_path.read_text(encoding="utf-8"))
+            reloaded = load_run_contract(contract_path, repository_path=repository)
+
+            self.assertEqual(
+                migrated["expires_at"], "2026-09-24T00:20:00+00:00"
+            )
+            self.assertEqual(persisted["expires_at"], migrated["expires_at"])
+            self.assertEqual(reloaded["expires_at"], migrated["expires_at"])
 
     def test_default_resolution_preserves_explicit_bounds(self) -> None:
         explicit = {

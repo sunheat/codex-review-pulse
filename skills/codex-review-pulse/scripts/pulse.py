@@ -250,6 +250,7 @@ def ensure_default_lifecycle(checkpoint: dict[str, Any]) -> dict[str, Any]:
         "wake_phase": "idle",
         "wake_started_at": None,
         "wake_completed_at": None,
+        "wake_mutation_occurred": False,
         "next_not_before": None,
         "scheduled_task_disposition": "PAUSED",
         "wake_count": 0,
@@ -345,6 +346,12 @@ def _decision(action: str, reason_code: str, **details: Any) -> dict[str, Any]:
 def _set_last_result(state: dict[str, Any], result: dict[str, Any]) -> None:
     state["last_decision"] = deepcopy(result)
     state["last_wake_result"] = deepcopy(result)
+
+
+def _note_wake_mutation(state: dict[str, Any], mutation_occurred: bool) -> None:
+    """Retain a monotonic mutation audit flag for the current wake."""
+    if mutation_occurred:
+        state["wake_mutation_occurred"] = True
 
 
 def _pause(
@@ -579,6 +586,7 @@ def begin_wake(
     state["wake_phase"] = "started"
     state["wake_started_at"] = now
     state["wake_completed_at"] = None
+    state["wake_mutation_occurred"] = False
     state["next_not_before"] = None
     state["scheduled_task_disposition"] = "PAUSED"
     state["last_decision"] = None
@@ -1008,6 +1016,7 @@ def resolve_default_thread(
         "resolved": True,
         "mutation_occurred": not bool(thread.get("alreadyResolved")),
     }
+    _note_wake_mutation(state, result["mutation_occurred"])
     _set_last_result(state, result)
     return state, result
 
@@ -1134,6 +1143,7 @@ def record_default_trigger(
             "trigger": event,
             "mutation_occurred": True,
         }
+        _note_wake_mutation(state, True)
         _set_last_result(state, result)
     return state, result
 
@@ -1207,6 +1217,8 @@ def record_publication_result(
         "published_commit": published_commit,
         "mutation_occurred": bool(published_commit),
     }
+    _note_wake_mutation(state, result["mutation_occurred"])
+    result["mutation_occurred"] = bool(state.get("wake_mutation_occurred"))
     _set_last_result(state, result)
     return state, result
 
@@ -1235,7 +1247,9 @@ def complete_wake(
     _require_active_wake(state, wake_id, allow_retry_completion=True)
     decision = state.get("last_decision") or {}
     action = decision.get("next_action")
-    mutation_occurred = bool(decision.get("mutation_occurred"))
+    mutation_occurred = bool(state.get("wake_mutation_occurred")) or bool(
+        decision.get("mutation_occurred")
+    )
     if action == "RUN_BATCH":
         publication = (state.get("active_batch") or {}).get("publication") or {}
         if publication.get("status") != "succeeded":

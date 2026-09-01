@@ -999,6 +999,88 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertIsNone(result["published_commit"])
         self.assertEqual((state["active_batch"]["publication"]["status"]), "succeeded")
 
+    def test_completed_no_fix_batch_preserves_thread_resolution_mutation(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(
+            state, snapshot(targeted=["T1"]), wake_id="wake-1", now=NOW
+        )
+        state, _ = pulse.freeze_default_batch(state, wake_id="wake-1")
+        state, _ = pulse.record_default_outcome(
+            state,
+            wake_id="wake-1",
+            thread_id="T1",
+            classification="no-fix",
+            reference="false positive",
+            now=NOW,
+        )
+
+        def graphql_call(query: str, variables: dict[str, object]) -> dict[str, object]:
+            if "resolveReviewThread" in query:
+                return {
+                    "data": {
+                        "resolveReviewThread": {
+                            "thread": {"id": variables["threadId"], "isResolved": True}
+                        }
+                    }
+                }
+            return {
+                "data": {
+                    "repository": {
+                        "nameWithOwner": "owner/repo",
+                        "pullRequest": {
+                            "number": 17,
+                            "headRefOid": "HEAD1",
+                            "reviewThreads": {
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": [
+                                    {
+                                        "id": "T1",
+                                        "isResolved": False,
+                                        "comments": {
+                                            "nodes": [
+                                                {"author": {"login": "chatgpt-codex-connector"}}
+                                            ]
+                                        },
+                                    }
+                                ],
+                            },
+                        },
+                    }
+                }
+            }
+
+        state, resolved = pulse.resolve_default_thread(
+            state,
+            wake_id="wake-1",
+            thread_id="T1",
+            graphql_call=graphql_call,
+        )
+        self.assertTrue(resolved["mutation_occurred"])
+        state, _ = pulse.prepare_default_publication(
+            state, wake_id="wake-1", now=NOW, actual_head_oid="HEAD1"
+        )
+        state, _ = pulse.prepare_default_publication(
+            state, wake_id="wake-1", now=NOW, actual_head_oid="HEAD1"
+        )
+        state, publication = pulse.record_publication_result(
+            state,
+            wake_id="wake-1",
+            status="succeeded",
+            now=NOW,
+            published_commit=None,
+        )
+        self.assertTrue(publication["mutation_occurred"])
+
+        state, completed = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:01:00+00:00",
+            schedule_next_wake=lambda expected: expected,
+        )
+
+        self.assertTrue(completed["mutation_occurred"])
+        self.assertTrue(state["last_wake_result"]["mutation_occurred"])
+
     def test_completed_publication_preserves_mutation_audit_flag(self) -> None:
         state, _ = started()
         state, _ = pulse.record_snapshot(
