@@ -1721,6 +1721,7 @@ def main() -> None:
         raise RuntimeError("--wake-id is required")
 
     if args.command == "snapshot":
+        _require_active_wake(state, args.wake_id)
         if (
             state.get("last_snapshot_wake_id") == args.wake_id
             and isinstance(state.get("last_snapshot"), dict)

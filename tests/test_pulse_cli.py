@@ -425,6 +425,22 @@ class PulseCliTests(unittest.TestCase):
         self.assertEqual(harness.graphql_count(), calls_after_first)
         self.assertEqual(second, first)
 
+    def test_snapshot_checks_wake_boundary_before_fetching(self) -> None:
+        paused = CliHarness(self)
+        result = paused.json_output(paused.run("begin-wake"))
+        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+        calls_before = paused.graphql_count()
+        rejected = paused.run("snapshot")
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(paused.graphql_count(), calls_before)
+
+        wrong_wake = CliHarness(self)
+        wrong_wake.json_output(wrong_wake.run("begin-wake", "--pause-confirmed"))
+        calls_before = wrong_wake.graphql_count()
+        rejected = wrong_wake.run("snapshot", wake_id="wake-2")
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(wrong_wake.graphql_count(), calls_before)
+
     def test_retry_snapshot_preserves_frozen_batch_when_threads_disappear(self) -> None:
         harness = CliHarness(self)
         harness.begin_and_snapshot(

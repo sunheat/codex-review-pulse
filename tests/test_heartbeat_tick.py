@@ -1358,6 +1358,37 @@ class HeartbeatTickTests(unittest.TestCase):
             self.assertEqual(fourth["next_action"], "PAUSE_EXPIRED")
             self.assertEqual(fourth["wake_count"], 3)
 
+    def test_non_retained_wake_finalizes_marker_before_releasing_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_name:
+            repository = Path(directory_name) / "repo"
+            repository.mkdir()
+            git_init(repository)
+            installation = Path(directory_name) / "installed" / "codex-review-pulse"
+            create_installation(installation)
+            contract_path = create_contract(repository, installation)
+
+            result = plan_tick(
+                contract_path=contract_path,
+                repository_path=repository,
+                observation=observation(approval_status="approved_current_head"),
+                now=NOW,
+                owner_token="owner-a",
+                wake_id="wake-1",
+                pause_heartbeat=lambda: True,
+                checkout_inspector=checkout_ok,
+                runtime_script_path=verified_runtime(installation),
+            )
+
+            self.assertEqual(result["next_action"], "STOP_TERMINAL")
+            contract = load_run_contract(contract_path, repository_path=repository)
+            state = load_checkpoint(contract["paths"]["run_state"])
+            self.assertIsNotNone(state)
+            self.assertIsNone(state["active_wake_id"])
+            self.assertIsNone(state["inflight_action"])
+            self.assertEqual(state["wake_phase"], "terminal")
+            self.assertEqual(state["last_wake_id"], "wake-1")
+            self.assertFalse(Path(contract["paths"]["lease"]).exists())
+
     def test_batch_tick_retains_lease_until_final_failure_is_latched(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             repository = Path(directory_name) / "repo"

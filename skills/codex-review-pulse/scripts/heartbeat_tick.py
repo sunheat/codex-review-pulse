@@ -833,6 +833,17 @@ def plan_tick(
             if retained
             else None
         )
+        if wake_id is not None and not retained:
+            state["active_wake_id"] = None
+            state["wake_completed_at"] = now
+            state["next_not_before"] = None
+            state["scheduled_task_disposition"] = "PAUSED"
+            state["wake_phase"] = (
+                "terminal"
+                if decision["next_action"].startswith("STOP_")
+                else "paused"
+            )
+            state["last_wake_id"] = wake_id
         save_checkpoint(state_path, state)
         targeted = prepared.get("targeted_thread_ids") or []
         non_target = prepared.get("non_target_thread_ids") or []
