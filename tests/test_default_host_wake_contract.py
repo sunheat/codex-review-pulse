@@ -12,6 +12,7 @@ SCRIPTS = ROOT / "skills" / "codex-review-pulse" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import pulse  # noqa: E402
+from standalone_orchestration import StandaloneInvocation, StandaloneInvocationError  # noqa: E402
 from state_model import empty_checkpoint  # noqa: E402
 
 
@@ -54,16 +55,8 @@ def waiting_checkpoint() -> dict[str, object]:
     return state
 
 
-class InvocationEnded(RuntimeError):
-    """Raised when a host tries to do work after the invocation boundary."""
-
-
-class CheckpointUnavailable(RuntimeError):
-    """Raised by the in-memory host for a missing or unreadable checkpoint."""
-
-
 class InMemoryHost:
-    """Small host double for the default skill's invocation contract."""
+    """Small host double for the default skill's standalone-task contract."""
 
     def __init__(
         self,
@@ -72,6 +65,9 @@ class InMemoryHost:
         wake_ids: tuple[str, ...] = ("fresh-wake-1",),
         checkpoint_missing: bool = False,
         checkpoint_unreadable: bool = False,
+        schedule_fails: bool = False,
+        first_run: str | None = None,
+        pause_succeeds: bool = True,
     ) -> None:
         self.state = deepcopy(state)
         self._wake_ids = iter(wake_ids)
@@ -79,6 +75,10 @@ class InMemoryHost:
         self.operations: list[tuple[str, str]] = []
         self.checkpoint_missing = checkpoint_missing
         self.checkpoint_unreadable = checkpoint_unreadable
+        self.schedule_fails = schedule_fails
+        self.first_run = first_run
+        self.pause_succeeds = pause_succeeds
+        self.created_tasks: dict[str, dict[str, object]] = {}
 
     def new_opaque_wake_id(self) -> str:
         wake_id = next(self._wake_ids)
@@ -91,111 +91,127 @@ class InMemoryHost:
         self.issued_ids.append(wake_id)
         return wake_id
 
-    def pause_task(self, task_id: str) -> None:
+    def pause_task(self, task_id: str) -> bool:
         self.operations.append(("pause-task", task_id))
+        return self.pause_succeeds
 
     def read_checkpoint_directly(self) -> dict[str, object]:
         self.operations.append(("checkpoint-read", "direct"))
         if self.checkpoint_missing or self.checkpoint_unreadable or self.state is None:
-            raise CheckpointUnavailable
+            raise RuntimeError("checkpoint unavailable")
         return deepcopy(self.state)
+
+    def schedule_standalone_task(
+        self,
+        *,
+        prompt: str,
+        first_run: str,
+        scheduler_kind: str,
+        conversation_mode: str,
+        target_thread_id: None,
+        prompt_sha256: str,
+    ) -> object:
+        self.operations.append(("schedule-standalone", first_run))
+        if self.schedule_fails:
+            raise RuntimeError("scheduler rejected standalone task")
+        task_id = f"task-{len(self.created_tasks) + 2}"
+        self.created_tasks[task_id] = {
+            "prompt": prompt,
+            "first_run": first_run,
+            "scheduler_kind": scheduler_kind,
+            "conversation_mode": conversation_mode,
+            "target_thread_id": target_thread_id,
+            "prompt_sha256": prompt_sha256,
+        }
+        return {"id": task_id}
+
+    def read_task(self, task_id: str) -> dict[str, object]:
+        self.operations.append(("read-standalone", task_id))
+        task = self.created_tasks[task_id]
+        return {
+            **task,
+            "first_run": self.first_run or task["first_run"],
+        }
 
 
 class HostInvocation:
-    """Model one host invocation and make post-completion calls impossible."""
+    """Drive the real standalone invocation guard with injected callbacks."""
 
     def __init__(self, host: InMemoryHost, *, scheduled: bool, now: str) -> None:
         self.host = host
-        self.scheduled = scheduled
-        self.now = now
-        self.wake_id: str | None = None
-        self.started = False
-        self.ended = False
+        self.invocation = StandaloneInvocation(
+            host,
+            task_id="task-1",
+            prompt="standalone prompt",
+            scheduled=scheduled,
+            now=now,
+            begin_wake=self._begin_wake,
+            complete_wake=self._complete_wake,
+        )
 
-    def _ensure_open(self) -> None:
-        if self.ended:
-            raise InvocationEnded("the host invocation ended after its final wake result")
+    @property
+    def wake_id(self) -> str | None:
+        return self.invocation.wake_id
 
-    def _end(self, result: dict[str, object]) -> dict[str, object]:
-        self.host.operations.append(("report", str(result["next_action"])))
-        self.ended = True
-        return result
+    @property
+    def ended(self) -> bool:
+        return self.invocation.ended
 
-    @staticmethod
-    def _preflight_result(checkpoint: dict[str, object], now: str) -> dict[str, object] | None:
-        if checkpoint.get("active_wake_id"):
-            return {"next_action": "PAUSE_RECOVERY", "reason_code": "incomplete_wake"}
-        if checkpoint.get("failure_latch"):
-            return {"next_action": "PAUSE_RECOVERY", "reason_code": "failure_latched"}
-        next_not_before = checkpoint.get("next_not_before")
-        if next_not_before and datetime.fromisoformat(now) < datetime.fromisoformat(str(next_not_before)):
-            return {"next_action": "PAUSE_BLOCKED", "reason_code": "cadence_not_elapsed"}
-        return None
-
-    def begin(self) -> dict[str, object]:
-        self._ensure_open()
-        if self.started:
-            raise AssertionError("one host invocation may begin only one wake")
-        self.started = True
-        self.wake_id = self.host.new_opaque_wake_id()
-
-        if self.scheduled:
-            self.host.pause_task("task-1")
-            try:
-                checkpoint = self.host.read_checkpoint_directly()
-            except CheckpointUnavailable:
-                return self._end(
-                    {"next_action": "PAUSE_RECOVERY", "reason_code": "checkpoint_unavailable"}
-                )
-            preflight = self._preflight_result(checkpoint, self.now)
-            if preflight is not None:
-                return self._end(preflight)
-
-        self.host.operations.append(("begin-wake", self.wake_id))
+    def _begin_wake(self, wake_id: str, now: str, pause_confirmed: bool) -> dict[str, object]:
+        self.host.operations.append(("begin-wake", wake_id))
         state = self.host.state or empty_checkpoint("Owner/Repo", 17)
         self.host.state, result = pulse.begin_wake(
             state,
-            wake_id=self.wake_id,
-            now=self.now,
-            pause_heartbeat=lambda: True,
+            wake_id=wake_id,
+            now=now,
+            pause_heartbeat=lambda: pause_confirmed,
         )
-        if result["next_action"] != "WAKE_STARTED":
-            return self._end(result)
         return result
 
+    def _complete_wake(
+        self,
+        wake_id: str,
+        now: str,
+        schedule_next_wake,
+        scheduled_task_id: str | None,
+    ) -> dict[str, object]:
+        self.host.operations.append(("complete-wake", scheduled_task_id or "unconfirmed"))
+        self.host.state, result = pulse.complete_wake(
+            self.host.state or {},
+            wake_id=wake_id,
+            now=now,
+            schedule_next_wake=schedule_next_wake,
+            scheduled_task_id=scheduled_task_id,
+        )
+        return result
+
+    def begin(self) -> dict[str, object]:
+        return self.invocation.begin()
+
     def snapshot(self) -> dict[str, object]:
-        self._ensure_open()
-        if not self.started or self.wake_id is None:
+        if self.invocation.ended:
+            raise StandaloneInvocationError("invocation ended")
+        if not self.invocation.started or self.wake_id is None:
             raise AssertionError("snapshot requires the active wake")
         self.host.operations.append(("snapshot", self.wake_id))
         self.host.state, result = pulse.record_snapshot(
             self.host.state or {},
             review_snapshot(eyes=True),
             wake_id=self.wake_id,
-            now=self.now,
+            now=self.invocation.now,
         )
         return result
 
-    def complete(self, *, reanchor_succeeds: bool) -> dict[str, object]:
-        self._ensure_open()
-        if not self.started or self.wake_id is None:
-            raise AssertionError("complete requires the active wake")
-        self.host.operations.append(("reanchor-task", "success" if reanchor_succeeds else "failed"))
-        self.host.operations.append(
-            (
-                "complete-wake",
-                "--schedule-reanchored" if reanchor_succeeds else "unconfirmed",
-            )
+    def complete(
+        self, *, reanchor_succeeds: bool, action: str = "WAIT_REVIEW"
+    ) -> dict[str, object]:
+        if not reanchor_succeeds:
+            self.host.schedule_fails = True
+        return self.invocation.complete(
+            action=action,
+            now=(datetime.fromisoformat(self.invocation.now) + timedelta(minutes=1)).isoformat(),
+            cadence_seconds=600,
         )
-        self.host.state, result = pulse.complete_wake(
-            self.host.state or {},
-            wake_id=self.wake_id,
-            now=(datetime.fromisoformat(self.now) + timedelta(minutes=1)).isoformat(),
-            schedule_next_wake=(
-                (lambda expected: expected) if reanchor_succeeds else (lambda _: None)
-            ),
-        )
-        return self._end(result)
 
 
 class DefaultHostWakeContractTests(unittest.TestCase):
@@ -204,7 +220,7 @@ class DefaultHostWakeContractTests(unittest.TestCase):
         invocation = HostInvocation(host, scheduled=False, now=NOW)
 
         self.assertEqual(invocation.begin()["next_action"], "WAKE_STARTED")
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(StandaloneInvocationError):
             invocation.begin()
         self.assertEqual(host.issued_ids, ["fresh-wake-1"])
 
@@ -265,10 +281,102 @@ class DefaultHostWakeContractTests(unittest.TestCase):
 
                 self.assertEqual(result["next_action"], expected_action)
                 self.assertTrue(invocation.ended)
-                self.assertEqual(host.operations[-2][0], "complete-wake")
-                self.assertEqual(host.operations[-1], ("report", expected_action))
-                with self.assertRaises(InvocationEnded):
+                self.assertEqual(host.operations[-1][0], "complete-wake")
+                if reanchor_succeeds:
+                    self.assertEqual(host.operations[-3][0], "schedule-standalone")
+                    self.assertEqual(host.operations[-2][0], "read-standalone")
+                    self.assertEqual(result["scheduled_task_id"], "task-2")
+                with self.assertRaises(StandaloneInvocationError):
                     invocation.snapshot()
+
+    def test_successor_is_standalone_and_reuses_only_the_canonical_prompt(self) -> None:
+        host = InMemoryHost(
+            state=waiting_checkpoint(),
+            wake_ids=("fresh-wake-2",),
+        )
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+        invocation.begin()
+        invocation.snapshot()
+
+        result = invocation.complete(reanchor_succeeds=True)
+
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        self.assertEqual(host.created_tasks["task-2"]["prompt"], "standalone prompt")
+        self.assertEqual(host.created_tasks["task-2"]["scheduler_kind"], "cron")
+        self.assertEqual(host.created_tasks["task-2"]["conversation_mode"], "standalone")
+        self.assertIsNone(host.created_tasks["task-2"]["target_thread_id"])
+        self.assertEqual(host.created_tasks["task-2"]["first_run"], "2026-08-26T00:47:00+00:00")
+        self.assertEqual(host.operations[:4], [
+            ("pause-task", "task-1"),
+            ("checkpoint-read", "direct"),
+            ("begin-wake", "fresh-wake-2"),
+            ("snapshot", "fresh-wake-2"),
+        ])
+
+    def test_successor_creation_failure_completes_once_and_keeps_checkpoint_paused(self) -> None:
+        host = InMemoryHost(
+            state=waiting_checkpoint(),
+            wake_ids=("fresh-wake-2",),
+            schedule_fails=True,
+        )
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+        invocation.begin()
+        invocation.snapshot()
+
+        result = invocation.complete(reanchor_succeeds=True)
+
+        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+        self.assertEqual(result["reason_code"], "scheduled_task_reanchor_unavailable")
+        self.assertTrue(invocation.ended)
+        self.assertEqual(host.operations.count(("complete-wake", "unconfirmed")), 1)
+        with self.assertRaises(StandaloneInvocationError):
+            invocation.complete(reanchor_succeeds=True)
+
+    def test_successor_readback_mismatch_is_unverified_and_keeps_checkpoint_paused(self) -> None:
+        host = InMemoryHost(
+            state=waiting_checkpoint(),
+            wake_ids=("fresh-wake-2",),
+            first_run="2026-08-26T00:48:00+00:00",
+        )
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+        invocation.begin()
+        invocation.snapshot()
+
+        result = invocation.complete(reanchor_succeeds=True)
+
+        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+        self.assertEqual(result["reason_code"], "scheduled_task_reanchor_mismatch")
+        self.assertNotIn("scheduled_task_id", result)
+        self.assertEqual(host.state["scheduled_task_disposition"], "PAUSED")
+        self.assertTrue(invocation.ended)
+
+    def test_terminal_result_cannot_create_a_successor_or_call_complete(self) -> None:
+        host = InMemoryHost(
+            state=waiting_checkpoint(),
+            wake_ids=("fresh-wake-2",),
+        )
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+        invocation.begin()
+        invocation.snapshot()
+
+        with self.assertRaises(StandaloneInvocationError):
+            invocation.complete(reanchor_succeeds=True, action="STOP_TERMINAL")
+
+        self.assertNotIn(("schedule-standalone", "2026-08-26T00:47:00+00:00"), host.operations)
+        self.assertNotIn(("complete-wake", "task-2"), host.operations)
+
+    def test_failed_task_pause_stops_before_checkpoint_read(self) -> None:
+        host = InMemoryHost(
+            state=waiting_checkpoint(),
+            wake_ids=("fresh-wake-2",),
+            pause_succeeds=False,
+        )
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+
+        result = invocation.begin()
+
+        self.assertEqual(result["reason_code"], "standalone_task_pause_unconfirmed")
+        self.assertEqual(host.operations, [("pause-task", "task-1")])
 
     def test_premature_fresh_id_latches_and_reuse_is_idempotent(self) -> None:
         state = waiting_checkpoint()

@@ -273,6 +273,7 @@ class PulseCliTests(unittest.TestCase):
         self.assertIn("confirm-policy", root_help)
         self.assertIn("configure-policy", root_help)
         self.assertIn("heartbeat-prompt", root_help)
+        self.assertIn("standalone-task-prompt", root_help)
         self.assertIn("prepare-publication", root_help)
         self.assertIn("--pause-confirmed", begin_help)
         self.assertIn("--policy-json", begin_help)
@@ -291,6 +292,12 @@ class PulseCliTests(unittest.TestCase):
             result["batch_order"].index("exact-resolution"),
             result["batch_order"].index("commit"),
         )
+        self.assertEqual(result["conversation_mode"], "standalone")
+        self.assertIsNone(result["target_thread_id"])
+        self.assertNotIn("same heartbeat", result["prompt"].lower())
+
+        alias = harness.json_output(harness.run("standalone-task-prompt"))
+        self.assertEqual(alias, result)
 
     def test_prompt_policy_is_persisted_on_initial_wake_and_can_be_updated(self) -> None:
         harness = CliHarness(self)
@@ -572,6 +579,8 @@ class PulseCliTests(unittest.TestCase):
                 "--schedule-reanchored",
                 "--scheduled-first-run",
                 "2026-08-26T00:36:00+00:00",
+                "--scheduled-task-id",
+                "task-2",
                 now="2026-08-26T00:26:00+00:00",
             )
         )
@@ -579,6 +588,7 @@ class PulseCliTests(unittest.TestCase):
         state = load_checkpoint(checkpoint_path("owner/repo", 17, repository_path=reanchored.checkout))
         self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
         self.assertEqual(state["next_not_before"], "2026-08-26T00:36:00+00:00")
+        self.assertEqual(state["scheduled_task_id"], "task-2")
 
         stale = CliHarness(self)
         stale.begin_and_snapshot()

@@ -48,11 +48,17 @@ def started(checkpoint=None, *, wake_id: str = "wake-1", now: str = NOW):
 
 
 class DefaultLifecycleTests(unittest.TestCase):
-    def test_heartbeat_handoff_is_target_bound_and_orders_publication(self) -> None:
+    def test_standalone_handoff_is_target_bound_and_orders_publication(self) -> None:
         handoff = pulse.build_heartbeat_handoff("Owner/Repo", 17)
 
         self.assertEqual(handoff["repository"], "owner/repo")
         self.assertEqual(handoff["pull_request_number"], 17)
+        self.assertEqual(handoff["protocol_version"], 3)
+        self.assertEqual(handoff["scheduler_kind"], "cron")
+        self.assertEqual(handoff["conversation_mode"], "standalone")
+        self.assertFalse(handoff["reuse_conversation"])
+        self.assertIsNone(handoff["target_thread_id"])
+        self.assertEqual(handoff["checkpoint_scope"], "git-common-dir")
         self.assertEqual(
             handoff["batch_order"],
             [
@@ -69,6 +75,16 @@ class DefaultLifecycleTests(unittest.TestCase):
         )
         self.assertIn("owner/repo#17", handoff["prompt"])
         self.assertIn("Never commit or push before every frozen thread is resolved", handoff["prompt"])
+        self.assertIn("new standalone task/conversation", handoff["prompt"])
+        self.assertIn("AGENTS.md", handoff["prompt"])
+        self.assertNotIn("same heartbeat", handoff["prompt"].lower())
+        self.assertEqual(
+            handoff["prompt_sha256"],
+            __import__("hashlib").sha256(handoff["prompt"].encode()).hexdigest(),
+        )
+        self.assertEqual(
+            pulse.build_standalone_task_handoff("owner/repo", 17), handoff
+        )
 
     def test_schema_one_checkpoint_migrates_to_policy_schema(self) -> None:
         legacy = empty_checkpoint("Owner/Repo", 17)

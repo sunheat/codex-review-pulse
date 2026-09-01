@@ -87,11 +87,25 @@ Pushes completed before the next wake continue to coalesce into the latest
 stable observed head. Head changes after a batch is frozen continue to pause
 recovery, so this release does not weaken the frozen-head publication gate.
 
+## 0.8.0 standalone clean-context scheduling
+
+Version `0.8.0` changes the default host handoff from a same-task heartbeat to
+standalone scheduled tasks. Each scheduler delivery is a new task/conversation
+with the fixed, target-bound prompt, the installed skill, the target
+`AGENTS.md`, and the Git-common-dir checkpoint as its only cross-run workflow
+state. The injected host orchestration guard proves one fresh wake per
+invocation, pause-before-preflight ordering, one successor per rearmable wake,
+and immediate termination after `complete-wake`.
+
+The network-free tests do not create real scheduler tasks, install skills, or
+mutate GitHub. Real Codex scheduled-task and live GitHub integration remains
+unverified.
+
 ## Deferred milestones
 
 - public-API connector and automatic-review detection bound to a head OID;
 - independent real scheduled-task integration and long-term unattended
-  heartbeat evidence;
+  clean-context evidence;
 - broader production notification/pause integration and multi-wake recovery
   history beyond the completed bounded evidence;
 - Codex plugin packaging and marketplace distribution;

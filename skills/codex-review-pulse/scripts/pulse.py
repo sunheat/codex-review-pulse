@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -42,7 +43,7 @@ from state_model import (
 
 DEFAULT_CADENCE_SECONDS = 600
 DEFAULT_MODE_SCHEMA_VERSION = 2
-HEARTBEAT_PROTOCOL_VERSION = 2
+STANDALONE_TASK_PROTOCOL_VERSION = 3
 SCHEDULE_REANCHOR_TOLERANCE = timedelta(seconds=1)
 HEARTBEAT_BATCH_ORDER = (
     "record-outcome",
@@ -71,37 +72,55 @@ class DefaultWakeError(RuntimeError):
     """Raised when a default wake attempts an operation after its boundary."""
 
 
-def build_heartbeat_handoff(repository: str, pr_number: int) -> dict[str, Any]:
-    """Return the canonical target-bound prompt for later scheduled wakes."""
+def build_standalone_task_handoff(repository: str, pr_number: int) -> dict[str, Any]:
+    """Return the immutable handoff for one clean-context scheduled task."""
     canonical = canonical_repository(repository)
     target = f"{canonical}#{pr_number}"
     prompt = (
         "Use $codex-review-pulse from its loaded user-directory installation to "
-        f"continue automatic Codex review remediation for {target}. "
-        "For each scheduler-delivered invocation, pause this same heartbeat first, "
-        "inspect the checkpoint directly, and run at most one stable frozen batch "
-        "with one fresh wake_id. For RUN_BATCH, record each frozen thread outcome, "
-        "apply and focused-validate any required repair, then resolve that exact "
-        "thread while the PR head still equals the frozen head. Never commit or push "
-        "before every frozen thread is resolved. After all exact resolutions, run "
-        "aggregate validation; run prepare-publication before commit and again "
+        f"run exactly one automatic Codex review-remediation wake for {target} in "
+        "this new standalone task/conversation. This is a scheduler-delivered "
+        "standalone invocation, not a continuation of another task and not a "
+        "same-task heartbeat; never reuse a Codex conversation or targetThreadId. "
+        "Load and obey the installed skill's SKILL.md and the target checkout's "
+        "AGENTS.md. Use only the target repository's Git-common-dir checkpoint as "
+        "cross-run workflow state. Generate one fresh opaque wake_id and run at "
+        "most one stable frozen batch. For RUN_BATCH, record each frozen thread "
+        "outcome, apply and focused-validate any required repair, then resolve that "
+        "exact thread while the PR head still equals the frozen head. Never commit "
+        "or push before every frozen thread is resolved. After all exact resolutions, "
+        "run aggregate validation; run prepare-publication before commit and again "
         "immediately before push; explicitly stage intended paths; commit and push "
         "at most once; verify the published head; then record the publication result. "
-        "Leave push-created review artifacts for a later wake. When rearming, compute "
-        "the next first run from this wake's completion time, round it up to the "
-        "scheduler's representable precision, update the heartbeat, read back its "
-        "persisted first run, and pass that timestamp to complete-wake; never reuse "
-        "an earlier DTSTART. Preserve non-target "
+        "Leave push-created review artifacts for a later wake. When rearming, create "
+        "one new standalone successor task with the unchanged prompt, compute its "
+        "first run from this wake's completion time, round it up to scheduler "
+        "precision, read back its persisted first run, and pass that timestamp to "
+        "complete-wake; never reuse an earlier DTSTART. Preserve non-target "
         "threads; never merge, enable auto-merge, change the base, force-push, or "
-        "create issues. Keep the heartbeat paused on every PAUSE_* or STOP_* result."
+        "create issues. After complete-wake, report the result and end this "
+        "invocation immediately; do not start, schedule, or consume another wake. "
+        "Keep the delivered task paused on every PAUSE_* or STOP_* result."
     )
+    prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     return {
-        "protocol_version": HEARTBEAT_PROTOCOL_VERSION,
+        "protocol_version": STANDALONE_TASK_PROTOCOL_VERSION,
         "repository": canonical,
         "pull_request_number": pr_number,
+        "scheduler_kind": "cron",
+        "conversation_mode": "standalone",
+        "reuse_conversation": False,
+        "target_thread_id": None,
+        "checkpoint_scope": "git-common-dir",
+        "prompt_sha256": prompt_digest,
         "batch_order": list(HEARTBEAT_BATCH_ORDER),
         "prompt": prompt,
     }
+
+
+def build_heartbeat_handoff(repository: str, pr_number: int) -> dict[str, Any]:
+    """Backward-compatible alias for the standalone task handoff."""
+    return build_standalone_task_handoff(repository, pr_number)
 
 
 def _policy_pause(state: dict[str, Any], *, now: str, operation: str) -> dict[str, Any]:
@@ -276,6 +295,8 @@ def ensure_default_lifecycle(checkpoint: dict[str, Any]) -> dict[str, Any]:
         "wake_mutation_occurred": False,
         "next_not_before": None,
         "scheduled_task_disposition": "PAUSED",
+        "scheduled_task_kind": "standalone",
+        "scheduled_task_id": None,
         "wake_count": 0,
         "failure_latch": None,
         "last_wake_id": None,
@@ -305,6 +326,13 @@ def ensure_default_lifecycle(checkpoint: dict[str, Any]) -> dict[str, Any]:
     result["automation_policy_digest"] = policy_digest(result["automation_policy"])
     if result.get("scheduled_task_disposition") not in {"PAUSED", "ACTIVE"}:
         raise ValueError("Scheduled task disposition is invalid")
+    if result.get("scheduled_task_kind") != "standalone":
+        raise ValueError("Scheduled task kind must be standalone")
+    scheduled_task_id = result.get("scheduled_task_id")
+    if scheduled_task_id is not None and (
+        not isinstance(scheduled_task_id, str) or not scheduled_task_id.strip()
+    ):
+        raise ValueError("Scheduled task ID is invalid")
     wake_count = result.get("wake_count")
     if not isinstance(wake_count, int) or isinstance(wake_count, bool) or wake_count < 0:
         raise ValueError("Default wake count is invalid")
@@ -1257,6 +1285,7 @@ def complete_wake(
     now: str,
     cadence_seconds: int | None = None,
     schedule_next_wake: Callable[[str], object] | None = None,
+    scheduled_task_id: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Complete one wake after proving the persisted completion-relative first run."""
     now = _iso(now)
@@ -1269,6 +1298,10 @@ def complete_wake(
     effective_cadence = persisted_cadence
     if isinstance(effective_cadence, bool) or not isinstance(effective_cadence, int) or effective_cadence <= 0:
         raise ValueError("Cadence must be positive")
+    if scheduled_task_id is not None and (
+        not isinstance(scheduled_task_id, str) or not scheduled_task_id.strip()
+    ):
+        raise ValueError("Scheduled task ID must be a non-empty string")
     if state.get("last_wake_id") == wake_id and state.get("active_wake_id") is None and state.get("last_wake_result"):
         return state, deepcopy(state["last_wake_result"])
     _require_active_wake(state, wake_id, allow_retry_completion=True)
@@ -1323,6 +1356,8 @@ def complete_wake(
         next_not_before=next_not_before,
         mutation_occurred=mutation_occurred,
     )
+    if scheduled_task_id is not None:
+        result["scheduled_task_id"] = scheduled_task_id
     observed_first_run: object = None
     if schedule_next_wake is not None:
         try:
@@ -1369,6 +1404,9 @@ def complete_wake(
         return state, return_state_result
 
     state["scheduled_task_disposition"] = "ACTIVE"
+    state["scheduled_task_kind"] = "standalone"
+    if scheduled_task_id is not None:
+        state["scheduled_task_id"] = scheduled_task_id
     state["wake_phase"] = "retry_waiting" if action == "WAIT_RETRY" else "completed"
     state["last_wake_id"] = wake_id
     _set_last_result(state, result)
@@ -1517,10 +1555,11 @@ def parse_args() -> argparse.Namespace:
         description="Run one Codex-first default wake without hardened contract ceremony",
         epilog=(
             "Host handoff:\n"
-            "  pause the scheduled task before begin-wake; pass --pause-confirmed "
+            "  pause the delivered standalone task before begin-wake; pass --pause-confirmed "
             "after success.\n"
-            "  re-anchor and read back the next run before complete-wake "
-            "--schedule-reanchored --scheduled-first-run ACTUAL_FIRST_RUN."
+            "  create/read back one standalone successor before complete-wake "
+            "--schedule-reanchored --scheduled-first-run ACTUAL_FIRST_RUN "
+            "--scheduled-task-id SUCCESSOR_ID."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1543,7 +1582,11 @@ def parse_args() -> argparse.Namespace:
 
     commands.add_parser(
         "heartbeat-prompt",
-        help="Render the canonical target-bound prompt for scheduled wakes",
+        help="Render the standalone-task prompt (legacy command name)",
+    )
+    commands.add_parser(
+        "standalone-task-prompt",
+        help="Render the canonical clean-context standalone-task prompt",
     )
 
     begin = commands.add_parser(
@@ -1633,6 +1676,10 @@ def parse_args() -> argparse.Namespace:
         "--scheduled-first-run",
         help="Actual persisted first-run timestamp read back after the host re-anchor",
     )
+    complete.add_argument(
+        "--scheduled-task-id",
+        help="ID of the newly created standalone successor task",
+    )
     complete.add_argument("--cadence-seconds", type=int)
     parser.add_argument(
         "--policy-json",
@@ -1657,7 +1704,7 @@ def main() -> None:
     policy_overrides = (
         parse_policy_json(args.policy_json) if args.policy_json is not None else None
     )
-    if args.command == "heartbeat-prompt":
+    if args.command in {"heartbeat-prompt", "standalone-task-prompt"}:
         supplied_checkpoint = load_checkpoint(args.state_file) if args.state_file else None
         repository, pr_number = _resolve_command_target(
             args,
@@ -1665,7 +1712,7 @@ def main() -> None:
         )
         print(
             json.dumps(
-                build_heartbeat_handoff(repository, pr_number),
+                build_standalone_task_handoff(repository, pr_number),
                 indent=2,
                 sort_keys=True,
             )
@@ -1851,6 +1898,7 @@ def main() -> None:
                 if args.schedule_reanchored
                 else None
             ),
+            scheduled_task_id=args.scheduled_task_id,
         )
         _write(path, state, result)
         return
