@@ -227,9 +227,11 @@ if snapshot.decision.next_action is PAUSE_* or STOP_*:
 
 # WAIT_REVIEW, WAIT_RETRY, or a successfully recorded same-head REQUEST_REVIEW
 # may re-anchor. WAIT_RETRY resumes the same frozen batch on the next wake.
-# Choose COMPLETION_NOW once and use it for both actions.
+# Choose COMPLETION_NOW once and use it for both actions. RFC 5545 schedule
+# timestamps do not support fractional seconds, so round the computed first run
+# up to the scheduler's representable precision before updating the heartbeat.
 COMPLETION_NOW = current UTC time
-NEXT_NOT_BEFORE = COMPLETION_NOW + cadence_seconds
+NEXT_NOT_BEFORE = ceil_to_scheduler_precision(COMPLETION_NOW + cadence_seconds)
 reanchor_result = host.reanchor_task(task_id, first_run=NEXT_NOT_BEFORE)
 if reanchor_result is success:
     ACTUAL_FIRST_RUN = host.read_task(task_id).first_run
@@ -359,16 +361,20 @@ trigger evidence proves the same head before and after the trigger, may rearm
 the next wake. Set:
 
 ```text
-next_not_before = wake_completed_at + cadence_seconds
+next_not_before = ceil_to_scheduler_precision(wake_completed_at + cadence_seconds)
 ```
 
 Never rely on pausing and reactivating a fixed RRULE to reset its clock. The
 host must re-anchor the next run to `next_not_before`. If the host cannot prove
 that completion-relative schedule, keep the disposition `PAUSED` and report
-`PAUSE_BLOCKED / scheduled_task_reanchor_unavailable`. If the persisted
-first run differs from `next_not_before`, report
-`PAUSE_BLOCKED / scheduled_task_reanchor_mismatch`; never reuse an earlier
-`DTSTART`.
+`PAUSE_BLOCKED / scheduled_task_reanchor_unavailable`. The persisted first run
+is compared as a UTC instant. Because the first run is ordered after completion,
+the observed value may be equal to or at most one second later than
+`next_not_before`; an earlier value or a larger delay reports
+`PAUSE_BLOCKED / scheduled_task_reanchor_mismatch`. For comparisons without a
+logical ordering, the bounded tolerance is one second on either side. These
+tolerances cover representation precision only and never permit reuse of an
+earlier `DTSTART`.
 
 Multiple pushes that finish before the next wake naturally coalesce into the
 latest head accepted by that wake's stable GraphQL snapshot. A head change
@@ -412,7 +418,7 @@ invocation:
    aggregate publication work. Stop immediately on any `PAUSE_*` or `STOP_*`.
 8. For `WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head `REQUEST_REVIEW`, choose one
    completion timestamp and compute
-   `next_not_before = wake_completed_at + cadence_seconds` without calling
+   `next_not_before = ceil_to_scheduler_precision(wake_completed_at + cadence_seconds)` without calling
    `complete-wake` yet.
 9. Update the task so its next run is anchored to that timestamp, inspect the
    host-tool result, then read back the task's actual persisted first run.

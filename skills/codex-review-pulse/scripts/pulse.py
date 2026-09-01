@@ -43,6 +43,7 @@ from state_model import (
 DEFAULT_CADENCE_SECONDS = 600
 DEFAULT_MODE_SCHEMA_VERSION = 2
 HEARTBEAT_PROTOCOL_VERSION = 2
+SCHEDULE_REANCHOR_TOLERANCE = timedelta(seconds=1)
 HEARTBEAT_BATCH_ORDER = (
     "record-outcome",
     "focused-validation",
@@ -87,9 +88,10 @@ def build_heartbeat_handoff(repository: str, pr_number: int) -> dict[str, Any]:
         "immediately before push; explicitly stage intended paths; commit and push "
         "at most once; verify the published head; then record the publication result. "
         "Leave push-created review artifacts for a later wake. When rearming, compute "
-        "the next first run from this wake's completion time, update the heartbeat, "
-        "read back its persisted first run, and pass that exact timestamp to "
-        "complete-wake; never reuse an earlier DTSTART. Preserve non-target "
+        "the next first run from this wake's completion time, round it up to the "
+        "scheduler's representable precision, update the heartbeat, read back its "
+        "persisted first run, and pass that timestamp to complete-wake; never reuse "
+        "an earlier DTSTART. Preserve non-target "
         "threads; never merge, enable auto-merge, change the base, force-push, or "
         "create issues. Keep the heartbeat paused on every PAUSE_* or STOP_* result."
     )
@@ -223,6 +225,27 @@ def _iso(value: str | datetime) -> str:
 
 def _now(value: str | None) -> str:
     return _iso(value or datetime.now(UTC))
+
+
+def _ceil_to_second(value: str | datetime) -> datetime:
+    """Return the first representable scheduler instant at or after value."""
+    parsed = _utc(value)
+    if parsed.microsecond:
+        parsed += timedelta(seconds=1)
+    return parsed.replace(microsecond=0)
+
+
+def _schedule_times_match(
+    expected: str | datetime,
+    observed: str | datetime,
+    *,
+    ordered: bool,
+) -> bool:
+    """Compare schedule instants with a bounded, direction-aware tolerance."""
+    delta = _utc(observed) - _utc(expected)
+    if ordered:
+        return timedelta(0) <= delta <= SCHEDULE_REANCHOR_TOLERANCE
+    return -SCHEDULE_REANCHOR_TOLERANCE <= delta <= SCHEDULE_REANCHOR_TOLERANCE
 
 
 def _default_review_epoch() -> dict[str, Any]:
@@ -1282,7 +1305,9 @@ def complete_wake(
         raise DefaultWakeError("The wake has no rearmable WAIT_REVIEW or REQUEST_REVIEW result")
 
     completed_at = _utc(now)
-    next_not_before = (completed_at + timedelta(seconds=effective_cadence)).isoformat()
+    next_not_before = _ceil_to_second(
+        completed_at + timedelta(seconds=effective_cadence)
+    ).isoformat()
     state["wake_completed_at"] = now
     state["next_not_before"] = next_not_before
     state["active_wake_id"] = None
@@ -1315,18 +1340,23 @@ def complete_wake(
         state["last_wake_id"] = wake_id
         return state, return_state_result
 
+    raw_observed_first_run = observed_first_run
     try:
-        normalized_first_run = _iso(str(observed_first_run))
+        observed_first_run = _utc(str(raw_observed_first_run))
     except (TypeError, ValueError):
-        normalized_first_run = None
-    if normalized_first_run != next_not_before:
+        observed_first_run = None
+    if observed_first_run is None or not _schedule_times_match(
+        next_not_before,
+        observed_first_run,
+        ordered=True,
+    ):
         return_state_result = _pause(
             state,
             reason_code="scheduled_task_reanchor_mismatch",
             now=now,
             evidence={
                 "expected_first_run": next_not_before,
-                "observed_first_run": observed_first_run,
+                "observed_first_run": raw_observed_first_run,
             },
             mutation_occurred=mutation_occurred,
         )

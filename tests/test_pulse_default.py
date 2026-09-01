@@ -805,6 +805,71 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertEqual(result["next_not_before"], "2026-08-26T00:36:00+00:00")
         self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
 
+    def test_schedule_reanchor_tolerance_is_direction_aware(self) -> None:
+        expected = "2026-08-26T00:36:00+00:00"
+        self.assertTrue(
+            pulse._schedule_times_match(
+                expected,
+                "2026-08-26T00:36:01+00:00",
+                ordered=True,
+            )
+        )
+        self.assertFalse(
+            pulse._schedule_times_match(
+                expected,
+                "2026-08-26T00:35:59.999999+00:00",
+                ordered=True,
+            )
+        )
+        self.assertFalse(
+            pulse._schedule_times_match(
+                expected,
+                "2026-08-26T00:36:01.000001+00:00",
+                ordered=True,
+            )
+        )
+        self.assertTrue(
+            pulse._schedule_times_match(
+                expected,
+                "2026-08-26T00:35:59+00:00",
+                ordered=False,
+            )
+        )
+        self.assertTrue(
+            pulse._schedule_times_match(
+                expected,
+                "2026-08-26T00:36:01+00:00",
+                ordered=False,
+            )
+        )
+        self.assertFalse(
+            pulse._schedule_times_match(
+                expected,
+                "2026-08-26T00:35:58.999999+00:00",
+                ordered=False,
+            )
+        )
+        self.assertFalse(
+            pulse._schedule_times_match(
+                expected,
+                "2026-08-26T00:36:01.000001+00:00",
+                ordered=False,
+            )
+        )
+
+    def test_completion_rounds_up_and_accepts_one_second_late_reanchor(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
+        state, result = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:26:00.250000+00:00",
+            schedule_next_wake=lambda expected: "2026-08-26T00:36:02+00:00",
+        )
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        self.assertEqual(result["next_not_before"], "2026-08-26T00:36:01+00:00")
+        self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
+
     def test_fixed_cadence_wakes_before_completion_boundary_are_absorbed(self) -> None:
         state, _ = started()
         state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)

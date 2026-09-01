@@ -36,7 +36,10 @@ post-success confirmations only. They do not call or authorize a Codex
 automation operation. Pass `--schedule-reanchored` only after the task update
 succeeds and pair it with `--scheduled-first-run` containing the persisted
 first run read back from the task. The controller verifies that timestamp
-against its completion-relative expectation.
+against its completion-relative expectation. Schedule timestamps are rounded
+up to the scheduler's representable precision; the ordered first-run check
+allows equality or a delay of at most one second. Comparisons without a
+logical ordering allow one second on either side.
 
 Use a clean source repository and an exact release-candidate commit throughout
 the commands below. OpenAI documents `$HOME/.agents/skills` as the user-level

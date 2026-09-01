@@ -158,10 +158,13 @@ must be stopped and supplied an explicit `--repo OWNER/REPO --pr NUMBER`.
 
 The host keeps the heartbeat `PAUSED` while a wake is running and reanchors
 only a later `WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head
-`REQUEST_REVIEW` to `wake_completed_at + cadence_seconds`. The default policy
-has no wake/deadline/retry budget; prompt-supplied limits are persisted and
-stop with `STOP_POLICY_LIMIT`. All other stop, pause, recovery, closed,
-expired, and unknown results remain paused. See the
+`REQUEST_REVIEW` to the first scheduler-representable instant at or after
+`wake_completed_at + cadence_seconds`. The persisted first run may be equal to
+or at most one second later than that ordered target; unordered timestamp
+comparisons allow one second on either side. The default policy has no
+wake/deadline/retry budget; prompt-supplied limits are persisted and stop with
+`STOP_POLICY_LIMIT`. All other stop, pause, recovery, closed, expired, and
+unknown results remain paused. See the
 [default Skill](skills/codex-review-pulse/SKILL.md).
 
 Any number of pushes completed before the next wake are intentionally
