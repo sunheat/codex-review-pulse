@@ -236,14 +236,18 @@ class HostInvocation:
         return result
 
     def complete(
-        self, *, reanchor_succeeds: bool, action: str = "WAIT_REVIEW"
+        self,
+        *,
+        reanchor_succeeds: bool,
+        action: str = "WAIT_REVIEW",
+        cadence_seconds: int = 600,
     ) -> dict[str, object]:
         if not reanchor_succeeds:
             self.host.schedule_fails = True
         return self.invocation.complete(
             action=action,
             now=(datetime.fromisoformat(self.invocation.now) + timedelta(minutes=1)).isoformat(),
-            cadence_seconds=600,
+            cadence_seconds=cadence_seconds,
         )
 
 
@@ -440,6 +444,59 @@ class DefaultHostWakeContractTests(unittest.TestCase):
             ("checkpoint-read", "direct"),
             ("complete-wake", "unconfirmed"),
         ])
+        self.assertTrue(invocation.ended)
+
+    def test_completion_rejects_an_action_that_differs_from_the_checkpoint(self) -> None:
+        host = InMemoryHost(
+            state=waiting_checkpoint(),
+            wake_ids=("fresh-wake-2",),
+        )
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+        invocation.begin()
+        host.state["last_decision"] = {
+            "next_action": "RUN_BATCH",
+            "mutation_occurred": False,
+        }
+        host.state["active_batch"] = {"publication": {"status": "not_started"}}
+
+        result = invocation.complete(reanchor_succeeds=True, action="WAIT_REVIEW")
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "completion_action_mismatch")
+        self.assertEqual(
+            result["evidence"],
+            {"requested_action": "WAIT_REVIEW", "persisted_action": "RUN_BATCH"},
+        )
+        self.assertNotIn(("schedule-standalone", "2026-08-26T00:47:00+00:00"), host.operations)
+        self.assertTrue(invocation.ended)
+
+    def test_completion_rejects_a_cadence_that_differs_from_the_checkpoint(self) -> None:
+        state = waiting_checkpoint()
+        state["last_decision"] = {
+            "next_action": "WAIT_REVIEW",
+            "mutation_occurred": False,
+        }
+        state["automation_policy"]["cadence_seconds"] = 1200
+        host = InMemoryHost(state=state, wake_ids=("fresh-wake-2",))
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+        invocation.begin()
+        host.state["last_decision"] = {
+            "next_action": "WAIT_REVIEW",
+            "mutation_occurred": False,
+        }
+
+        result = invocation.complete(reanchor_succeeds=True, cadence_seconds=600)
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "completion_cadence_mismatch")
+        self.assertEqual(
+            result["evidence"],
+            {
+                "requested_cadence_seconds": 600,
+                "persisted_cadence_seconds": 1200,
+            },
+        )
+        self.assertNotIn(("schedule-standalone", "2026-08-26T00:47:00+00:00"), host.operations)
         self.assertTrue(invocation.ended)
 
     def test_unconfirmed_review_trigger_cannot_schedule_a_successor(self) -> None:

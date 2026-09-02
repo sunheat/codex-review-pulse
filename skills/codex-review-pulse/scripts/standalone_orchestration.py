@@ -348,26 +348,96 @@ class StandaloneInvocation:
             if isinstance(cadence_seconds, bool) or cadence_seconds <= 0:
                 raise ValueError("Cadence must be positive")
             self._completion_attempted = True
+            try:
+                checkpoint = self.host.read_checkpoint_directly()
+            except Exception:
+                return self._finish_completion(
+                    now=now,
+                    actual_first_run=None,
+                    successor_id=None,
+                    completion_failure={
+                        "reason_code": "checkpoint_unavailable",
+                        "evidence": {},
+                    },
+                )
+            if not isinstance(checkpoint, Mapping):
+                return self._finish_completion(
+                    now=now,
+                    actual_first_run=None,
+                    successor_id=None,
+                    completion_failure={
+                        "reason_code": "checkpoint_invalid",
+                        "evidence": {"checkpoint_type": type(checkpoint).__name__},
+                    },
+                )
+            persisted_decision = checkpoint.get("last_decision")
+            persisted_action = (
+                persisted_decision.get("next_action")
+                if isinstance(persisted_decision, Mapping)
+                else None
+            )
+            if persisted_action != action:
+                return self._finish_completion(
+                    now=now,
+                    actual_first_run=None,
+                    successor_id=None,
+                    completion_failure={
+                        "reason_code": "completion_action_mismatch",
+                        "evidence": {
+                            "requested_action": action,
+                            "persisted_action": persisted_action,
+                        },
+                    },
+                )
+            policy = checkpoint.get("automation_policy")
+            persisted_cadence = (
+                policy.get("cadence_seconds")
+                if isinstance(policy, Mapping)
+                else None
+            )
+            if (
+                isinstance(persisted_cadence, bool)
+                or not isinstance(persisted_cadence, int)
+                or persisted_cadence <= 0
+            ):
+                return self._finish_completion(
+                    now=now,
+                    actual_first_run=None,
+                    successor_id=None,
+                    completion_failure={
+                        "reason_code": "checkpoint_invalid",
+                        "evidence": {"persisted_cadence_seconds": persisted_cadence},
+                    },
+                )
+            if persisted_cadence != cadence_seconds:
+                return self._finish_completion(
+                    now=now,
+                    actual_first_run=None,
+                    successor_id=None,
+                    completion_failure={
+                        "reason_code": "completion_cadence_mismatch",
+                        "evidence": {
+                            "requested_cadence_seconds": cadence_seconds,
+                            "persisted_cadence_seconds": persisted_cadence,
+                        },
+                    },
+                )
             completion = _utc(now)
             expected_first_run = _ceil_to_second(
                 completion + timedelta(seconds=cadence_seconds)
             ).isoformat()
 
             if action == "RUN_BATCH":
-                try:
-                    checkpoint = self.host.read_checkpoint_directly()
-                    batch = checkpoint.get("active_batch")
-                    publication = (
-                        batch.get("publication")
-                        if isinstance(batch, Mapping)
-                        else None
-                    )
-                    publication_complete = (
-                        isinstance(publication, Mapping)
-                        and publication.get("status") == "succeeded"
-                    )
-                except Exception:
-                    publication_complete = False
+                batch = checkpoint.get("active_batch")
+                publication = (
+                    batch.get("publication")
+                    if isinstance(batch, Mapping)
+                    else None
+                )
+                publication_complete = (
+                    isinstance(publication, Mapping)
+                    and publication.get("status") == "succeeded"
+                )
                 if not publication_complete:
                     return self._finish_completion(
                         now=now,
@@ -375,28 +445,23 @@ class StandaloneInvocation:
                         successor_id=None,
                     )
             elif action == "REQUEST_REVIEW":
-                try:
-                    checkpoint = self.host.read_checkpoint_directly()
-                    snapshot = checkpoint.get("last_snapshot")
-                    head_oid = (
-                        snapshot.get("head_oid")
-                        if isinstance(snapshot, Mapping)
-                        else None
-                    )
-                    trigger_events = checkpoint.get("trigger_events")
-                    event = (
-                        trigger_events.get(head_oid, {})
-                        if isinstance(trigger_events, Mapping)
-                        and isinstance(head_oid, str)
-                        else {}
-                    )
-                    trigger_confirmed = (
-                        isinstance(event, Mapping)
-                        and event.get("status") == "emitted"
-                    )
-                except Exception:
-                    event = {}
-                    trigger_confirmed = False
+                snapshot = checkpoint.get("last_snapshot")
+                head_oid = (
+                    snapshot.get("head_oid")
+                    if isinstance(snapshot, Mapping)
+                    else None
+                )
+                trigger_events = checkpoint.get("trigger_events")
+                event = (
+                    trigger_events.get(head_oid, {})
+                    if isinstance(trigger_events, Mapping)
+                    and isinstance(head_oid, str)
+                    else {}
+                )
+                trigger_confirmed = (
+                    isinstance(event, Mapping)
+                    and event.get("status") == "emitted"
+                )
                 if not trigger_confirmed:
                     return self._finish_completion(
                         now=now,
