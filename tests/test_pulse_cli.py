@@ -276,6 +276,7 @@ class PulseCliTests(unittest.TestCase):
         self.assertIn("standalone-task-prompt", root_help)
         self.assertIn("prepare-publication", root_help)
         self.assertIn("--pause-confirmed", begin_help)
+        self.assertIn("--delivered-task-id", begin_help)
         self.assertIn("--policy-json", begin_help)
         self.assertIn("--policy-json", configure_help)
         self.assertIn("--schedule-reanchored", complete_help)
@@ -299,6 +300,66 @@ class PulseCliTests(unittest.TestCase):
         alias = harness.json_output(harness.run("standalone-task-prompt"))
         self.assertEqual(alias, result)
 
+    def test_public_begin_wake_authenticates_the_delivered_task(self) -> None:
+        harness = CliHarness(self)
+        harness.begin_and_snapshot()
+        harness.json_output(
+            harness.run(
+                "complete-wake",
+                "--schedule-reanchored",
+                "--scheduled-first-run",
+                "2026-08-26T00:11:00+00:00",
+                "--scheduled-task-id",
+                "task-1",
+                now="2026-08-26T00:01:00+00:00",
+            )
+        )
+        calls_before = harness.graphql_count()
+
+        result = harness.json_output(
+            harness.run(
+                "begin-wake",
+                "--pause-confirmed",
+                "--delivered-task-id",
+                "stale-task",
+                wake_id="wake-2",
+                now="2026-08-26T00:11:00+00:00",
+            )
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "scheduled_task_identity_mismatch")
+        self.assertEqual(harness.graphql_count(), calls_before)
+        state = load_checkpoint(
+            checkpoint_path("owner/repo", 17, repository_path=harness.checkout)
+        )
+        self.assertEqual(
+            state["failure_latch"]["reason_code"],
+            "scheduled_task_identity_mismatch",
+        )
+
+    def test_complete_wake_requires_a_successor_id_before_activation(self) -> None:
+        harness = CliHarness(self)
+        harness.begin_and_snapshot()
+
+        result = harness.json_output(
+            harness.run(
+                "complete-wake",
+                "--schedule-reanchored",
+                "--scheduled-first-run",
+                "2026-08-26T00:11:00+00:00",
+                now="2026-08-26T00:01:00+00:00",
+            )
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "scheduled_task_identity_missing")
+        state = load_checkpoint(
+            checkpoint_path("owner/repo", 17, repository_path=harness.checkout)
+        )
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+        self.assertNotEqual(state["scheduled_task_disposition"], "ACTIVE")
+
     def test_prompt_policy_is_persisted_on_initial_wake_and_can_be_updated(self) -> None:
         harness = CliHarness(self)
         initial = harness.json_output(
@@ -317,6 +378,8 @@ class PulseCliTests(unittest.TestCase):
                 "--schedule-reanchored",
                 "--scheduled-first-run",
                 "2026-08-26T00:11:00+00:00",
+                "--scheduled-task-id",
+                "task-1",
                 now="2026-08-26T00:01:00+00:00",
             )
         )
@@ -469,6 +532,8 @@ class PulseCliTests(unittest.TestCase):
                 "--schedule-reanchored",
                 "--scheduled-first-run",
                 "2026-08-26T00:11:00+00:00",
+                "--scheduled-task-id",
+                "task-1",
                 now="2026-08-26T00:01:00+00:00",
             )
         )

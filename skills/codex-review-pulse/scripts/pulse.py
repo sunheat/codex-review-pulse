@@ -96,7 +96,9 @@ def build_standalone_task_handoff(repository: str, pr_number: int) -> dict[str, 
         "one new standalone successor task with the unchanged prompt, compute its "
         "first run from this wake's completion time, round it up to scheduler "
         "precision, read back its persisted first run, and pass that timestamp to "
-        "complete-wake; never reuse an earlier DTSTART. Preserve non-target "
+        "complete-wake; never reuse an earlier DTSTART. For every scheduled "
+        "delivery, pass its exact task ID to begin-wake as --delivered-task-id "
+        "so pulse.py authenticates the persisted successor. Preserve non-target "
         "threads; never merge, enable auto-merge, change the base, force-push, or "
         "create issues. After complete-wake, report the result and end this "
         "invocation immediately; do not start, schedule, or consume another wake. "
@@ -525,8 +527,9 @@ def begin_wake(
     cadence_seconds: int | None = None,
     policy_overrides: Mapping[str, Any] | None = None,
     pause_heartbeat: Callable[[], object] | None = None,
+    delivered_task_id: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Begin at most one wake, pausing the host heartbeat before PR work."""
+    """Begin one wake after authenticating any scheduled delivery."""
     if not isinstance(wake_id, str) or not wake_id.strip():
         raise ValueError("A non-empty wake_id is required")
     now = _iso(now)
@@ -555,6 +558,10 @@ def begin_wake(
     )
     if isinstance(effective_cadence, bool) or not isinstance(effective_cadence, int) or effective_cadence <= 0:
         raise ValueError("Cadence must be positive")
+    if delivered_task_id is not None and (
+        not isinstance(delivered_task_id, str) or not delivered_task_id.strip()
+    ):
+        raise ValueError("Delivered task ID must be a non-empty string")
 
     if state.get("wake_phase") in {"terminal", "closed"}:
         raise DefaultWakeError(
@@ -580,6 +587,26 @@ def begin_wake(
             evidence=state["failure_latch"],
             action="PAUSE_RECOVERY",
         )
+        return state, result
+
+    if delivered_task_id is not None and (
+        state.get("scheduled_task_disposition") != "ACTIVE"
+        or state.get("scheduled_task_id") != delivered_task_id
+    ):
+        result = _pause(
+            state,
+            reason_code="scheduled_task_identity_mismatch",
+            now=now,
+            evidence={
+                "delivered_task_id": delivered_task_id,
+                "scheduled_task_id": state.get("scheduled_task_id"),
+                "scheduled_task_disposition": state.get(
+                    "scheduled_task_disposition"
+                ),
+            },
+            action="PAUSE_RECOVERY",
+        )
+        state["last_wake_id"] = wake_id
         return state, result
 
     policy = state["automation_policy"]
@@ -1286,8 +1313,9 @@ def complete_wake(
     cadence_seconds: int | None = None,
     schedule_next_wake: Callable[[str], object] | None = None,
     scheduled_task_id: str | None = None,
+    completion_failure: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Complete one wake after proving the persisted completion-relative first run."""
+    """Complete one wake after proving first-run time and successor identity."""
     now = _iso(now)
     state = ensure_default_lifecycle(checkpoint)
     persisted_cadence = state["automation_policy"]["cadence_seconds"]
@@ -1310,6 +1338,20 @@ def complete_wake(
     mutation_occurred = bool(state.get("wake_mutation_occurred")) or bool(
         decision.get("mutation_occurred")
     )
+    if completion_failure is not None:
+        reason_code = completion_failure.get("reason_code")
+        if not isinstance(reason_code, str) or not reason_code.strip():
+            raise ValueError("Completion failure reason code is required")
+        result = _pause(
+            state,
+            reason_code=reason_code,
+            now=now,
+            evidence=completion_failure.get("evidence"),
+            action="PAUSE_RECOVERY",
+            mutation_occurred=mutation_occurred,
+        )
+        state["last_wake_id"] = wake_id
+        return state, result
     if action == "RUN_BATCH":
         publication = (state.get("active_batch") or {}).get("publication") or {}
         if publication.get("status") != "succeeded":
@@ -1397,6 +1439,23 @@ def complete_wake(
                 "expected_first_run": next_not_before,
                 "observed_first_run": raw_observed_first_run,
             },
+            mutation_occurred=mutation_occurred,
+        )
+        state["next_not_before"] = next_not_before
+        state["last_wake_id"] = wake_id
+        return state, return_state_result
+
+    if scheduled_task_id is None:
+        return_state_result = _pause(
+            state,
+            reason_code="scheduled_task_identity_missing",
+            now=now,
+            evidence={
+                "expected_first_run": next_not_before,
+                "observed_first_run": raw_observed_first_run,
+                "scheduled_task_id": scheduled_task_id,
+            },
+            action="PAUSE_RECOVERY",
             mutation_occurred=mutation_occurred,
         )
         state["next_not_before"] = next_not_before
@@ -1599,6 +1658,10 @@ def parse_args() -> argparse.Namespace:
         help="Acknowledge that the host pause call succeeded; pulse.py does not perform it",
     )
     begin.add_argument(
+        "--delivered-task-id",
+        help="Scheduled task ID delivered by the host; must match the persisted successor",
+    )
+    begin.add_argument(
         "--policy-json",
         dest="command_policy_json",
         help="JSON object of prompt-derived policy overrides for the initial wake",
@@ -1738,6 +1801,7 @@ def main() -> None:
             now=now,
             policy_overrides=policy_overrides,
             pause_heartbeat=lambda: args.pause_confirmed,
+            delivered_task_id=args.delivered_task_id,
         )
         _write(path, state, result)
         return

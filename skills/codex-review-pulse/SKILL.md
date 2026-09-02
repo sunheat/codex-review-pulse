@@ -192,9 +192,12 @@ else:
 
 # On wake 1, begin-wake may create the checkpoint. On later wakes, the direct
 # preflight above is mandatory immediately before this call.
-if this is the initial explicit user request or pause_result is confirmed:
+if this is the initial explicit user request:
     PULSE TARGET --wake-id WAKE_ID begin-wake \
       --pause-confirmed
+else if pause_result is confirmed:
+    PULSE TARGET --wake-id WAKE_ID begin-wake \
+      --pause-confirmed --delivered-task-id DELIVERED_TASK_ID
 else:
     # Do not pass --pause-confirmed. This call only persists PAUSE_BLOCKED.
     PULSE TARGET --wake-id WAKE_ID begin-wake
@@ -435,7 +438,10 @@ invocation:
 6. Submit `pause confirmed` to `begin-wake` only after the pause tool call
    returns success and the direct preflight passes. A pause failure may use an
    unconfirmed `begin-wake` only to persist `PAUSE_BLOCKED`, then ends this
-   invocation.
+   invocation. For every scheduled delivery, pass the delivered task's ID as
+   `--delivered-task-id`; `pulse.py` compares it with the checkpoint's persisted
+   active successor before starting the wake. The initial user wake has no
+   delivered successor ID and omits this option.
 7. Run this wake's snapshot, frozen batch, repair/retry, outcome/resolve, and
    aggregate publication work. Stop immediately on any `PAUSE_*` or `STOP_*`.
 8. For `WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head `REQUEST_REVIEW`, choose one

@@ -108,6 +108,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
 
         # HEAD2 and then HEAD3 were pushed before the scheduler delivered wake 2.
@@ -143,6 +144,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         state, result = pulse.begin_wake(
             state,
@@ -222,6 +224,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         self.assertEqual(state["wake_phase"], "retry_waiting")
         state, result = started(
@@ -289,6 +292,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         self.assertEqual(completed["next_action"], "WAIT_RETRY")
 
@@ -310,6 +314,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         state, _ = started(
             state, wake_id="wake-2", now="2026-08-26T00:11:00+00:00"
@@ -343,6 +348,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         state, _ = started(
             state, wake_id="wake-2", now="2026-08-26T00:11:00+00:00"
@@ -384,6 +390,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         state, _ = started(state, wake_id="wake-2", now="2026-08-26T00:11:00+00:00")
         state, result = pulse.record_retry(
@@ -674,6 +681,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
 
         state, _ = started(
@@ -750,6 +758,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         with self.assertRaisesRegex(pulse.DefaultWakeError, "unfinished"):
             pulse.update_default_policy(
@@ -900,6 +909,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:26:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         self.assertEqual(result["next_not_before"], "2026-08-26T00:36:00+00:00")
         self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
@@ -964,6 +974,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:26:00.250000+00:00",
             schedule_next_wake=lambda expected: "2026-08-26T00:36:02+00:00",
+            scheduled_task_id="task-1",
         )
         self.assertEqual(result["next_action"], "WAIT_REVIEW")
         self.assertEqual(result["next_not_before"], "2026-08-26T00:36:01+00:00")
@@ -977,6 +988,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:26:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         for index, when in enumerate(("00:10:00", "00:20:00", "00:30:00"), start=2):
             candidate = deepcopy(state)
@@ -1035,6 +1047,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         state, _ = started(state, wake_id="wake-2", now="2026-08-26T00:11:00+00:00")
         state, result = pulse.record_snapshot(
@@ -1045,7 +1058,7 @@ class DefaultLifecycleTests(unittest.TestCase):
         clean = empty_checkpoint("Owner/Repo", 17)
         clean, _ = started(clean)
         clean, _ = pulse.record_snapshot(clean, snapshot(eyes=True), wake_id="wake-1", now=NOW)
-        clean, _ = pulse.complete_wake(clean, wake_id="wake-1", now="2026-08-26T00:01:00+00:00", schedule_next_wake=lambda expected: expected)
+        clean, _ = pulse.complete_wake(clean, wake_id="wake-1", now="2026-08-26T00:01:00+00:00", schedule_next_wake=lambda expected: expected, scheduled_task_id="task-1")
         clean, _ = started(clean, wake_id="wake-2", now="2026-08-26T00:11:00+00:00")
         clean, result = pulse.record_snapshot(clean, snapshot(), wake_id="wake-2", now="2026-08-26T00:11:00+00:00")
         self.assertEqual(result["next_action"], "WAIT_REVIEW")
@@ -1054,6 +1067,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-2",
             now="2026-08-26T00:12:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-2",
         )
         clean, _ = started(clean, wake_id="wake-3", now="2026-08-26T00:22:00+00:00")
         clean, result = pulse.record_snapshot(
@@ -1240,6 +1254,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
 
         self.assertTrue(completed["mutation_occurred"])
@@ -1286,6 +1301,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
 
         self.assertTrue(completed["mutation_occurred"])
@@ -1383,7 +1399,7 @@ class DefaultLifecycleTests(unittest.TestCase):
     def test_trigger_is_once_per_head_and_empty_followup_pauses(self) -> None:
         state, _ = started()
         state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
-        state, _ = pulse.complete_wake(state, wake_id="wake-1", now="2026-08-26T00:01:00+00:00", schedule_next_wake=lambda expected: expected)
+        state, _ = pulse.complete_wake(state, wake_id="wake-1", now="2026-08-26T00:01:00+00:00", schedule_next_wake=lambda expected: expected, scheduled_task_id="task-1")
         state, _ = started(state, wake_id="wake-2", now="2026-08-26T00:11:00+00:00")
         state, result = pulse.record_snapshot(state, snapshot(), wake_id="wake-2", now="2026-08-26T00:11:00+00:00")
         self.assertEqual(result["next_action"], "REQUEST_REVIEW")
@@ -1400,7 +1416,7 @@ class DefaultLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(result["reason_code"], "review_trigger_recorded")
         self.assertTrue(result["mutation_occurred"])
-        state, completed = pulse.complete_wake(state, wake_id="wake-2", now="2026-08-26T00:12:00+00:00", schedule_next_wake=lambda expected: expected)
+        state, completed = pulse.complete_wake(state, wake_id="wake-2", now="2026-08-26T00:12:00+00:00", schedule_next_wake=lambda expected: expected, scheduled_task_id="task-2")
         self.assertTrue(completed["mutation_occurred"])
         state, _ = started(state, wake_id="wake-3", now="2026-08-26T00:22:00+00:00")
         state, result = pulse.record_snapshot(state, snapshot(), wake_id="wake-3", now="2026-08-26T00:22:00+00:00")

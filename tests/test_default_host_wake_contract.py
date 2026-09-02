@@ -69,6 +69,7 @@ class InMemoryHost:
         schedule_fails: bool = False,
         first_run: str | None = None,
         pause_succeeds: bool = True,
+        pause_results: tuple[bool, ...] | None = None,
         complete_raises: bool = False,
     ) -> None:
         self.state = deepcopy(state)
@@ -80,6 +81,8 @@ class InMemoryHost:
         self.schedule_fails = schedule_fails
         self.first_run = first_run
         self.pause_succeeds = pause_succeeds
+        self.pause_results = pause_results
+        self.pause_calls = 0
         self.complete_raises = complete_raises
         self.created_tasks: dict[str, dict[str, object]] = {}
         self.paused_task_ids: list[str] = []
@@ -97,9 +100,15 @@ class InMemoryHost:
 
     def pause_task(self, task_id: str) -> bool:
         self.operations.append(("pause-task", task_id))
-        if self.pause_succeeds:
+        self.pause_calls += 1
+        result = (
+            self.pause_results[self.pause_calls - 1]
+            if self.pause_results is not None and self.pause_calls <= len(self.pause_results)
+            else self.pause_succeeds
+        )
+        if result:
             self.paused_task_ids.append(task_id)
-        return self.pause_succeeds
+        return result
 
     def read_checkpoint_directly(self) -> dict[str, object]:
         self.operations.append(("checkpoint-read", "direct"))
@@ -170,7 +179,13 @@ class HostInvocation:
     def ended(self) -> bool:
         return self.invocation.ended
 
-    def _begin_wake(self, wake_id: str, now: str, pause_confirmed: bool) -> dict[str, object]:
+    def _begin_wake(
+        self,
+        wake_id: str,
+        now: str,
+        pause_confirmed: bool,
+        delivered_task_id: str | None,
+    ) -> dict[str, object]:
         self.host.operations.append(("begin-wake", wake_id))
         state = self.host.state or empty_checkpoint("Owner/Repo", 17)
         self.host.state, result = pulse.begin_wake(
@@ -178,6 +193,7 @@ class HostInvocation:
             wake_id=wake_id,
             now=now,
             pause_heartbeat=lambda: pause_confirmed,
+            delivered_task_id=delivered_task_id,
         )
         return result
 
@@ -187,6 +203,7 @@ class HostInvocation:
         now: str,
         schedule_next_wake,
         scheduled_task_id: str | None,
+        completion_failure: dict[str, object] | None,
     ) -> dict[str, object]:
         self.host.operations.append(("complete-wake", scheduled_task_id or "unconfirmed"))
         if self.host.complete_raises:
@@ -197,6 +214,7 @@ class HostInvocation:
             now=now,
             schedule_next_wake=schedule_next_wake,
             scheduled_task_id=scheduled_task_id,
+            completion_failure=completion_failure,
         )
         return result
 
@@ -369,6 +387,33 @@ class DefaultHostWakeContractTests(unittest.TestCase):
         self.assertNotIn("scheduled_task_id", result)
         self.assertEqual(host.state["scheduled_task_disposition"], "PAUSED")
         self.assertIn("task-2", host.paused_task_ids)
+        self.assertIn(("pause-task", "task-2"), host.operations)
+        self.assertTrue(invocation.ended)
+
+    def test_successor_cleanup_failure_latches_recovery_without_claiming_cleanup(self) -> None:
+        host = InMemoryHost(
+            state=waiting_checkpoint(),
+            wake_ids=("fresh-wake-2",),
+            first_run="2026-08-26T00:48:00+00:00",
+            pause_results=(True, False),
+        )
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+        invocation.begin()
+        invocation.snapshot()
+
+        result = invocation.complete(reanchor_succeeds=True)
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "successor_cleanup_unconfirmed")
+        self.assertEqual(
+            result["evidence"],
+            {"successor_task_id": "task-2", "pause_confirmed": False},
+        )
+        self.assertEqual(
+            host.state["failure_latch"]["reason_code"],
+            "successor_cleanup_unconfirmed",
+        )
+        self.assertEqual(host.state["scheduled_task_disposition"], "PAUSED")
         self.assertIn(("pause-task", "task-2"), host.operations)
         self.assertTrue(invocation.ended)
 

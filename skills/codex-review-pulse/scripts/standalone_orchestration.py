@@ -55,9 +55,10 @@ class StandaloneTaskHost(Protocol):
         """Read normalized task metadata and the persisted first-run timestamp."""
 
 
-BeginWake = Callable[[str, str, bool], Mapping[str, Any]]
+BeginWake = Callable[[str, str, bool, str | None], Mapping[str, Any]]
 CompleteWake = Callable[
-    [str, str, Callable[[str], object], str | None], Mapping[str, Any]
+    [str, str, Callable[[str], object], str | None, Mapping[str, Any] | None],
+    Mapping[str, Any],
 ]
 
 
@@ -251,7 +252,12 @@ class StandaloneInvocation:
                     pause_confirmed = False
                 if not pause_confirmed:
                     try:
-                        result = self.begin_wake(self.wake_id, self.now, False)
+                        result = self.begin_wake(
+                            self.wake_id,
+                            self.now,
+                            False,
+                            self.task_id if self.scheduled else None,
+                        )
                     except Exception:
                         return self._end(
                             {
@@ -288,7 +294,12 @@ class StandaloneInvocation:
                 if preflight is not None:
                     return self._end(preflight)
 
-            result = self.begin_wake(self.wake_id, self.now, True)
+            result = self.begin_wake(
+                self.wake_id,
+                self.now,
+                True,
+                self.task_id if self.scheduled else None,
+            )
             if not isinstance(result, Mapping) or "next_action" not in result:
                 raise StandaloneInvocationError("begin-wake returned an invalid result")
             if result.get("next_action") != "WAKE_STARTED":
@@ -301,6 +312,7 @@ class StandaloneInvocation:
         now: str,
         actual_first_run: object,
         successor_id: str | None,
+        completion_failure: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if self.wake_id is None:
             raise StandaloneInvocationError("complete-wake requires an active wake")
@@ -310,6 +322,7 @@ class StandaloneInvocation:
                 now,
                 lambda _expected: actual_first_run,
                 successor_id,
+                completion_failure,
             )
         except Exception:
             self.ended = True
@@ -366,6 +379,7 @@ class StandaloneInvocation:
             actual_first_run: object = None
             observed_first_run: object = None
             first_run_mismatch = False
+            completion_failure: Mapping[str, Any] | None = None
             try:
                 response = self.host.schedule_standalone_task(
                     prompt=self.prompt,
@@ -394,14 +408,24 @@ class StandaloneInvocation:
             except Exception:
                 if successor_id is not None:
                     try:
-                        self.host.pause_task(successor_id)
+                        pause_confirmed = _confirmed(self.host.pause_task(successor_id))
                     except Exception:
-                        pass
-                successor_id = None
+                        pause_confirmed = False
+                    if not pause_confirmed:
+                        completion_failure = {
+                            "reason_code": "successor_cleanup_unconfirmed",
+                            "evidence": {
+                                "successor_task_id": successor_id,
+                                "pause_confirmed": False,
+                            },
+                        }
+                if completion_failure is None:
+                    successor_id = None
                 actual_first_run = observed_first_run if first_run_mismatch else None
 
             return self._finish_completion(
                 now=now,
                 actual_first_run=actual_first_run,
                 successor_id=successor_id,
+                completion_failure=completion_failure,
             )
