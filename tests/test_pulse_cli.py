@@ -281,6 +281,7 @@ class PulseCliTests(unittest.TestCase):
         self.assertIn("--policy-json", configure_help)
         self.assertIn("--schedule-reanchored", complete_help)
         self.assertIn("--scheduled-first-run", complete_help)
+        self.assertIn("--completion-failure", complete_help)
 
     def test_canonical_heartbeat_prompt_is_rendered_without_a_checkpoint(self) -> None:
         harness = CliHarness(self)
@@ -359,6 +360,43 @@ class PulseCliTests(unittest.TestCase):
         )
         self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
         self.assertNotEqual(state["scheduled_task_disposition"], "ACTIVE")
+
+    def test_complete_wake_persists_a_successor_readback_failure(self) -> None:
+        harness = CliHarness(self)
+        harness.begin_and_snapshot()
+        failure_path = Path(harness.directory.name) / "completion-failure.json"
+        failure_path.write_text(
+            json.dumps(
+                {
+                    "reason_code": "successor_cleanup_unconfirmed",
+                    "evidence": {
+                        "successor_task_id": "task-2",
+                        "pause_confirmed": False,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = harness.json_output(
+            harness.run(
+                "complete-wake",
+                "--completion-failure",
+                str(failure_path),
+                now="2026-08-26T00:01:00+00:00",
+            )
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "successor_cleanup_unconfirmed")
+        state = load_checkpoint(
+            checkpoint_path("owner/repo", 17, repository_path=harness.checkout)
+        )
+        self.assertEqual(
+            state["failure_latch"]["reason_code"],
+            "successor_cleanup_unconfirmed",
+        )
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
 
     def test_prompt_policy_is_persisted_on_initial_wake_and_can_be_updated(self) -> None:
         harness = CliHarness(self)
@@ -545,6 +583,8 @@ class PulseCliTests(unittest.TestCase):
             harness.run(
                 "begin-wake",
                 "--pause-confirmed",
+                "--delivered-task-id",
+                "task-1",
                 wake_id="wake-2",
                 now="2026-08-26T00:11:00+00:00",
             )

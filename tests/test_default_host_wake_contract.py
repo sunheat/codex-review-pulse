@@ -522,6 +522,7 @@ class DefaultHostWakeContractTests(unittest.TestCase):
             wake_id="early-fresh-wake",
             now="2026-08-26T00:27:00+00:00",
             pause_heartbeat=lambda: True,
+            delivered_task_id="task-1",
         )
         self.assertEqual(early["next_action"], "PAUSE_BLOCKED")
         self.assertEqual(early["reason_code"], "cadence_not_elapsed")
@@ -532,6 +533,7 @@ class DefaultHostWakeContractTests(unittest.TestCase):
             wake_id="early-fresh-wake",
             now="2026-08-26T00:28:00+00:00",
             pause_heartbeat=lambda: True,
+            delivered_task_id="task-1",
         )
         self.assertEqual(replay, early)
         self.assertEqual(state, before_replay)

@@ -251,7 +251,35 @@ successor_result = host.create_standalone_task(
 )
 if successor_result is success:
     SUCCESSOR_ID = successor_result.id
-    ACTUAL_FIRST_RUN = host.read_task(SUCCESSOR_ID).first_run
+    try:
+        ACTUAL_FIRST_RUN = host.read_task(SUCCESSOR_ID).first_run
+    except Exception:
+        # The task exists but its identity/first-run readback is unverified.
+        # Pause that exact task before persisting the absorbing recovery state.
+        try:
+            cleanup_result = host.pause_task(SUCCESSOR_ID)
+        except Exception:
+            cleanup_result = None
+        PAUSE_CONFIRMED = cleanup_result is success
+        FAILURE_FILE = write_json(
+            {
+                "reason_code": (
+                    "successor_readback_failed"
+                    if PAUSE_CONFIRMED
+                    else "successor_cleanup_unconfirmed"
+                ),
+                "evidence": {
+                    "successor_task_id": SUCCESSOR_ID,
+                    "pause_confirmed": PAUSE_CONFIRMED,
+                },
+            }
+        )
+        # Do not pass --schedule-reanchored or --scheduled-task-id: this
+        # successor was not verified as the active next task.
+        completion = PULSE TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
+          --completion-failure FAILURE_FILE
+        report completion
+        END_INVOCATION
     completion = PULSE TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
       --schedule-reanchored --scheduled-first-run ACTUAL_FIRST_RUN \
       --scheduled-task-id SUCCESSOR_ID

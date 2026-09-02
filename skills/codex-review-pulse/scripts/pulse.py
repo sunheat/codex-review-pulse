@@ -589,9 +589,13 @@ def begin_wake(
         )
         return state, result
 
-    if delivered_task_id is not None and (
-        state.get("scheduled_task_disposition") != "ACTIVE"
-        or state.get("scheduled_task_id") != delivered_task_id
+    active_schedule = state.get("scheduled_task_disposition") == "ACTIVE"
+    if (active_schedule and delivered_task_id is None) or (
+        delivered_task_id is not None
+        and (
+            not active_schedule
+            or state.get("scheduled_task_id") != delivered_task_id
+        )
     ):
         result = _pause(
             state,
@@ -1743,6 +1747,14 @@ def parse_args() -> argparse.Namespace:
         "--scheduled-task-id",
         help="ID of the newly created standalone successor task",
     )
+    complete.add_argument(
+        "--completion-failure",
+        type=Path,
+        help=(
+            "JSON file describing a successor handoff failure to persist as "
+            "PAUSE_RECOVERY; do not combine with --schedule-reanchored"
+        ),
+    )
     complete.add_argument("--cadence-seconds", type=int)
     parser.add_argument(
         "--policy-json",
@@ -1952,6 +1964,22 @@ def main() -> None:
         _write(path, state, result)
         return
     if args.command == "complete-wake":
+        completion_failure = None
+        if args.completion_failure is not None:
+            try:
+                completion_failure = json.loads(
+                    args.completion_failure.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError) as error:
+                raise RuntimeError(
+                    f"Cannot read completion failure JSON: {args.completion_failure}"
+                ) from error
+            if not isinstance(completion_failure, dict):
+                raise RuntimeError("Completion failure JSON must be an object")
+            if args.schedule_reanchored:
+                raise RuntimeError(
+                    "--completion-failure cannot be combined with --schedule-reanchored"
+                )
         state, result = complete_wake(
             state,
             wake_id=args.wake_id,
@@ -1963,6 +1991,7 @@ def main() -> None:
                 else None
             ),
             scheduled_task_id=args.scheduled_task_id,
+            completion_failure=completion_failure,
         )
         _write(path, state, result)
         return

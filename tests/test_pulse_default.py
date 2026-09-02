@@ -39,11 +39,17 @@ def snapshot(
 
 def started(checkpoint=None, *, wake_id: str = "wake-1", now: str = NOW):
     state = checkpoint or empty_checkpoint("Owner/Repo", 17)
+    delivered_task_id = (
+        state.get("scheduled_task_id")
+        if state.get("scheduled_task_disposition") == "ACTIVE"
+        else None
+    )
     return pulse.begin_wake(
         state,
         wake_id=wake_id,
         now=now,
         pause_heartbeat=lambda: True,
+        delivered_task_id=delivered_task_id,
     )
 
 
@@ -151,6 +157,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-2",
             now="2026-08-26T00:11:00+00:00",
             pause_heartbeat=lambda: True,
+            delivered_task_id="task-1",
         )
         self.assertEqual(result["next_action"], "STOP_POLICY_LIMIT")
         self.assertEqual(result["reason_code"], "maximum_wakes_reached")
@@ -914,6 +921,31 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertEqual(result["next_not_before"], "2026-08-26T00:36:00+00:00")
         self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
 
+    def test_active_schedule_requires_a_delivered_task_id(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(
+            state, snapshot(), wake_id="wake-1", now=NOW
+        )
+        state, _ = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:01:00+00:00",
+            schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
+        )
+
+        state, result = pulse.begin_wake(
+            state,
+            wake_id="wake-2",
+            now="2026-08-26T00:11:00+00:00",
+            pause_heartbeat=lambda: True,
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "scheduled_task_identity_mismatch")
+        self.assertEqual(result["evidence"]["delivered_task_id"], None)
+        self.assertEqual(state["failure_latch"]["reason_code"], "scheduled_task_identity_mismatch")
+
     def test_schedule_reanchor_tolerance_is_direction_aware(self) -> None:
         expected = "2026-08-26T00:36:00+00:00"
         self.assertTrue(
@@ -997,6 +1029,7 @@ class DefaultLifecycleTests(unittest.TestCase):
                 wake_id=f"wake-{index}",
                 now=f"2026-08-26T{when}+00:00",
                 pause_heartbeat=lambda: True,
+                delivered_task_id="task-1",
             )
             self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
             self.assertEqual(result["reason_code"], "cadence_not_elapsed")
