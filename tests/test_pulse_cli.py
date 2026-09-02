@@ -153,6 +153,18 @@ class CliHarness:
             capture_output=True,
             text=True,
         )
+        subprocess.run(
+            ["git", "-C", str(self.checkout), "-c", "user.name=Pulse Test", "-c", "user.email=pulse@example.test", "commit", "--allow-empty", "-m", "test: initialize checkout"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.initial_head = subprocess.run(
+            ["git", "-C", str(self.checkout), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
         self.fake_bin = root / "bin"
         self.fake_bin.mkdir()
         (self.fake_bin / "fake_gh.py").write_text(FAKE_GH, encoding="utf-8")
@@ -163,7 +175,13 @@ class CliHarness:
         self.fixture_path = root / "fixture.json"
         self.counts_path = root / "mutation-count.txt"
         self.calls_path = root / "graphql-count.txt"
-        self.write_fixture(fixture or self.default_fixture())
+        payload = dict(fixture or self.default_fixture())
+        if payload.get("head_oid") == "HEAD1":
+            payload["head_oid"] = self.initial_head
+        for review in payload.get("reviews", []):
+            if review.get("commit", {}).get("oid") == "HEAD1":
+                review["commit"]["oid"] = payload["head_oid"]
+        self.write_fixture(payload)
 
     @staticmethod
     def default_fixture() -> dict:
@@ -782,7 +800,7 @@ class PulseCliTests(unittest.TestCase):
             {
                 "id": "R1",
                 "state": "APPROVED",
-                "commit": {"oid": "HEAD1"},
+                "commit": {"oid": fixture["head_oid"]},
                 "author": {"login": "chatgpt-codex-connector"},
             }
         ]

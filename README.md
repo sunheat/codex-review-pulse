@@ -30,7 +30,7 @@ wake, and continued after `PAUSE_BLOCKED` by clearing a latch with a generated
 recovery authorization. The old scheduled-task semantics must not be used as
 the default or described as production-ready.
 
-Version `0.8.4` is the current Codex-first default clean-context scheduling candidate.
+Version `0.8.5` is the current Codex-first default clean-context scheduling candidate.
 Its real scheduled-task and live GitHub integration remains unverified until an
 independent forward test completes.
 
@@ -86,7 +86,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py update \
   --source-repository . \
   --source-commit "$commit"
 python "$HOME/.agents/skills/codex-review-pulse/scripts/manage_pilot_install.py" verify \
-  --expected-version 0.8.4 \
+  --expected-version 0.8.5 \
   --expected-source-commit "$commit"
 ```
 
@@ -104,7 +104,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
   --source-repository . `
   --source-commit $commit
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
-  --expected-version 0.8.4 `
+  --expected-version 0.8.5 `
   --expected-source-commit $commit
 ```
 
@@ -115,7 +115,7 @@ no other runner targets the PR:
 ```powershell
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_preflight.py `
   --repo OWNER/REPO --pr NUMBER `
-  --expected-skill-version 0.8.4 `
+  --expected-skill-version 0.8.5 `
   --expected-source-commit $commit `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector `
@@ -160,7 +160,8 @@ Each scheduler delivery runs in a new standalone task/conversation. The host
 pauses the delivered task, then creates one successor with the unchanged
 canonical prompt only after a rearmable result. The host-supported path creates
 a cadence-only recurring task without `DTSTART`, reads back its persisted ID,
-prompt, cadence, and creation timestamp, and derives its first run from
+prompt and digest, scheduler/conversation metadata, absent target attachment,
+model, reasoning settings, cadence, and creation timestamp, and derives its first run from
 `created_at + cadence_seconds`. The creation anchor must not predate
 `wake_completed_at`; the invocation ends immediately after `complete-wake`.
 The default policy has no wake/deadline/retry budget;
@@ -208,7 +209,9 @@ verified remote PR head. The scheduler's configured project checkout is only a
 read-only repository locator: it is never switched, reset, cleaned, or used as
 the repair workspace. Pulse commands, edits, validation, commit, and push all
 run from the wake-owned worktree, while the linked worktree shares the
-Git-common-dir checkpoint required for safe cross-wake continuity.
+Git-common-dir checkpoint required for safe cross-wake continuity. Before a
+batch is frozen, the pulse CLI verifies that the worktree `HEAD` still matches
+the stable snapshot head and pauses on a mismatch.
 
 Any number of pushes completed before the next wake are intentionally
 coalesced: the next stable snapshot processes only the latest observed head.
@@ -230,7 +233,9 @@ pauses recovery instead of being folded into that active batch.
 - Focused-validate and resolve each exact frozen thread before aggregate
   validation and publication. In autonomous mode, repair a stale PR-scoped
   test or implementation defect and retry recoverable failures instead of
-  stopping at the first red check; repeated no-progress failures still pause.
+  stopping at the first red check; persist an immutable patch manifest for any
+  uncommitted fix before a retry wake, and restore it in the next clean worktree.
+  Repeated no-progress failures still pause.
 - Publish at most one commit and one push for the aggregate batch.
 - Refuse to overwrite an unexpectedly advanced PR head.
 - Stop immediately when no targeted Codex threads remain and either a

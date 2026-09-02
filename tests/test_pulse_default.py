@@ -15,6 +15,11 @@ import pulse  # noqa: E402
 
 
 NOW = "2026-08-26T00:00:00+00:00"
+PENDING_REPAIR = {
+    "patch_path": "C:/git-common/codex-review-pulse/pending.patch",
+    "patch_sha256": "a" * 64,
+    "frozen_head_oid": "HEAD1",
+}
 
 
 def snapshot(
@@ -59,7 +64,7 @@ class DefaultLifecycleTests(unittest.TestCase):
 
         self.assertEqual(handoff["repository"], "owner/repo")
         self.assertEqual(handoff["pull_request_number"], 17)
-        self.assertEqual(handoff["protocol_version"], 7)
+        self.assertEqual(handoff["protocol_version"], 8)
         self.assertEqual(handoff["model"], "gpt-5.6-luna")
         self.assertEqual(handoff["reasoning_effort"], "xhigh")
         self.assertEqual(handoff["scheduler_kind"], "cron")
@@ -253,8 +258,10 @@ class DefaultLifecycleTests(unittest.TestCase):
             reason_code="transient_validation_failure",
             now=NOW,
             signature="test-failure",
+            pending_repair=PENDING_REPAIR,
         )
         self.assertEqual(result["next_action"], "WAIT_RETRY")
+        self.assertEqual(state["active_batch"]["pending_repair"], PENDING_REPAIR)
         state, _ = pulse.complete_wake(
             state,
             wake_id="wake-1",
@@ -289,6 +296,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             reason_code="transient_validation_failure",
             now=NOW,
             signature="test-failure",
+            pending_repair=PENDING_REPAIR,
         )
         self.assertEqual(result["next_action"], "WAIT_RETRY")
 
@@ -300,6 +308,7 @@ class DefaultLifecycleTests(unittest.TestCase):
                 classification="fix-now",
                 now=NOW,
             )
+
         with self.assertRaisesRegex(pulse.DefaultWakeError, "terminal boundary"):
             pulse.resolve_default_thread(
                 state,
@@ -331,6 +340,53 @@ class DefaultLifecycleTests(unittest.TestCase):
             scheduled_task_id="task-1",
         )
         self.assertEqual(completed["next_action"], "WAIT_RETRY")
+
+    def test_retry_with_uncommitted_fix_requires_a_pending_repair_manifest(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(
+            state, snapshot(targeted=["T1"]), wake_id="wake-1", now=NOW
+        )
+        state, _ = pulse.freeze_default_batch(state, wake_id="wake-1")
+        state, _ = pulse.record_default_outcome(
+            state,
+            wake_id="wake-1",
+            thread_id="T1",
+            classification="fix-now",
+            now=NOW,
+        )
+
+        state, result = pulse.record_retry(
+            state,
+            wake_id="wake-1",
+            reason_code="transient_validation_failure",
+            now=NOW,
+            signature="test-failure",
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "pending_repair_unpersisted")
+        self.assertEqual(state["failure_latch"]["reason_code"], "pending_repair_unpersisted")
+
+    def test_freeze_pauses_when_worktree_head_differs_from_snapshot(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(
+            state, snapshot(targeted=["T1"]), wake_id="wake-1", now=NOW
+        )
+
+        state, result = pulse.freeze_default_batch(
+            state,
+            wake_id="wake-1",
+            worktree_head_oid="OTHER_HEAD",
+            now=NOW,
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "worktree_head_mismatch")
+        self.assertEqual(
+            result["evidence"],
+            {"snapshot_head_oid": "HEAD1", "worktree_head_oid": "OTHER_HEAD"},
+        )
+        self.assertIsNone(state["active_batch"])
 
     def test_retry_resume_preserves_frozen_targets_when_review_threads_disappear(self) -> None:
         state, _ = started()

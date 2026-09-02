@@ -15,10 +15,16 @@ from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import sys
 from typing import Any, Callable, Mapping
 
-from checkpoint_store import checkpoint_path, load_checkpoint, save_checkpoint
+from checkpoint_store import (
+    checkpoint_path,
+    git_common_directory,
+    load_checkpoint,
+    save_checkpoint,
+)
 from default_policy import (
     PolicyError,
     apply_policy_overrides,
@@ -43,7 +49,7 @@ from state_model import (
 
 DEFAULT_CADENCE_SECONDS = 600
 DEFAULT_MODE_SCHEMA_VERSION = 2
-STANDALONE_TASK_PROTOCOL_VERSION = 7
+STANDALONE_TASK_PROTOCOL_VERSION = 8
 SCHEDULE_REANCHOR_TOLERANCE = timedelta(seconds=1)
 HEARTBEAT_BATCH_ORDER = (
     "record-outcome",
@@ -111,17 +117,25 @@ def build_standalone_task_handoff(
         "worktree, passing it as --repository-path. Use only the target repository's "
         "Git-common-dir checkpoint as "
         "cross-run workflow state. Generate one fresh opaque wake_id and run at "
-        "most one stable frozen batch. For RUN_BATCH, record each frozen thread "
+        "most one stable frozen batch. For RUN_BATCH, verify that the wake "
+        "worktree's git rev-parse HEAD equals snapshot.head_oid before freezing; "
+        "the freeze guard rejects a mismatch. Then record each frozen thread "
         "outcome, apply and focused-validate any required repair, then resolve that "
         "exact thread while the PR head still equals the frozen head. Never commit "
         "or push before every frozen thread is resolved. After all exact resolutions, "
         "run aggregate validation; run prepare-publication before commit and again "
         "immediately before push; explicitly stage intended paths; commit and push "
         "at most once; verify the published head; then record the publication result. "
-        "Leave push-created review artifacts for a later wake. When rearming, create "
-        "one new standalone successor task with the unchanged prompt and a host-"
-        "supported cadence-only recurring schedule; do not submit DTSTART. Read back "
-        "the persisted task ID, creation timestamp, unchanged prompt, and cadence. "
+        "If a fix-now repair leaves uncommitted changes and a recoverable retry is "
+        "needed, write an immutable patch plus manifest under the Git-common dir and "
+        "pass that manifest to pulse retry --pending-repair; the next clean worktree "
+        "must verify and apply it before focused validation. Leave push-created "
+        "review artifacts for a later wake. When rearming, create one new standalone "
+        "successor task with the unchanged prompt and a host-supported cadence-only "
+        "recurring schedule; do not submit DTSTART. Read back the persisted task ID, "
+        "creation timestamp, prompt and prompt digest, cron/standalone metadata, "
+        "absent target thread, model, reasoning settings, and cadence before accepting "
+        "it. "
         "Derive the first run from persisted created_at plus cadence, then pass both "
         "timestamps to complete-wake. The creation timestamp must be at or after this "
         "wake's completion, so the successor cannot run early. For every scheduled "
@@ -129,7 +143,9 @@ def build_standalone_task_handoff(
         "so pulse.py authenticates the persisted successor. Preserve non-target "
         "threads; never merge, enable auto-merge, change the base, force-push, or "
         "create issues. After complete-wake, report the result and end this "
-        "invocation immediately; do not start, schedule, or consume another wake. "
+        "invocation immediately; do not start, schedule, or consume another wake. If "
+        "complete-wake raises after successor creation, pause that exact successor and "
+        "confirm cleanup before propagating the failure. "
         "Keep the delivered task paused on every PAUSE_* or STOP_* result."
     )
     prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
@@ -719,6 +735,24 @@ def begin_wake(
     state["last_wake_result"] = None
     state["resume_pending_batch"] = pending_batch
     if pending_batch:
+        pending_repair = (state.get("active_batch") or {}).get("pending_repair")
+        fix_now_threads = [
+            thread_id
+            for thread_id, outcome in (
+                (state.get("active_batch") or {}).get("thread_outcomes") or {}
+            ).items()
+            if isinstance(outcome, Mapping) and outcome.get("classification") == "fix-now"
+        ]
+        if fix_now_threads and not isinstance(pending_repair, Mapping):
+            result = _pause(
+                state,
+                reason_code="pending_repair_missing",
+                now=now,
+                evidence={"thread_ids": sorted(fix_now_threads)},
+                action="PAUSE_RECOVERY",
+            )
+            state["last_wake_id"] = wake_id
+            return state, result
         state["wake_phase"] = "processing"
         state["last_decision"] = _decision(
             "RUN_BATCH",
@@ -728,6 +762,7 @@ def begin_wake(
             targeted_thread_ids=list(
                 (state.get("active_batch") or {}).get("targeted_thread_ids") or []
             ),
+            **({"pending_repair": deepcopy(pending_repair)} if pending_repair else {}),
         )
     result = _decision(
         "WAKE_STARTED",
@@ -939,7 +974,11 @@ def record_snapshot(
 
 
 def freeze_default_batch(
-    checkpoint: dict[str, Any], *, wake_id: str
+    checkpoint: dict[str, Any],
+    *,
+    wake_id: str,
+    worktree_head_oid: str | None = None,
+    now: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     state = ensure_default_lifecycle(checkpoint)
     _require_active_wake(state, wake_id)
@@ -953,6 +992,19 @@ def freeze_default_batch(
     thread_ids = snapshot.get("targeted_unresolved_thread_ids") or []
     if not head_oid:
         raise DefaultWakeError("The normalized snapshot has no frozen head")
+    if worktree_head_oid is not None and worktree_head_oid != head_oid:
+        result = _pause(
+            state,
+            reason_code="worktree_head_mismatch",
+            now=_iso(now or datetime.now(UTC).isoformat()),
+            evidence={
+                "snapshot_head_oid": head_oid,
+                "worktree_head_oid": worktree_head_oid,
+            },
+            action="PAUSE_RECOVERY",
+        )
+        state["last_wake_id"] = wake_id
+        return state, result
     state = freeze_batch(state, head_oid, thread_ids)
     state["wake_phase"] = "frozen"
     state["last_decision"] = deepcopy(decision)
@@ -1018,6 +1070,7 @@ def record_retry(
     evidence: Any = None,
     signature: str | None = None,
     count_no_progress: bool = False,
+    pending_repair: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Persist a recoverable failure and make the next wake retryable."""
     if not isinstance(reason_code, str) or not reason_code.strip():
@@ -1033,6 +1086,50 @@ def record_retry(
         result = _policy_pause(state, now=_iso(now), operation="validation_failure")
         state["last_wake_id"] = wake_id
         return state, result
+    batch = state.get("active_batch")
+    fix_now_threads = (
+        [
+            thread_id
+            for thread_id, outcome in (batch.get("thread_outcomes") or {}).items()
+            if isinstance(outcome, Mapping) and outcome.get("classification") == "fix-now"
+        ]
+        if isinstance(batch, Mapping)
+        else []
+    )
+    existing_pending_repair = (
+        batch.get("pending_repair") if isinstance(batch, Mapping) else None
+    )
+    if (
+        fix_now_threads
+        and pending_repair is None
+        and not isinstance(existing_pending_repair, Mapping)
+    ):
+        result = _pause(
+            state,
+            reason_code="pending_repair_unpersisted",
+            now=_iso(now),
+            evidence={"thread_ids": sorted(fix_now_threads)},
+            action="PAUSE_RECOVERY",
+        )
+        state["last_wake_id"] = wake_id
+        return state, result
+    if pending_repair is not None:
+        if not isinstance(pending_repair, Mapping):
+            raise ValueError("Pending repair must be a JSON object")
+        if not isinstance(batch, Mapping):
+            raise ValueError("A pending repair requires an active frozen batch")
+        frozen_head_oid = batch.get("frozen_head_oid")
+        patch_path = pending_repair.get("patch_path")
+        patch_sha256 = pending_repair.get("patch_sha256")
+        if not isinstance(patch_path, str) or not patch_path.strip():
+            raise ValueError("Pending repair patch_path is required")
+        if not isinstance(patch_sha256, str) or len(patch_sha256) != 64 or any(
+            character not in "0123456789abcdefABCDEF" for character in patch_sha256
+        ):
+            raise ValueError("Pending repair patch_sha256 must be a SHA-256 hex digest")
+        if pending_repair.get("frozen_head_oid") != frozen_head_oid:
+            raise ValueError("Pending repair frozen head does not match the active batch")
+        batch["pending_repair"] = deepcopy(dict(pending_repair))
     if count_no_progress and not signature:
         raise ValueError("A failure signature is required to count no progress")
     retry_state = state.setdefault("retry_state", {})
@@ -1651,6 +1748,45 @@ def _assert_checkpoint_target(
         raise RuntimeError("Checkpoint target does not match the requested pull request")
 
 
+def _checkout_head(repository_path: str | Path) -> str:
+    process = subprocess.run(
+        ["git", "-C", str(repository_path), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if process.returncode != 0:
+        raise RuntimeError(process.stderr.strip() or "Unable to read worktree HEAD")
+    head_oid = process.stdout.strip()
+    if not head_oid:
+        raise RuntimeError("Worktree HEAD is empty")
+    return head_oid
+
+
+def _load_pending_repair(
+    manifest_path: Path, *, repository_path: str | Path
+) -> dict[str, Any]:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError("Pending repair manifest must be a JSON object")
+    patch_path = manifest.get("patch_path")
+    if not isinstance(patch_path, str) or not patch_path.strip():
+        raise ValueError("Pending repair patch_path is required")
+    patch = Path(patch_path).resolve()
+    common = git_common_directory(repository_path)
+    try:
+        patch.relative_to(common)
+    except ValueError as error:
+        raise ValueError("Pending repair patch must be under the Git common directory") from error
+    if not patch.is_file():
+        raise ValueError("Pending repair patch does not exist")
+    expected_sha256 = manifest.get("patch_sha256")
+    actual_sha256 = hashlib.sha256(patch.read_bytes()).hexdigest()
+    if expected_sha256 != actual_sha256:
+        raise ValueError("Pending repair patch SHA-256 does not match its manifest")
+    manifest["patch_path"] = str(patch)
+    return manifest
+
+
 def _state_path(
     args: argparse.Namespace,
     *,
@@ -1775,6 +1911,11 @@ def parse_args() -> argparse.Namespace:
         "--no-progress",
         action="store_true",
         help="Count this retry only when the same validation failure made no progress",
+    )
+    retry.add_argument(
+        "--pending-repair",
+        type=Path,
+        help="JSON manifest for an uncommitted repair patch retained across retry wakes",
     )
 
     configure = commands.add_parser(
@@ -1978,8 +2119,29 @@ def main() -> None:
         return
 
     if args.command == "freeze":
-        state, batch = freeze_default_batch(state, wake_id=args.wake_id)
-        _write(path, state, {"next_action": "RUN_BATCH", "batch": batch})
+        try:
+            worktree_head_oid = _checkout_head(args.repository_path)
+        except RuntimeError as error:
+            result = _pause(
+                state,
+                reason_code="worktree_head_unavailable",
+                now=now,
+                evidence={"error": str(error)},
+                action="PAUSE_RECOVERY",
+            )
+            state["last_wake_id"] = args.wake_id
+            _write(path, state, result)
+            return
+        state, outcome = freeze_default_batch(
+            state,
+            wake_id=args.wake_id,
+            worktree_head_oid=worktree_head_oid,
+            now=now,
+        )
+        if state.get("wake_phase") != "frozen":
+            _write(path, state, outcome)
+            return
+        _write(path, state, {"next_action": "RUN_BATCH", "batch": outcome})
         return
     if args.command == "record":
         state, result = record_default_outcome(
@@ -2033,6 +2195,14 @@ def main() -> None:
             if args.evidence is not None
             else None
         )
+        pending_repair = (
+            _load_pending_repair(
+                args.pending_repair,
+                repository_path=args.repository_path,
+            )
+            if args.pending_repair is not None
+            else None
+        )
         state, result = record_retry(
             state,
             wake_id=args.wake_id,
@@ -2041,6 +2211,7 @@ def main() -> None:
             evidence=evidence,
             signature=args.signature,
             count_no_progress=args.no_progress,
+            pending_repair=pending_repair,
         )
         _write(path, state, result)
         return

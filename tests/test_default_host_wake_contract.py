@@ -341,7 +341,15 @@ class DefaultHostWakeContractTests(unittest.TestCase):
 
                 self.assertEqual(result["reason_code"], reason_code)
                 self.assertTrue(invocation.ended)
-                self.assertNotIn(("begin-wake", invocation.wake_id), host.operations)
+                if name not in {"missing", "unreadable"}:
+                    self.assertIn(("begin-wake", invocation.wake_id), host.operations)
+                else:
+                    self.assertNotIn(("begin-wake", invocation.wake_id), host.operations)
+                if name == "early":
+                    self.assertEqual(
+                        host.state["failure_latch"]["reason_code"],
+                        "cadence_not_elapsed",
+                    )
 
     def test_complete_wake_ends_successful_and_failed_reanchor_invocations(self) -> None:
         for reanchor_succeeds, expected_action in (
@@ -632,7 +640,7 @@ class DefaultHostWakeContractTests(unittest.TestCase):
                 self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
                 self.assertEqual(result["reason_code"], "scheduled_task_identity_mismatch")
                 self.assertTrue(invocation.ended)
-                self.assertNotIn(("begin-wake", invocation.wake_id), host.operations)
+                self.assertIn(("begin-wake", invocation.wake_id), host.operations)
 
     def test_terminal_result_cannot_create_a_successor_or_call_complete(self) -> None:
         host = InMemoryHost(
@@ -679,8 +687,30 @@ class DefaultHostWakeContractTests(unittest.TestCase):
 
         self.assertTrue(invocation.ended)
         self.assertEqual(len(host.created_tasks), 1)
+        self.assertIn(("pause-task", "task-2"), host.operations)
+        self.assertIn("task-2", host.paused_task_ids)
         with self.assertRaises(StandaloneInvocationError):
             invocation.complete(reanchor_succeeds=True)
+
+    def test_completion_callback_failure_reports_unconfirmed_successor_cleanup(self) -> None:
+        host = InMemoryHost(
+            state=waiting_checkpoint(),
+            wake_ids=("fresh-wake-2",),
+            pause_results=(True, False),
+            complete_raises=True,
+        )
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+        invocation.begin()
+        invocation.snapshot()
+
+        with self.assertRaisesRegex(
+            StandaloneInvocationError,
+            "successor cleanup was not confirmed",
+        ):
+            invocation.complete(reanchor_succeeds=True)
+
+        self.assertTrue(invocation.ended)
+        self.assertIn(("pause-task", "task-2"), host.operations)
 
     def test_premature_fresh_id_latches_and_reuse_is_idempotent(self) -> None:
         state = waiting_checkpoint()

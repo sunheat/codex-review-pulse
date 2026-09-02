@@ -312,7 +312,28 @@ class StandaloneInvocation:
                         "reason_code": "checkpoint_invalid",
                     }
                 if preflight is not None:
-                    return self._end(preflight)
+                    try:
+                        persisted = self.begin_wake(
+                            self.wake_id,
+                            self.now,
+                            False,
+                            self.task_id if self.scheduled else None,
+                        )
+                    except Exception:
+                        return self._end(
+                            {
+                                "next_action": "PAUSE_RECOVERY",
+                                "reason_code": "pause_failure_persistence_failed",
+                            }
+                        )
+                    if not isinstance(persisted, Mapping) or "next_action" not in persisted:
+                        return self._end(
+                            {
+                                "next_action": "PAUSE_RECOVERY",
+                                "reason_code": "pause_failure_persistence_failed",
+                            }
+                        )
+                    return self._end(persisted)
 
             result = self.begin_wake(
                 self.wake_id,
@@ -346,8 +367,18 @@ class StandaloneInvocation:
                 scheduled_created_at,
                 completion_failure,
             )
-        except Exception:
+        except Exception as error:
+            cleanup_confirmed = True
+            if successor_id is not None:
+                try:
+                    cleanup_confirmed = _confirmed(self.host.pause_task(successor_id))
+                except Exception:
+                    cleanup_confirmed = False
             self.ended = True
+            if successor_id is not None and not cleanup_confirmed:
+                raise StandaloneInvocationError(
+                    "complete-wake failed and successor cleanup was not confirmed"
+                ) from error
             raise
         if not isinstance(result, Mapping) or "next_action" not in result:
             self.ended = True

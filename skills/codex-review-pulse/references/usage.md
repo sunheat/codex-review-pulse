@@ -36,7 +36,9 @@ The host adapter's `--pause-confirmed` and `--schedule-reanchored` inputs are
 post-success confirmations only. They do not call or authorize a Codex
 automation operation. The supported local-host path creates a cadence-only
 standalone successor without `DTSTART`, then reads back its persisted ID,
-prompt, cadence, and creation timestamp. Pass `--schedule-reanchored` with
+prompt and digest, scheduler/conversation metadata, absent target attachment,
+model, reasoning settings, cadence, and creation timestamp. Pass
+`--schedule-reanchored` with
 `--scheduled-created-at`, `--scheduled-first-run` derived from creation time
 plus cadence, and `--scheduled-task-id`. The controller requires the creation
 anchor not to predate wake completion and verifies the derived first run with
@@ -65,7 +67,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
 This extracts `skills/codex-review-pulse` from the named Git commit into
 `$env:USERPROFILE\.agents\skills\codex-review-pulse`. It does not copy the
 mutable working-tree files and does not create a symlink. The installed
-manifest records version `0.8.4`, the full source commit, and SHA-256 file
+manifest records version `0.8.5`, the full source commit, and SHA-256 file
 hashes. Verification independently reconstructs that inventory from the pinned
 Git commit, so changing both an installed file and its adjacent manifest does
 not reauthorize the modified bytes.
@@ -79,7 +81,7 @@ explicit alternate configured location.
 
 ```powershell
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
-  --expected-version 0.8.4 `
+  --expected-version 0.8.5 `
   --expected-source-commit $commit
 ```
 
@@ -98,7 +100,7 @@ python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_prefligh
   --repo OWNER/REPO `
   --pr NUMBER `
   --repository-path C:\path\to\target-repository `
-  --expected-skill-version 0.8.4 `
+  --expected-skill-version 0.8.5 `
   --expected-source-commit $commit `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector `

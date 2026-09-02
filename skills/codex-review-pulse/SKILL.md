@@ -28,7 +28,7 @@ the old heartbeat activated too early, used fixed-cadence overlap, allowed a
 and continued after `PAUSE_BLOCKED`. Do not describe `0.4.0` as production
 ready or use its old scheduled-task protocol as the default.
 
-Version `0.8.4` is the Codex-first default clean-context scheduling candidate. Its
+Version `0.8.5` is the Codex-first default clean-context scheduling candidate. Its
 real scheduled-task and live GitHub integration remains unverified until an
 independent forward test completes; do not describe that integration as proven
 before then.
@@ -225,6 +225,11 @@ else if this is a scheduler-delivered invocation:
     if checkpoint.next_not_before is later than current time:
         report PAUSE_BLOCKED / cadence_not_elapsed
         END_INVOCATION
+    if pause_result is not confirmed:
+        PULSE TARGET --wake-id WAKE_ID begin-wake \
+          --delivered-task-id DELIVERED_TASK_ID
+        report the returned pause result
+        END_INVOCATION
 else:
     report PAUSE_RECOVERY / invocation_not_scheduler_delivered
     END_INVOCATION
@@ -258,6 +263,12 @@ else:
 snapshot = PULSE TARGET --wake-id WAKE_ID snapshot
 
 if snapshot.decision.next_action == RUN_BATCH:
+    require git -C WAKE_WORKTREE rev-parse HEAD == snapshot.head_oid
+    # The freeze command repeats this guard and persists a recovery pause on
+    # mismatch, before any outcome, edit, or exact resolution is allowed.
+
+if snapshot.decision.next_action == RUN_BATCH:
+    # Freeze the exact stable snapshot before processing any thread.
     PULSE TARGET --wake-id WAKE_ID freeze
     for each frozen thread:
         PULSE TARGET --wake-id WAKE_ID record --thread-id ID \
@@ -267,7 +278,12 @@ if snapshot.decision.next_action == RUN_BATCH:
         # defects when the behavior contract is correct. If a recoverable
         # failure remains, persist it and end this wake:
         PULSE TARGET --wake-id WAKE_ID retry \
-          --reason-code validation_retry --signature FAILURE_SIGNATURE
+          --reason-code validation_retry --signature FAILURE_SIGNATURE \
+          [--pending-repair PENDING_REPAIR_MANIFEST]
+        # If any fix-now work is uncommitted, PENDING_REPAIR_MANIFEST must
+        # identify an immutable Git-common-dir patch, its SHA-256, and the
+        # frozen head. The next clean worktree verifies and applies it before
+        # focused validation.
         # Otherwise, after the focused check passes:
         PULSE TARGET --wake-id WAKE_ID resolve --thread-id ID
     # Only after every exact resolution succeeds in this wake, run aggregate
@@ -305,6 +321,12 @@ if successor_result is success:
     try:
         SUCCESSOR = host.read_task(SUCCESSOR_ID)
         require SUCCESSOR.prompt == STANDALONE_HANDOFF.prompt
+        require SUCCESSOR.prompt_sha256 == sha256(STANDALONE_HANDOFF.prompt)
+        require SUCCESSOR.scheduler_kind == cron
+        require SUCCESSOR.conversation_mode == standalone
+        require SUCCESSOR.target_thread_id is absent
+        require SUCCESSOR.model == TASK_MODEL
+        require SUCCESSOR.reasoning_effort == TASK_REASONING_EFFORT
         require SUCCESSOR.cadence_seconds == cadence_seconds
         require SUCCESSOR.created_at >= COMPLETION_NOW
         ACTUAL_FIRST_RUN = ceil_to_scheduler_precision(
@@ -539,7 +561,10 @@ invocation:
 5. Read the checkpoint directly before `begin-wake`; stop with the task paused
    if it is missing/unreadable, has an active wake, has a failure latch, or has
    a future `next_not_before`. Do not replace it from memory or a summary.
-6. After that preflight, independently verify the remote PR head and create a
+6. If the delivered-task pause cannot be confirmed, call `begin-wake` without
+   pause confirmation to persist the pause result and end before remote-head or
+   worktree setup. Otherwise, after that preflight, independently verify the
+   remote PR head and create a
    new task-owned clean linked worktree at that exact commit. Treat the
    scheduler/project checkout as a read-only locator; never reuse an earlier
    wake worktree or switch, reset, clean, or modify the configured checkout.
@@ -553,17 +578,26 @@ invocation:
    active successor before starting the wake. The initial user wake has no
    delivered successor ID and omits this option.
 8. Run this wake's snapshot, frozen batch, repair/retry, outcome/resolve, and
-   aggregate publication work. Stop immediately on any `PAUSE_*` or `STOP_*`.
+   aggregate publication work. Before freezing, require the wake worktree's
+   `git rev-parse HEAD` to equal the stable snapshot head; `pulse.py freeze`
+   persists `PAUSE_RECOVERY / worktree_head_mismatch` otherwise. If a fix-now
+   repair is uncommitted when a recoverable retry is needed, persist an
+   immutable Git-common-dir patch and manifest, pass it to `pulse.py retry
+   --pending-repair`, and verify/apply it in the next clean worktree before
+   focused validation. Stop immediately on any `PAUSE_*` or `STOP_*`.
 9. For `WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head `REQUEST_REVIEW`, choose one
    completion timestamp immediately before successor creation without calling
    `complete-wake` yet.
 10. Create one new standalone successor task with the unchanged prompt, the
    persisted model/reasoning configuration, and a cadence-only recurring
-   schedule. Do not submit `DTSTART` or hand-write a raw
-   scheduling directive. Inspect the host-tool result, then read back the
-   successor's persisted ID, prompt, cadence, and creation timestamp. Require
-   its creation timestamp to be at or after the chosen completion timestamp,
-   and derive its first run as creation time plus cadence.
+   schedule. Do not submit `DTSTART` or hand-write a raw scheduling directive.
+   Inspect the host-tool result, then read back the successor's persisted ID,
+   prompt and SHA-256, scheduler kind (`cron`), conversation mode
+   (`standalone`), absent `target_thread_id`, model, reasoning settings,
+   cadence, and creation timestamp. Require every field to match the
+   canonical handoff, require its creation timestamp to be at or after the
+   chosen completion timestamp, and derive its first run as creation time plus
+   cadence.
 11. After successor creation and readback succeed, call `complete-wake` exactly
     once with the same completion timestamp, `--schedule-reanchored`,
     `--scheduled-created-at`, the derived `--scheduled-first-run`, and
@@ -572,7 +606,9 @@ invocation:
 12. If successor creation or readback fails, call `complete-wake` exactly once
     without `--schedule-reanchored`; this persists the re-anchor blocker and
     keeps the delivered task paused.
-13. Immediately report the result of either `complete-wake` call and end this
+13. If `complete-wake` raises after a successor was created and verified, pause
+    that exact successor and confirm cleanup before propagating the failure.
+14. Immediately report the result of either `complete-wake` call and end this
     host invocation. Do not list scheduler tasks, reread the checkpoint, roll
     or verify a successor, or call `begin-wake` again. On any other tool
     failure, `PAUSE_*`, terminal result, or unproven success, leave the task
