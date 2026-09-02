@@ -43,7 +43,7 @@ from state_model import (
 
 DEFAULT_CADENCE_SECONDS = 600
 DEFAULT_MODE_SCHEMA_VERSION = 2
-STANDALONE_TASK_PROTOCOL_VERSION = 4
+STANDALONE_TASK_PROTOCOL_VERSION = 5
 SCHEDULE_REANCHOR_TOLERANCE = timedelta(seconds=1)
 HEARTBEAT_BATCH_ORDER = (
     "record-outcome",
@@ -102,10 +102,12 @@ def build_standalone_task_handoff(repository: str, pr_number: int) -> dict[str, 
         "immediately before push; explicitly stage intended paths; commit and push "
         "at most once; verify the published head; then record the publication result. "
         "Leave push-created review artifacts for a later wake. When rearming, create "
-        "one new standalone successor task with the unchanged prompt, compute its "
-        "first run from this wake's completion time, round it up to scheduler "
-        "precision, read back its persisted first run, and pass that timestamp to "
-        "complete-wake; never reuse an earlier DTSTART. For every scheduled "
+        "one new standalone successor task with the unchanged prompt and a host-"
+        "supported cadence-only recurring schedule; do not submit DTSTART. Read back "
+        "the persisted task ID, creation timestamp, unchanged prompt, and cadence. "
+        "Derive the first run from persisted created_at plus cadence, then pass both "
+        "timestamps to complete-wake. The creation timestamp must be at or after this "
+        "wake's completion, so the successor cannot run early. For every scheduled "
         "delivery, pass its exact task ID to begin-wake as --delivered-task-id "
         "so pulse.py authenticates the persisted successor. Preserve non-target "
         "threads; never merge, enable auto-merge, change the base, force-push, or "
@@ -126,6 +128,8 @@ def build_standalone_task_handoff(repository: str, pr_number: int) -> dict[str, 
         "checkout_mode": "new-linked-worktree-per-wake",
         "configured_checkout_role": "read-only-repository-locator",
         "reuse_worktree": False,
+        "schedule_anchor_mode": "persisted-created-at-plus-cadence",
+        "submit_dtstart": False,
         "prompt_sha256": prompt_digest,
         "batch_order": list(HEARTBEAT_BATCH_ORDER),
         "prompt": prompt,
@@ -1328,10 +1332,11 @@ def complete_wake(
     now: str,
     cadence_seconds: int | None = None,
     schedule_next_wake: Callable[[str], object] | None = None,
+    schedule_anchor_created_at: str | None = None,
     scheduled_task_id: str | None = None,
     completion_failure: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Complete one wake after proving first-run time and successor identity."""
+    """Complete one wake after proving schedule anchoring and successor identity."""
     now = _iso(now)
     state = ensure_default_lifecycle(checkpoint)
     persisted_cadence = state["automation_policy"]["cadence_seconds"]
@@ -1346,6 +1351,8 @@ def complete_wake(
         not isinstance(scheduled_task_id, str) or not scheduled_task_id.strip()
     ):
         raise ValueError("Scheduled task ID must be a non-empty string")
+    if schedule_anchor_created_at is not None and schedule_next_wake is None:
+        raise ValueError("A schedule creation anchor requires re-anchor confirmation")
     if state.get("last_wake_id") == wake_id and state.get("active_wake_id") is None and state.get("last_wake_result"):
         return state, deepcopy(state["last_wake_result"])
     _require_active_wake(state, wake_id, allow_retry_completion=True)
@@ -1438,6 +1445,32 @@ def complete_wake(
         return state, return_state_result
 
     raw_observed_first_run = observed_first_run
+    parsed_anchor: datetime | None = None
+    if schedule_anchor_created_at is not None:
+        try:
+            parsed_anchor = _utc(schedule_anchor_created_at)
+        except (TypeError, ValueError):
+            parsed_anchor = None
+        if parsed_anchor is None or parsed_anchor < completed_at:
+            return_state_result = _pause(
+                state,
+                reason_code="scheduled_task_anchor_mismatch",
+                now=now,
+                evidence={
+                    "wake_completed_at": now,
+                    "scheduled_task_created_at": schedule_anchor_created_at,
+                },
+                mutation_occurred=mutation_occurred,
+            )
+            state["next_not_before"] = next_not_before
+            state["last_wake_id"] = wake_id
+            return state, return_state_result
+        next_not_before = _ceil_to_second(
+            parsed_anchor + timedelta(seconds=effective_cadence)
+        ).isoformat()
+        state["next_not_before"] = next_not_before
+        result["next_not_before"] = next_not_before
+        result["scheduled_task_created_at"] = parsed_anchor.isoformat()
     try:
         observed_first_run = _utc(str(raw_observed_first_run))
     except (TypeError, ValueError):
@@ -1632,8 +1665,10 @@ def parse_args() -> argparse.Namespace:
             "Host handoff:\n"
             "  pause the delivered standalone task before begin-wake; pass --pause-confirmed "
             "after success.\n"
-            "  create/read back one standalone successor before complete-wake "
-            "--schedule-reanchored --scheduled-first-run ACTUAL_FIRST_RUN "
+            "  create/read back one cadence-only standalone successor before "
+            "complete-wake --schedule-reanchored "
+            "--scheduled-created-at PERSISTED_CREATED_AT "
+            "--scheduled-first-run DERIVED_FIRST_RUN "
             "--scheduled-task-id SUCCESSOR_ID."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1749,11 +1784,21 @@ def parse_args() -> argparse.Namespace:
     complete.add_argument(
         "--schedule-reanchored",
         action="store_true",
-        help="Confirm that the host re-anchor call succeeded and its first run was read back",
+        help="Confirm that the host successor create and schedule readback succeeded",
     )
     complete.add_argument(
         "--scheduled-first-run",
-        help="Actual persisted first-run timestamp read back after the host re-anchor",
+        help=(
+            "Verified first run, either persisted directly or derived from the "
+            "persisted task creation anchor plus cadence"
+        ),
+    )
+    complete.add_argument(
+        "--scheduled-created-at",
+        help=(
+            "Persisted successor creation timestamp when the host anchors a "
+            "recurring schedule at task creation"
+        ),
     )
     complete.add_argument(
         "--scheduled-task-id",
@@ -2002,6 +2047,7 @@ def main() -> None:
                 if args.schedule_reanchored
                 else None
             ),
+            schedule_anchor_created_at=args.scheduled_created_at,
             scheduled_task_id=args.scheduled_task_id,
             completion_failure=completion_failure,
         )

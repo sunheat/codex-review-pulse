@@ -43,13 +43,13 @@ class StandaloneTaskHost(Protocol):
         self,
         *,
         prompt: str,
-        first_run: str,
+        cadence_seconds: int,
         scheduler_kind: str,
         conversation_mode: str,
         target_thread_id: None,
         prompt_sha256: str,
     ) -> object:
-        """Create one future standalone task with the unchanged prompt."""
+        """Create one cadence-only standalone task anchored by persisted creation."""
 
     def read_task(self, task_id: str) -> Mapping[str, Any]:
         """Read normalized task metadata and the persisted first-run timestamp."""
@@ -57,7 +57,14 @@ class StandaloneTaskHost(Protocol):
 
 BeginWake = Callable[[str, str, bool, str | None], Mapping[str, Any]]
 CompleteWake = Callable[
-    [str, str, Callable[[str], object], str | None, Mapping[str, Any] | None],
+    [
+        str,
+        str,
+        Callable[[str], object],
+        str | None,
+        str | None,
+        Mapping[str, Any] | None,
+    ],
     Mapping[str, Any],
 ]
 
@@ -104,7 +111,7 @@ def _task_id(response: object) -> str:
 
 
 def _validate_task_readback(
-    task: Mapping[str, Any], *, prompt: str, prompt_sha256: str
+    task: Mapping[str, Any], *, prompt: str, prompt_sha256: str, cadence_seconds: int
 ) -> None:
     expected = {
         "scheduler_kind": "cron",
@@ -112,6 +119,7 @@ def _validate_task_readback(
         "target_thread_id": None,
         "prompt": prompt,
         "prompt_sha256": prompt_sha256,
+        "cadence_seconds": cadence_seconds,
     }
     for key, value in expected.items():
         if task.get(key) != value:
@@ -312,6 +320,7 @@ class StandaloneInvocation:
         now: str,
         actual_first_run: object,
         successor_id: str | None,
+        scheduled_created_at: str | None = None,
         completion_failure: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if self.wake_id is None:
@@ -322,6 +331,7 @@ class StandaloneInvocation:
                 now,
                 lambda _expected: actual_first_run,
                 successor_id,
+                scheduled_created_at,
                 completion_failure,
             )
         except Exception:
@@ -423,10 +433,6 @@ class StandaloneInvocation:
                     },
                 )
             completion = _utc(now)
-            expected_first_run = _ceil_to_second(
-                completion + timedelta(seconds=cadence_seconds)
-            ).isoformat()
-
             if action == "RUN_BATCH":
                 batch = checkpoint.get("active_batch")
                 publication = (
@@ -476,12 +482,13 @@ class StandaloneInvocation:
             successor_id: str | None = None
             actual_first_run: object = None
             observed_first_run: object = None
+            scheduled_created_at: str | None = None
             first_run_mismatch = False
             completion_failure: Mapping[str, Any] | None = None
             try:
                 response = self.host.schedule_standalone_task(
                     prompt=self.prompt,
-                    first_run=expected_first_run,
+                    cadence_seconds=cadence_seconds,
                     scheduler_kind="cron",
                     conversation_mode="standalone",
                     target_thread_id=None,
@@ -490,8 +497,25 @@ class StandaloneInvocation:
                 successor_id = _task_id(response)
                 task = self.host.read_task(successor_id)
                 _validate_task_readback(
-                    task, prompt=self.prompt, prompt_sha256=self.prompt_sha256
+                    task,
+                    prompt=self.prompt,
+                    prompt_sha256=self.prompt_sha256,
+                    cadence_seconds=cadence_seconds,
                 )
+                raw_created_at = task.get("created_at")
+                if not isinstance(raw_created_at, str) or not raw_created_at.strip():
+                    raise StandaloneInvocationError(
+                        "Standalone task readback returned no persisted creation time"
+                    )
+                created_at = _utc(raw_created_at)
+                if created_at < completion:
+                    raise StandaloneInvocationError(
+                        "Standalone task creation predates wake completion"
+                    )
+                scheduled_created_at = created_at.isoformat()
+                expected_first_run = _ceil_to_second(
+                    created_at + timedelta(seconds=cadence_seconds)
+                ).isoformat()
                 observed_first_run = task.get("first_run")
                 if not isinstance(observed_first_run, str) or not observed_first_run.strip():
                     raise StandaloneInvocationError(
@@ -525,5 +549,6 @@ class StandaloneInvocation:
                 now=now,
                 actual_first_run=actual_first_run,
                 successor_id=successor_id,
+                scheduled_created_at=scheduled_created_at,
                 completion_failure=completion_failure,
             )

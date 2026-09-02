@@ -68,6 +68,7 @@ class InMemoryHost:
         checkpoint_unreadable: bool = False,
         schedule_fails: bool = False,
         first_run: str | None = None,
+        created_at: str | None = None,
         pause_succeeds: bool = True,
         pause_results: tuple[bool, ...] | None = None,
         complete_raises: bool = False,
@@ -80,6 +81,8 @@ class InMemoryHost:
         self.checkpoint_unreadable = checkpoint_unreadable
         self.schedule_fails = schedule_fails
         self.first_run = first_run
+        self.created_at = created_at
+        self.next_creation_time: str | None = None
         self.pause_succeeds = pause_succeeds
         self.pause_results = pause_results
         self.pause_calls = 0
@@ -120,19 +123,27 @@ class InMemoryHost:
         self,
         *,
         prompt: str,
-        first_run: str,
+        cadence_seconds: int,
         scheduler_kind: str,
         conversation_mode: str,
         target_thread_id: None,
         prompt_sha256: str,
     ) -> object:
-        self.operations.append(("schedule-standalone", first_run))
+        self.operations.append(("schedule-standalone", str(cadence_seconds)))
         if self.schedule_fails:
             raise RuntimeError("scheduler rejected standalone task")
         task_id = f"task-{len(self.created_tasks) + 2}"
+        created_at = self.created_at or self.next_creation_time
+        if created_at is None:
+            raise AssertionError("test host requires a creation timestamp")
+        first_run = (
+            datetime.fromisoformat(created_at) + timedelta(seconds=cadence_seconds)
+        ).isoformat()
         self.created_tasks[task_id] = {
             "prompt": prompt,
             "first_run": first_run,
+            "created_at": created_at,
+            "cadence_seconds": cadence_seconds,
             "scheduler_kind": scheduler_kind,
             "conversation_mode": conversation_mode,
             "target_thread_id": target_thread_id,
@@ -203,6 +214,7 @@ class HostInvocation:
         now: str,
         schedule_next_wake,
         scheduled_task_id: str | None,
+        scheduled_created_at: str | None,
         completion_failure: dict[str, object] | None,
     ) -> dict[str, object]:
         self.host.operations.append(("complete-wake", scheduled_task_id or "unconfirmed"))
@@ -213,6 +225,7 @@ class HostInvocation:
             wake_id=wake_id,
             now=now,
             schedule_next_wake=schedule_next_wake,
+            schedule_anchor_created_at=scheduled_created_at,
             scheduled_task_id=scheduled_task_id,
             completion_failure=completion_failure,
         )
@@ -244,9 +257,13 @@ class HostInvocation:
     ) -> dict[str, object]:
         if not reanchor_succeeds:
             self.host.schedule_fails = True
+        completion_now = (
+            datetime.fromisoformat(self.invocation.now) + timedelta(minutes=1)
+        ).isoformat()
+        self.host.next_creation_time = completion_now
         return self.invocation.complete(
             action=action,
-            now=(datetime.fromisoformat(self.invocation.now) + timedelta(minutes=1)).isoformat(),
+            now=completion_now,
             cadence_seconds=cadence_seconds,
         )
 
@@ -347,6 +364,8 @@ class DefaultHostWakeContractTests(unittest.TestCase):
         self.assertEqual(host.created_tasks["task-2"]["scheduler_kind"], "cron")
         self.assertEqual(host.created_tasks["task-2"]["conversation_mode"], "standalone")
         self.assertIsNone(host.created_tasks["task-2"]["target_thread_id"])
+        self.assertEqual(host.created_tasks["task-2"]["created_at"], "2026-08-26T00:37:00+00:00")
+        self.assertEqual(host.created_tasks["task-2"]["cadence_seconds"], 600)
         self.assertEqual(host.created_tasks["task-2"]["first_run"], "2026-08-26T00:47:00+00:00")
         self.assertEqual(host.operations[:4], [
             ("pause-task", "task-1"),
@@ -438,7 +457,7 @@ class DefaultHostWakeContractTests(unittest.TestCase):
 
         self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
         self.assertEqual(result["reason_code"], "batch_publication_incomplete")
-        self.assertNotIn(("schedule-standalone", "2026-08-26T00:47:00+00:00"), host.operations)
+        self.assertNotIn(("schedule-standalone", "600"), host.operations)
         self.assertNotIn(("read-standalone", "task-2"), host.operations)
         self.assertEqual(host.operations[-2:], [
             ("checkpoint-read", "direct"),
@@ -467,7 +486,7 @@ class DefaultHostWakeContractTests(unittest.TestCase):
             result["evidence"],
             {"requested_action": "WAIT_REVIEW", "persisted_action": "RUN_BATCH"},
         )
-        self.assertNotIn(("schedule-standalone", "2026-08-26T00:47:00+00:00"), host.operations)
+        self.assertNotIn(("schedule-standalone", "600"), host.operations)
         self.assertTrue(invocation.ended)
 
     def test_completion_rejects_a_cadence_that_differs_from_the_checkpoint(self) -> None:
@@ -496,7 +515,7 @@ class DefaultHostWakeContractTests(unittest.TestCase):
                 "persisted_cadence_seconds": 1200,
             },
         )
-        self.assertNotIn(("schedule-standalone", "2026-08-26T00:47:00+00:00"), host.operations)
+        self.assertNotIn(("schedule-standalone", "600"), host.operations)
         self.assertTrue(invocation.ended)
 
     def test_unconfirmed_review_trigger_cannot_schedule_a_successor(self) -> None:
@@ -522,7 +541,7 @@ class DefaultHostWakeContractTests(unittest.TestCase):
                 self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
                 self.assertEqual(result["reason_code"], "review_trigger_not_confirmed")
                 self.assertNotIn(
-                    ("schedule-standalone", "2026-08-26T00:47:00+00:00"),
+                    ("schedule-standalone", "600"),
                     host.operations,
                 )
                 self.assertNotIn(("read-standalone", "task-2"), host.operations)
@@ -570,7 +589,7 @@ class DefaultHostWakeContractTests(unittest.TestCase):
         with self.assertRaises(StandaloneInvocationError):
             invocation.complete(reanchor_succeeds=True, action="STOP_TERMINAL")
 
-        self.assertNotIn(("schedule-standalone", "2026-08-26T00:47:00+00:00"), host.operations)
+        self.assertNotIn(("schedule-standalone", "600"), host.operations)
         self.assertNotIn(("complete-wake", "task-2"), host.operations)
 
     def test_failed_task_pause_stops_before_checkpoint_read(self) -> None:

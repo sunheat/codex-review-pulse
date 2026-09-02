@@ -34,14 +34,13 @@ drift is rejected.
 
 The host adapter's `--pause-confirmed` and `--schedule-reanchored` inputs are
 post-success confirmations only. They do not call or authorize a Codex
-automation operation. Pass `--schedule-reanchored` only after the standalone
-successor task is created and pair it with `--scheduled-first-run` containing
-the persisted first run read back from that successor, plus
-`--scheduled-task-id` containing its ID. The controller verifies that timestamp
-against its completion-relative expectation. Schedule timestamps are rounded
-up to the scheduler's representable precision; the ordered first-run check
-allows equality or a delay of at most one second. Comparisons without a
-logical ordering allow one second on either side.
+automation operation. The supported local-host path creates a cadence-only
+standalone successor without `DTSTART`, then reads back its persisted ID,
+prompt, cadence, and creation timestamp. Pass `--schedule-reanchored` with
+`--scheduled-created-at`, `--scheduled-first-run` derived from creation time
+plus cadence, and `--scheduled-task-id`. The controller requires the creation
+anchor not to predate wake completion and verifies the derived first run with
+scheduler-precision tolerance.
 
 Use a clean source repository and an exact release-candidate commit throughout
 the commands below. OpenAI documents `$HOME/.agents/skills` as the user-level
@@ -66,7 +65,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
 This extracts `skills/codex-review-pulse` from the named Git commit into
 `$env:USERPROFILE\.agents\skills\codex-review-pulse`. It does not copy the
 mutable working-tree files and does not create a symlink. The installed
-manifest records version `0.8.1`, the full source commit, and SHA-256 file
+manifest records version `0.8.2`, the full source commit, and SHA-256 file
 hashes. Verification independently reconstructs that inventory from the pinned
 Git commit, so changing both an installed file and its adjacent manifest does
 not reauthorize the modified bytes.
@@ -80,7 +79,7 @@ explicit alternate configured location.
 
 ```powershell
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
-  --expected-version 0.8.1 `
+  --expected-version 0.8.2 `
   --expected-source-commit $commit
 ```
 
@@ -99,7 +98,7 @@ python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_prefligh
   --repo OWNER/REPO `
   --pr NUMBER `
   --repository-path C:\path\to\target-repository `
-  --expected-skill-version 0.8.1 `
+  --expected-skill-version 0.8.2 `
   --expected-source-commit $commit `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector `

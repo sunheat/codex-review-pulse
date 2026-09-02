@@ -28,7 +28,7 @@ the old heartbeat activated too early, used fixed-cadence overlap, allowed a
 and continued after `PAUSE_BLOCKED`. Do not describe `0.4.0` as production
 ready or use its old scheduled-task protocol as the default.
 
-Version `0.8.1` is the Codex-first default clean-context scheduling candidate. Its
+Version `0.8.2` is the Codex-first default clean-context scheduling candidate. Its
 real scheduled-task and live GitHub integration remains unverified until an
 independent forward test completes; do not describe that integration as proven
 before then.
@@ -109,12 +109,12 @@ absorbing opt-out and cannot be resumed through `confirm-policy`.
 
 The host adapter may pass `--pause-confirmed` to `begin-wake` and
 `--schedule-reanchored` to `complete-wake` only after successful host-tool
-calls. The latter must be accompanied by `--scheduled-first-run` containing
-the actual persisted first run read back from the newly created standalone
-successor and `--scheduled-task-id` containing that successor's ID. These flags
-do not pause or schedule a Codex task themselves; a success boolean is never
-evidence that the host operation or completion-relative successor handoff
-succeeded.
+calls. For the supported cadence-only successor path, the latter must include
+`--scheduled-created-at` from the persisted successor record,
+`--scheduled-first-run` derived from that creation anchor plus the persisted
+cadence, and `--scheduled-task-id`. These flags do not pause or schedule a
+Codex task themselves; a success boolean is never evidence that the host
+operation or completion-relative successor handoff succeeded.
 
 ### Host invocation boundary
 
@@ -253,21 +253,27 @@ if snapshot.decision.next_action is PAUSE_* or STOP_*:
 
 # WAIT_REVIEW, WAIT_RETRY, or a successfully recorded same-head REQUEST_REVIEW
 # may re-anchor. WAIT_RETRY resumes the same frozen batch on the next wake.
-# Choose COMPLETION_NOW once and use it for both actions. RFC 5545 schedule
-# timestamps do not support fractional seconds, so round the computed first run
-# up to the scheduler's representable precision before creating the successor.
+# Choose COMPLETION_NOW immediately before creating the successor. The Codex
+# automation host accepts a cadence-only recurring schedule for immediate
+# create; do not inject DTSTART or hand-write raw scheduling directives.
 COMPLETION_NOW = current UTC time
-NEXT_NOT_BEFORE = ceil_to_scheduler_precision(COMPLETION_NOW + cadence_seconds)
 successor_result = host.create_standalone_task(
     kind=cron, conversation=standalone, target_thread_id=absent,
-    prompt=STANDALONE_HANDOFF.prompt, first_run=NEXT_NOT_BEFORE
+    prompt=STANDALONE_HANDOFF.prompt, cadence_seconds=cadence_seconds
 )
 if successor_result is success:
     SUCCESSOR_ID = successor_result.id
     try:
-        ACTUAL_FIRST_RUN = host.read_task(SUCCESSOR_ID).first_run
+        SUCCESSOR = host.read_task(SUCCESSOR_ID)
+        require SUCCESSOR.prompt == STANDALONE_HANDOFF.prompt
+        require SUCCESSOR.cadence_seconds == cadence_seconds
+        require SUCCESSOR.created_at >= COMPLETION_NOW
+        ACTUAL_FIRST_RUN = ceil_to_scheduler_precision(
+            SUCCESSOR.created_at + cadence_seconds
+        )
     except Exception:
-        # The task exists but its identity/first-run readback is unverified.
+        # The task exists but its identity, cadence, or creation anchor is
+        # unverified.
         # Pause that exact task before persisting the absorbing recovery state.
         try:
             cleanup_result = host.pause_task(SUCCESSOR_ID)
@@ -293,38 +299,9 @@ if successor_result is success:
           --completion-failure FAILURE_FILE
         report completion
         END_INVOCATION
-    if not first_run_matches(NEXT_NOT_BEFORE, ACTUAL_FIRST_RUN):
-        # The successor exists, but its first run is outside the permitted
-        # completion-relative window. Pause that exact task before persisting
-        # the absorbing recovery state.
-        try:
-            cleanup_result = host.pause_task(SUCCESSOR_ID)
-        except Exception:
-            cleanup_result = None
-        PAUSE_CONFIRMED = cleanup_result is success
-        FAILURE_FILE = write_json(
-            {
-                "reason_code": (
-                    "scheduled_task_reanchor_mismatch"
-                    if PAUSE_CONFIRMED
-                    else "successor_cleanup_unconfirmed"
-                ),
-                "evidence": {
-                    "successor_task_id": SUCCESSOR_ID,
-                    "expected_first_run": NEXT_NOT_BEFORE,
-                    "observed_first_run": ACTUAL_FIRST_RUN,
-                    "pause_confirmed": PAUSE_CONFIRMED,
-                },
-            }
-        )
-        # Do not pass --schedule-reanchored or --scheduled-task-id: this
-        # successor was not verified as the active next task.
-        completion = PULSE TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
-          --completion-failure FAILURE_FILE
-        report completion
-        END_INVOCATION
     completion = PULSE TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
-      --schedule-reanchored --scheduled-first-run ACTUAL_FIRST_RUN \
+      --schedule-reanchored --scheduled-created-at SUCCESSOR.created_at \
+      --scheduled-first-run ACTUAL_FIRST_RUN \
       --scheduled-task-id SUCCESSOR_ID
     report completion
     END_INVOCATION
@@ -469,17 +446,21 @@ the next wake. Set:
 next_not_before = ceil_to_scheduler_precision(wake_completed_at + cadence_seconds)
 ```
 
-Never rely on pausing and reactivating a fixed RRULE to reset its clock. The
-host must re-anchor the next run to `next_not_before`. If the host cannot prove
-that completion-relative schedule, keep the disposition `PAUSED` and report
-`PAUSE_BLOCKED / scheduled_task_reanchor_unavailable`. The persisted first run
-is compared as a UTC instant. Because the first run is ordered after completion,
-the observed value may be equal to or at most one second later than
-`next_not_before`; an earlier value or a larger delay reports
-`PAUSE_BLOCKED / scheduled_task_reanchor_mismatch`. For comparisons without a
-logical ordering, the bounded tolerance is one second on either side. These
-tolerances cover representation precision only and never permit reuse of an
-earlier `DTSTART`.
+Never rely on pausing and reactivating a fixed recurring task to reset its
+clock, and do not submit `DTSTART` during immediate automation creation. Create
+one new cadence-only successor immediately after choosing `wake_completed_at`.
+Read back its persisted ID, prompt, cadence, and `created_at`; require
+`created_at >= wake_completed_at`, then derive:
+
+```text
+next_not_before = ceil_to_scheduler_precision(created_at + cadence_seconds)
+```
+
+This permits ordinary host-tool creation latency without allowing an early
+wake. If the host cannot prove the creation anchor and cadence, keep the
+disposition `PAUSED` and report the corresponding re-anchor/readback blocker.
+Direct first-run hosts remain backward compatible: their persisted first run
+must equal the completion-relative expectation or be at most one second later.
 
 Multiple pushes that finish before the next wake naturally coalesce into the
 latest head accepted by that wake's stable GraphQL snapshot. A head change
@@ -535,17 +516,19 @@ invocation:
 8. Run this wake's snapshot, frozen batch, repair/retry, outcome/resolve, and
    aggregate publication work. Stop immediately on any `PAUSE_*` or `STOP_*`.
 9. For `WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head `REQUEST_REVIEW`, choose one
-   completion timestamp and compute
-   `next_not_before = ceil_to_scheduler_precision(wake_completed_at + cadence_seconds)` without calling
+   completion timestamp immediately before successor creation without calling
    `complete-wake` yet.
-10. Create one new standalone successor task with the unchanged prompt, inspect
-   the host-tool result, then read back the successor's actual persisted first
-   run and ID. Treat creation and readback as one host handoff.
+10. Create one new standalone successor task with the unchanged prompt and a
+   cadence-only recurring schedule. Do not submit `DTSTART` or hand-write a raw
+   scheduling directive. Inspect the host-tool result, then read back the
+   successor's persisted ID, prompt, cadence, and creation timestamp. Require
+   its creation timestamp to be at or after the chosen completion timestamp,
+   and derive its first run as creation time plus cadence.
 11. After successor creation and readback succeed, call `complete-wake` exactly
     once with the same completion timestamp, `--schedule-reanchored`,
-    `--scheduled-first-run ACTUAL_FIRST_RUN`, and `--scheduled-task-id` for the
-    successor. A stale or mismatched readback persists a blocker and must not
-    authorize another wake.
+    `--scheduled-created-at`, the derived `--scheduled-first-run`, and
+    `--scheduled-task-id` for the successor. A stale or mismatched readback
+    persists a blocker and must not authorize another wake.
 12. If successor creation or readback fails, call `complete-wake` exactly once
     without `--schedule-reanchored`; this persists the re-anchor blocker and
     keeps the delivered task paused.

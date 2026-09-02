@@ -281,6 +281,7 @@ class PulseCliTests(unittest.TestCase):
         self.assertIn("--policy-json", configure_help)
         self.assertIn("--schedule-reanchored", complete_help)
         self.assertIn("--scheduled-first-run", complete_help)
+        self.assertIn("--scheduled-created-at", complete_help)
         self.assertIn("--completion-failure", complete_help)
 
     def test_canonical_heartbeat_prompt_is_rendered_without_a_checkpoint(self) -> None:
@@ -301,6 +302,10 @@ class PulseCliTests(unittest.TestCase):
             result["configured_checkout_role"], "read-only-repository-locator"
         )
         self.assertFalse(result["reuse_worktree"])
+        self.assertEqual(
+            result["schedule_anchor_mode"], "persisted-created-at-plus-cadence"
+        )
+        self.assertFalse(result["submit_dtstart"])
         self.assertNotIn("same heartbeat", result["prompt"].lower())
 
         alias = harness.json_output(harness.run("standalone-task-prompt"))
@@ -699,6 +704,24 @@ class PulseCliTests(unittest.TestCase):
         self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
         self.assertEqual(state["next_not_before"], "2026-08-26T00:36:00+00:00")
         self.assertEqual(state["scheduled_task_id"], "task-2")
+
+        creation_anchored = CliHarness(self)
+        creation_anchored.begin_and_snapshot()
+        result = creation_anchored.json_output(
+            creation_anchored.run(
+                "complete-wake",
+                "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:26:02.250000+00:00",
+                "--scheduled-first-run",
+                "2026-08-26T00:36:03+00:00",
+                "--scheduled-task-id",
+                "task-3",
+                now="2026-08-26T00:26:00+00:00",
+            )
+        )
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        self.assertEqual(result["next_not_before"], "2026-08-26T00:36:03+00:00")
 
         stale = CliHarness(self)
         stale.begin_and_snapshot()
