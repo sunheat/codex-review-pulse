@@ -296,6 +296,8 @@ class PulseCliTests(unittest.TestCase):
             result["batch_order"].index("commit"),
         )
         self.assertEqual(result["conversation_mode"], "standalone")
+        self.assertEqual(result["model"], "gpt-5.6-luna")
+        self.assertEqual(result["reasoning_effort"], "xhigh")
         self.assertIsNone(result["target_thread_id"])
         self.assertEqual(result["checkout_mode"], "new-linked-worktree-per-wake")
         self.assertEqual(
@@ -310,6 +312,16 @@ class PulseCliTests(unittest.TestCase):
 
         alias = harness.json_output(harness.run("standalone-task-prompt"))
         self.assertEqual(alias, result)
+
+        custom = harness.json_output(
+            harness.run(
+                "--policy-json",
+                '{"model":"gpt-5.6-terra","reasoning_effort":"medium"}',
+                "standalone-task-prompt",
+            )
+        )
+        self.assertEqual(custom["model"], "gpt-5.6-terra")
+        self.assertEqual(custom["reasoning_effort"], "medium")
 
     def test_public_begin_wake_authenticates_the_delivered_task(self) -> None:
         harness = CliHarness(self)
@@ -443,6 +455,20 @@ class PulseCliTests(unittest.TestCase):
         self.assertEqual(state["automation_policy"]["max_wakes"], 8)
         self.assertFalse(state["automation_policy"]["allow_test_changes"])
         self.assertEqual(state["automation_policy"]["notifications"], "every-wake")
+
+        model_update = harness.json_output(
+            harness.run(
+                "configure-policy",
+                "--policy-json",
+                '{"model":"gpt-5.6-terra","reasoning_effort":"medium"}',
+            )
+        )
+        self.assertEqual(model_update["next_action"], "POLICY_UPDATED")
+        state = load_checkpoint(
+            checkpoint_path("owner/repo", 17, repository_path=harness.checkout)
+        )
+        self.assertEqual(state["automation_policy"]["model"], "gpt-5.6-terra")
+        self.assertEqual(state["automation_policy"]["reasoning_effort"], "medium")
 
     def test_confirm_policy_resumes_a_supervised_frozen_batch(self) -> None:
         harness = CliHarness(

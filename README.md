@@ -30,7 +30,7 @@ wake, and continued after `PAUSE_BLOCKED` by clearing a latch with a generated
 recovery authorization. The old scheduled-task semantics must not be used as
 the default or described as production-ready.
 
-Version `0.8.2` is the current Codex-first default clean-context scheduling candidate.
+Version `0.8.3` is the current Codex-first default clean-context scheduling candidate.
 Its real scheduled-task and live GitHub integration remains unverified until an
 independent forward test completes.
 
@@ -86,7 +86,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py update \
   --source-repository . \
   --source-commit "$commit"
 python "$HOME/.agents/skills/codex-review-pulse/scripts/manage_pilot_install.py" verify \
-  --expected-version 0.8.2 \
+  --expected-version 0.8.3 \
   --expected-source-commit "$commit"
 ```
 
@@ -104,7 +104,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
   --source-repository . `
   --source-commit $commit
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
-  --expected-version 0.8.2 `
+  --expected-version 0.8.3 `
   --expected-source-commit $commit
 ```
 
@@ -115,7 +115,7 @@ no other runner targets the PR:
 ```powershell
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_preflight.py `
   --repo OWNER/REPO --pr NUMBER `
-  --expected-skill-version 0.8.2 `
+  --expected-skill-version 0.8.3 `
   --expected-source-commit $commit `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector `
@@ -168,6 +168,33 @@ prompt-supplied limits are persisted and stop with `STOP_POLICY_LIMIT`. All
 other stop, pause, recovery, closed, expired, and unknown results remain
 paused. See the
 [default Skill](skills/codex-review-pulse/SKILL.md).
+
+### Task model configuration
+
+The default path exposes the scheduled task's model settings through the
+persisted `automation_policy`. Its defaults are:
+
+```json
+{"model":"gpt-5.6-luna","reasoning_effort":"xhigh"}
+```
+
+The same fields can be supplied in `--policy-json` for the initial
+`standalone-task-prompt` or `begin-wake`, or changed later with
+`configure-policy` when no wake or frozen batch is active. For example:
+
+```powershell
+python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pulse.py `
+  --repo OWNER/REPO --pr NUMBER `
+  --policy-json '{"model":"gpt-5.6-luna","reasoning_effort":"xhigh"}' `
+  standalone-task-prompt
+```
+
+`standalone-task-prompt` returns these values for the host to map to its
+scheduled-task fields (`model` and `reasoningEffort`). The host must apply the
+same values when creating each standalone successor, and the program verifies
+them during successor readback. A policy update affects later successors; it
+does not mutate an already-created task. Model availability remains a host
+capability and is not hard-coded in the repository.
 
 Each delivery also creates a new clean linked worktree at the independently
 verified remote PR head. The scheduler's configured project checkout is only a

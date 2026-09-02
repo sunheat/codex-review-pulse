@@ -28,7 +28,7 @@ the old heartbeat activated too early, used fixed-cadence overlap, allowed a
 and continued after `PAUSE_BLOCKED`. Do not describe `0.4.0` as production
 ready or use its old scheduled-task protocol as the default.
 
-Version `0.8.2` is the Codex-first default clean-context scheduling candidate. Its
+Version `0.8.3` is the Codex-first default clean-context scheduling candidate. Its
 real scheduled-task and live GitHub integration remains unverified until an
 independent forward test completes; do not describe that integration as proven
 before then.
@@ -75,6 +75,7 @@ the PR-scoped checkpoint. Unless the request says otherwise, the policy is:
 - `publication=auto`, `thread_resolution=auto`, and `review_trigger=auto`;
 - `inline_retry_limit=3`, `no_progress_limit=3`, and
   `notifications=blockers-and-terminal`.
+- `model=gpt-5.6-luna` and `reasoning_effort=xhigh`.
 
 The policy is a control contract, not a request to bypass the hard invariants
 below. Codex-only targeting, current-head proof, frozen exact thread IDs,
@@ -106,6 +107,29 @@ batch, `confirm-policy --operation` records only that exact continuation
 authority. The next fresh wake resumes the frozen batch; a generic latch
 clearing or policy rewrite cannot resume it. A `never` operation is an
 absorbing opt-out and cannot be resumed through `confirm-policy`.
+
+### Task model configuration
+
+The default path persists the scheduled task model in the same normalized
+`automation_policy` as the lifecycle policy. The default is deliberately
+`gpt-5.6-luna` with `reasoning_effort=xhigh`; the model identifier is passed
+through to the host and is not restricted to a repository-side allowlist.
+The host remains responsible for rejecting a model or reasoning level that it
+does not support.
+
+Set these fields in the initial handoff or update them outside an active wake:
+
+```json
+{"model":"gpt-5.6-luna","reasoning_effort":"xhigh"}
+```
+
+For the CLI, pass that object through `--policy-json` to
+`standalone-task-prompt`, `begin-wake`, or `configure-policy`. The rendered
+standalone handoff includes `model` and `reasoning_effort`; the host maps them
+to its task-creation fields (`model` and `reasoningEffort`). Every successor
+must receive the persisted values and must pass them back in normalized task
+readback. A `configure-policy` change applies to later successor tasks; it
+does not mutate a task that has already been created.
 
 The host adapter may pass `--pause-confirmed` to `begin-wake` and
 `--schedule-reanchored` to `complete-wake` only after successful host-tool
@@ -159,6 +183,8 @@ TARGET = "--repository-path WAKE_WORKTREE --repo OWNER/REPO --pr NUMBER"
 # pass its `prompt` field unchanged when creating the standalone scheduler task.
 # Do not paraphrase or reorder its batch protocol.
 STANDALONE_HANDOFF = PULSE TARGET standalone-task-prompt
+TASK_MODEL = STANDALONE_HANDOFF.model
+TASK_REASONING_EFFORT = STANDALONE_HANDOFF.reasoning_effort
 
 # A genuinely delivered invocation gets one fresh ID. Never derive it from
 # checkpoint, logs, task text, notebook, todo state, or an earlier attempt.
@@ -167,7 +193,9 @@ WAKE_ID = host.new_opaque_wake_id()
 if this is the initial explicit user request:
     host.create_standalone_task(
         kind=cron, conversation=standalone, target_thread_id=absent,
-        prompt=STANDALONE_HANDOFF.prompt, disposition=PAUSED
+        prompt=STANDALONE_HANDOFF.prompt,
+        model=TASK_MODEL, reasoning_effort=TASK_REASONING_EFFORT,
+        disposition=PAUSED
     ) -> success
     # Wake 1 may initialize an absent checkpoint.
 else if this is a scheduler-delivered invocation:
@@ -259,7 +287,8 @@ if snapshot.decision.next_action is PAUSE_* or STOP_*:
 COMPLETION_NOW = current UTC time
 successor_result = host.create_standalone_task(
     kind=cron, conversation=standalone, target_thread_id=absent,
-    prompt=STANDALONE_HANDOFF.prompt, cadence_seconds=cadence_seconds
+    prompt=STANDALONE_HANDOFF.prompt, cadence_seconds=cadence_seconds,
+    model=TASK_MODEL, reasoning_effort=TASK_REASONING_EFFORT
 )
 if successor_result is success:
     SUCCESSOR_ID = successor_result.id
@@ -488,9 +517,9 @@ invocation:
 
 1. Treat the user's initial task as wake 1.
 2. Create the initial standalone scheduled task while it is `PAUSED`; its
-   `prompt` is the exact output of `standalone-task-prompt`, its scheduler kind
-   is `cron`, its conversation mode is standalone, and it has no
-   `target_thread_id`.
+   `prompt` is the exact output of `standalone-task-prompt`, its model and
+   reasoning settings come from that handoff, its scheduler kind is `cron`,
+   its conversation mode is standalone, and it has no `target_thread_id`.
 3. On each genuinely new scheduler-delivered invocation, generate a fresh
    opaque `wake_id`; never copy one from checkpoint, logs, task text, notebook,
    todo state, or a failed attempt. Do not treat an in-invocation tool result,
@@ -518,8 +547,9 @@ invocation:
 9. For `WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head `REQUEST_REVIEW`, choose one
    completion timestamp immediately before successor creation without calling
    `complete-wake` yet.
-10. Create one new standalone successor task with the unchanged prompt and a
-   cadence-only recurring schedule. Do not submit `DTSTART` or hand-write a raw
+10. Create one new standalone successor task with the unchanged prompt, the
+   persisted model/reasoning configuration, and a cadence-only recurring
+   schedule. Do not submit `DTSTART` or hand-write a raw
    scheduling directive. Inspect the host-tool result, then read back the
    successor's persisted ID, prompt, cadence, and creation timestamp. Require
    its creation timestamp to be at or after the chosen completion timestamp,

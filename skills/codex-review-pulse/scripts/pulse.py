@@ -43,7 +43,7 @@ from state_model import (
 
 DEFAULT_CADENCE_SECONDS = 600
 DEFAULT_MODE_SCHEMA_VERSION = 2
-STANDALONE_TASK_PROTOCOL_VERSION = 5
+STANDALONE_TASK_PROTOCOL_VERSION = 6
 SCHEDULE_REANCHOR_TOLERANCE = timedelta(seconds=1)
 HEARTBEAT_BATCH_ORDER = (
     "record-outcome",
@@ -72,10 +72,16 @@ class DefaultWakeError(RuntimeError):
     """Raised when a default wake attempts an operation after its boundary."""
 
 
-def build_standalone_task_handoff(repository: str, pr_number: int) -> dict[str, Any]:
+def build_standalone_task_handoff(
+    repository: str,
+    pr_number: int,
+    *,
+    policy: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return the immutable handoff for one clean-context scheduled task."""
     canonical = canonical_repository(repository)
     target = f"{canonical}#{pr_number}"
+    effective_policy = normalize_policy(policy)
     prompt = (
         "Use $codex-review-pulse from its loaded user-directory installation to "
         f"run exactly one automatic Codex review-remediation wake for {target} in "
@@ -120,6 +126,8 @@ def build_standalone_task_handoff(repository: str, pr_number: int) -> dict[str, 
         "protocol_version": STANDALONE_TASK_PROTOCOL_VERSION,
         "repository": canonical,
         "pull_request_number": pr_number,
+        "model": effective_policy["model"],
+        "reasoning_effort": effective_policy["reasoning_effort"],
         "scheduler_kind": "cron",
         "conversation_mode": "standalone",
         "reuse_conversation": False,
@@ -136,9 +144,14 @@ def build_standalone_task_handoff(repository: str, pr_number: int) -> dict[str, 
     }
 
 
-def build_heartbeat_handoff(repository: str, pr_number: int) -> dict[str, Any]:
+def build_heartbeat_handoff(
+    repository: str,
+    pr_number: int,
+    *,
+    policy: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Backward-compatible alias for the standalone task handoff."""
-    return build_standalone_task_handoff(repository, pr_number)
+    return build_standalone_task_handoff(repository, pr_number, policy=policy)
 
 
 def _policy_pause(state: dict[str, Any], *, now: str, operation: str) -> dict[str, Any]:
@@ -1715,7 +1728,10 @@ def parse_args() -> argparse.Namespace:
     begin.add_argument(
         "--policy-json",
         dest="command_policy_json",
-        help="JSON object of prompt-derived policy overrides for the initial wake",
+        help=(
+            "JSON object of prompt-derived policy overrides for the initial wake; "
+            "supports model and reasoning_effort"
+        ),
     )
 
     commands.add_parser("snapshot", help="Fetch and normalize one stable PR snapshot")
@@ -1757,7 +1773,10 @@ def parse_args() -> argparse.Namespace:
     configure.add_argument(
         "--policy-json",
         dest="command_policy_json",
-        help="JSON object of prompt-derived policy overrides",
+        help=(
+            "JSON object of prompt-derived policy overrides; supports model and "
+            "reasoning_effort"
+        ),
     )
 
     confirm = commands.add_parser(
@@ -1816,7 +1835,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--policy-json",
         dest="root_policy_json",
-        help="JSON object of prompt-derived policy overrides (initial wake or configure-policy)",
+        help=(
+            "JSON object of prompt-derived policy overrides (initial wake or "
+            "configure-policy), including model and reasoning_effort"
+        ),
     )
     args = parser.parse_args()
     command_policy_json = getattr(args, "command_policy_json", None)
@@ -1844,7 +1866,11 @@ def main() -> None:
         )
         print(
             json.dumps(
-                build_standalone_task_handoff(repository, pr_number),
+                build_standalone_task_handoff(
+                    repository,
+                    pr_number,
+                    policy=policy_overrides,
+                ),
                 indent=2,
                 sort_keys=True,
             )

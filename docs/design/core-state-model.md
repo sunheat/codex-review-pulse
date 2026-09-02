@@ -61,6 +61,14 @@ repeated unchanged validation signatures reach `PAUSE_BLOCKED`. The
 mutation-free operation. These are default-mode policy fields, not hardened
 run-contract parity.
 
+The policy also persists the standalone task's `model` and
+`reasoning_effort`. They default to `gpt-5.6-luna` and `xhigh`, can be
+overridden through the same `--policy-json` and `configure-policy` interfaces,
+and are included in the policy digest. The standalone host receives these
+values when it creates a successor and must verify them in task readback; the
+repository does not maintain a model allowlist because availability is a host
+capability.
+
 ## Separation of concerns
 
 `scripts/fetch_pr_state.py` performs read-only GitHub retrieval. It passes raw

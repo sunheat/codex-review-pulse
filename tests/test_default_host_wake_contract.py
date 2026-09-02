@@ -33,12 +33,18 @@ def review_snapshot(*, eyes: bool = False) -> dict[str, object]:
     }
 
 
-def waiting_checkpoint() -> dict[str, object]:
+def waiting_checkpoint(
+    *, model: str = "gpt-5.6-luna", reasoning_effort: str = "xhigh"
+) -> dict[str, object]:
     state, _ = pulse.begin_wake(
         empty_checkpoint("Owner/Repo", 17),
         wake_id="seed-wake",
         now=NOW,
         pause_heartbeat=lambda: True,
+        policy_overrides={
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+        },
     )
     state, _ = pulse.record_snapshot(
         state,
@@ -124,6 +130,8 @@ class InMemoryHost:
         *,
         prompt: str,
         cadence_seconds: int,
+        model: str,
+        reasoning_effort: str,
         scheduler_kind: str,
         conversation_mode: str,
         target_thread_id: None,
@@ -144,6 +152,8 @@ class InMemoryHost:
             "first_run": first_run,
             "created_at": created_at,
             "cadence_seconds": cadence_seconds,
+            "model": model,
+            "reasoning_effort": reasoning_effort,
             "scheduler_kind": scheduler_kind,
             "conversation_mode": conversation_mode,
             "target_thread_id": target_thread_id,
@@ -366,6 +376,8 @@ class DefaultHostWakeContractTests(unittest.TestCase):
         self.assertIsNone(host.created_tasks["task-2"]["target_thread_id"])
         self.assertEqual(host.created_tasks["task-2"]["created_at"], "2026-08-26T00:37:00+00:00")
         self.assertEqual(host.created_tasks["task-2"]["cadence_seconds"], 600)
+        self.assertEqual(host.created_tasks["task-2"]["model"], "gpt-5.6-luna")
+        self.assertEqual(host.created_tasks["task-2"]["reasoning_effort"], "xhigh")
         self.assertEqual(host.created_tasks["task-2"]["first_run"], "2026-08-26T00:47:00+00:00")
         self.assertEqual(host.operations[:4], [
             ("pause-task", "task-1"),
@@ -373,6 +385,24 @@ class DefaultHostWakeContractTests(unittest.TestCase):
             ("begin-wake", "fresh-wake-2"),
             ("snapshot", "fresh-wake-2"),
         ])
+
+    def test_successor_reuses_the_persisted_model_configuration(self) -> None:
+        host = InMemoryHost(
+            state=waiting_checkpoint(
+                model="gpt-5.6-terra", reasoning_effort="medium"
+            ),
+            wake_ids=("fresh-wake-2",),
+        )
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+        invocation.begin()
+        invocation.snapshot()
+
+        invocation.complete(reanchor_succeeds=True)
+
+        self.assertEqual(host.created_tasks["task-2"]["model"], "gpt-5.6-terra")
+        self.assertEqual(
+            host.created_tasks["task-2"]["reasoning_effort"], "medium"
+        )
 
     def test_successor_creation_failure_completes_once_and_keeps_checkpoint_paused(self) -> None:
         host = InMemoryHost(

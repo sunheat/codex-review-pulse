@@ -15,6 +15,8 @@ import hashlib
 from threading import RLock
 from typing import Any, Callable, Mapping, Protocol
 
+from default_policy import PolicyError, normalize_policy
+
 
 REARM_ACTIONS = {"WAIT_REVIEW", "WAIT_RETRY", "REQUEST_REVIEW", "RUN_BATCH"}
 
@@ -44,6 +46,8 @@ class StandaloneTaskHost(Protocol):
         *,
         prompt: str,
         cadence_seconds: int,
+        model: str,
+        reasoning_effort: str,
         scheduler_kind: str,
         conversation_mode: str,
         target_thread_id: None,
@@ -111,7 +115,13 @@ def _task_id(response: object) -> str:
 
 
 def _validate_task_readback(
-    task: Mapping[str, Any], *, prompt: str, prompt_sha256: str, cadence_seconds: int
+    task: Mapping[str, Any],
+    *,
+    prompt: str,
+    prompt_sha256: str,
+    cadence_seconds: int,
+    model: str,
+    reasoning_effort: str,
 ) -> None:
     expected = {
         "scheduler_kind": "cron",
@@ -120,6 +130,8 @@ def _validate_task_readback(
         "prompt": prompt,
         "prompt_sha256": prompt_sha256,
         "cadence_seconds": cadence_seconds,
+        "model": model,
+        "reasoning_effort": reasoning_effort,
     }
     for key, value in expected.items():
         if task.get(key) != value:
@@ -432,6 +444,20 @@ class StandaloneInvocation:
                         },
                     },
                 )
+            try:
+                normalized_policy = normalize_policy(policy)
+            except PolicyError as error:
+                return self._finish_completion(
+                    now=now,
+                    actual_first_run=None,
+                    successor_id=None,
+                    completion_failure={
+                        "reason_code": "checkpoint_invalid",
+                        "evidence": {"automation_policy_error": str(error)},
+                    },
+                )
+            model = normalized_policy["model"]
+            reasoning_effort = normalized_policy["reasoning_effort"]
             completion = _utc(now)
             if action == "RUN_BATCH":
                 batch = checkpoint.get("active_batch")
@@ -489,6 +515,8 @@ class StandaloneInvocation:
                 response = self.host.schedule_standalone_task(
                     prompt=self.prompt,
                     cadence_seconds=cadence_seconds,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
                     scheduler_kind="cron",
                     conversation_mode="standalone",
                     target_thread_id=None,
@@ -501,6 +529,8 @@ class StandaloneInvocation:
                     prompt=self.prompt,
                     prompt_sha256=self.prompt_sha256,
                     cadence_seconds=cadence_seconds,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
                 )
                 raw_created_at = task.get("created_at")
                 if not isinstance(raw_created_at, str) or not raw_created_at.strip():

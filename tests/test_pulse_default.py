@@ -59,7 +59,9 @@ class DefaultLifecycleTests(unittest.TestCase):
 
         self.assertEqual(handoff["repository"], "owner/repo")
         self.assertEqual(handoff["pull_request_number"], 17)
-        self.assertEqual(handoff["protocol_version"], 5)
+        self.assertEqual(handoff["protocol_version"], 6)
+        self.assertEqual(handoff["model"], "gpt-5.6-luna")
+        self.assertEqual(handoff["reasoning_effort"], "xhigh")
         self.assertEqual(handoff["scheduler_kind"], "cron")
         self.assertEqual(handoff["conversation_mode"], "standalone")
         self.assertFalse(handoff["reuse_conversation"])
@@ -106,6 +108,14 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertEqual(
             pulse.build_standalone_task_handoff("owner/repo", 17), handoff
         )
+
+        custom = pulse.build_standalone_task_handoff(
+            "owner/repo",
+            17,
+            policy={"model": "gpt-5.6-terra", "reasoning_effort": "medium"},
+        )
+        self.assertEqual(custom["model"], "gpt-5.6-terra")
+        self.assertEqual(custom["reasoning_effort"], "medium")
 
     def test_schema_one_checkpoint_migrates_to_policy_schema(self) -> None:
         legacy = empty_checkpoint("Owner/Repo", 17)
