@@ -65,7 +65,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
 This extracts `skills/codex-review-pulse` from the named Git commit into
 `$env:USERPROFILE\.agents\skills\codex-review-pulse`. It does not copy the
 mutable working-tree files and does not create a symlink. The installed
-manifest records version `0.8.3`, the full source commit, and SHA-256 file
+manifest records version `0.8.4`, the full source commit, and SHA-256 file
 hashes. Verification independently reconstructs that inventory from the pinned
 Git commit, so changing both an installed file and its adjacent manifest does
 not reauthorize the modified bytes.
@@ -79,7 +79,7 @@ explicit alternate configured location.
 
 ```powershell
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
-  --expected-version 0.8.3 `
+  --expected-version 0.8.4 `
   --expected-source-commit $commit
 ```
 
@@ -98,7 +98,7 @@ python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_prefligh
   --repo OWNER/REPO `
   --pr NUMBER `
   --repository-path C:\path\to\target-repository `
-  --expected-skill-version 0.8.3 `
+  --expected-skill-version 0.8.4 `
   --expected-source-commit $commit `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector `

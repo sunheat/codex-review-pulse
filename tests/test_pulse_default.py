@@ -59,7 +59,7 @@ class DefaultLifecycleTests(unittest.TestCase):
 
         self.assertEqual(handoff["repository"], "owner/repo")
         self.assertEqual(handoff["pull_request_number"], 17)
-        self.assertEqual(handoff["protocol_version"], 6)
+        self.assertEqual(handoff["protocol_version"], 7)
         self.assertEqual(handoff["model"], "gpt-5.6-luna")
         self.assertEqual(handoff["reasoning_effort"], "xhigh")
         self.assertEqual(handoff["scheduler_kind"], "cron")
@@ -95,6 +95,8 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertIn("new standalone task/conversation", handoff["prompt"])
         self.assertIn("AGENTS.md", handoff["prompt"])
         self.assertIn("new task-owned clean linked worktree", handoff["prompt"])
+        self.assertIn('"model":"gpt-5.6-luna"', handoff["prompt"])
+        self.assertIn('"reasoning_effort":"xhigh"', handoff["prompt"])
         self.assertIn("passing it as --repository-path", handoff["prompt"])
         self.assertIn("configured/main checkout", handoff["prompt"])
         self.assertIn("read-only repository locator", handoff["prompt"])
@@ -116,6 +118,8 @@ class DefaultLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(custom["model"], "gpt-5.6-terra")
         self.assertEqual(custom["reasoning_effort"], "medium")
+        self.assertIn('"model":"gpt-5.6-terra"', custom["prompt"])
+        self.assertIn('"reasoning_effort":"medium"', custom["prompt"])
 
     def test_schema_one_checkpoint_migrates_to_policy_schema(self) -> None:
         legacy = empty_checkpoint("Owner/Repo", 17)

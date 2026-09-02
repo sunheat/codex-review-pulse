@@ -28,7 +28,7 @@ the old heartbeat activated too early, used fixed-cadence overlap, allowed a
 and continued after `PAUSE_BLOCKED`. Do not describe `0.4.0` as production
 ready or use its old scheduled-task protocol as the default.
 
-Version `0.8.3` is the Codex-first default clean-context scheduling candidate. Its
+Version `0.8.4` is the Codex-first default clean-context scheduling candidate. Its
 real scheduled-task and live GitHub integration remains unverified until an
 independent forward test completes; do not describe that integration as proven
 before then.
@@ -88,8 +88,10 @@ persisted and enforced at the next wake.
 agent applies `execution_mode`, `allow_test_changes`, `inline_retry_limit`, and
 `notifications` while choosing local edits, validation, and reporting.
 
-Prompt instructions override these defaults. The host agent should convert them
-to the corresponding JSON fields before the initial `begin-wake`, for example:
+Prompt instructions override these defaults. The host agent must convert
+explicit model, reasoning, and wake-limit settings from the user's initial
+prompt to the corresponding JSON fields before rendering the initial handoff
+and before the initial `begin-wake`, for example:
 
 ```json
 {"max_wakes": 5, "deadline_at": "2026-08-27T10:00:00+10:00"}
@@ -130,6 +132,12 @@ to its task-creation fields (`model` and `reasoningEffort`). Every successor
 must receive the persisted values and must pass them back in normalized task
 readback. A `configure-policy` change applies to later successor tasks; it
 does not mutate a task that has already been created.
+
+The program does not guess model settings from arbitrary prose. A user can
+write, for example, `use model gpt-5.6-terra with reasoning_effort medium` in
+the initial request; the host agent converts that explicit request to
+`--policy-json`. The generated canonical prompt then records the structured
+values, and every successor reuses the persisted configuration.
 
 The host adapter may pass `--pause-confirmed` to `begin-wake` and
 `--schedule-reanchored` to `complete-wake` only after successful host-tool
@@ -179,10 +187,12 @@ PULSE = "python <loaded-skill-directory>/scripts/pulse.py"
 CONFIGURED_CHECKOUT = host project checkout, used only as a read-only locator
 TARGET = "--repository-path WAKE_WORKTREE --repo OWNER/REPO --pr NUMBER"
 
-# On the initial user turn, render the target-bound standalone-task prompt and
+# On the initial user turn, first convert explicit settings from the user's
+# request to POLICY_JSON, then render the target-bound standalone-task prompt
+# with that policy and
 # pass its `prompt` field unchanged when creating the standalone scheduler task.
 # Do not paraphrase or reorder its batch protocol.
-STANDALONE_HANDOFF = PULSE TARGET standalone-task-prompt
+STANDALONE_HANDOFF = PULSE TARGET --policy-json POLICY_JSON standalone-task-prompt
 TASK_MODEL = STANDALONE_HANDOFF.model
 TASK_REASONING_EFFORT = STANDALONE_HANDOFF.reasoning_effort
 
@@ -234,7 +244,7 @@ WAKE_WORKTREE = host.create_clean_linked_worktree(
 # On wake 1, begin-wake may create the checkpoint. On later wakes, the direct
 # preflight above is mandatory immediately before this call.
 if this is the initial explicit user request:
-    PULSE TARGET --wake-id WAKE_ID begin-wake \
+    PULSE TARGET --wake-id WAKE_ID --policy-json POLICY_JSON begin-wake \
       --pause-confirmed
 else if pause_result is confirmed:
     PULSE TARGET --wake-id WAKE_ID begin-wake \

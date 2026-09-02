@@ -30,7 +30,7 @@ wake, and continued after `PAUSE_BLOCKED` by clearing a latch with a generated
 recovery authorization. The old scheduled-task semantics must not be used as
 the default or described as production-ready.
 
-Version `0.8.3` is the current Codex-first default clean-context scheduling candidate.
+Version `0.8.4` is the current Codex-first default clean-context scheduling candidate.
 Its real scheduled-task and live GitHub integration remains unverified until an
 independent forward test completes.
 
@@ -86,7 +86,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py update \
   --source-repository . \
   --source-commit "$commit"
 python "$HOME/.agents/skills/codex-review-pulse/scripts/manage_pilot_install.py" verify \
-  --expected-version 0.8.3 \
+  --expected-version 0.8.4 \
   --expected-source-commit "$commit"
 ```
 
@@ -104,7 +104,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
   --source-repository . `
   --source-commit $commit
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
-  --expected-version 0.8.3 `
+  --expected-version 0.8.4 `
   --expected-source-commit $commit
 ```
 
@@ -115,7 +115,7 @@ no other runner targets the PR:
 ```powershell
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_preflight.py `
   --repo OWNER/REPO --pr NUMBER `
-  --expected-skill-version 0.8.3 `
+  --expected-skill-version 0.8.4 `
   --expected-source-commit $commit `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector `
@@ -195,6 +195,13 @@ same values when creating each standalone successor, and the program verifies
 them during successor readback. A policy update affects later successors; it
 does not mutate an already-created task. Model availability remains a host
 capability and is not hard-coded in the repository.
+
+In the user's initial request, explicit wording such as “use model
+`gpt-5.6-terra` with `reasoning_effort=medium`” is converted by the host agent
+to the structured policy fields before it renders the handoff. The program
+does not perform fuzzy parsing of arbitrary prose. The generated canonical
+prompt records the selected settings, and every scheduled successor reuses
+the persisted values.
 
 Each delivery also creates a new clean linked worktree at the independently
 verified remote PR head. The scheduler's configured project checkout is only a

@@ -75,6 +75,8 @@ class InMemoryHost:
         schedule_fails: bool = False,
         first_run: str | None = None,
         created_at: str | None = None,
+        readback_model: str | None = None,
+        readback_reasoning_effort: str | None = None,
         pause_succeeds: bool = True,
         pause_results: tuple[bool, ...] | None = None,
         complete_raises: bool = False,
@@ -88,6 +90,8 @@ class InMemoryHost:
         self.schedule_fails = schedule_fails
         self.first_run = first_run
         self.created_at = created_at
+        self.readback_model = readback_model
+        self.readback_reasoning_effort = readback_reasoning_effort
         self.next_creation_time: str | None = None
         self.pause_succeeds = pause_succeeds
         self.pause_results = pause_results
@@ -167,6 +171,12 @@ class InMemoryHost:
         return {
             **task,
             "first_run": self.first_run or task["first_run"],
+            "model": self.readback_model
+            if self.readback_model is not None
+            else task["model"],
+            "reasoning_effort": self.readback_reasoning_effort
+            if self.readback_reasoning_effort is not None
+            else task["reasoning_effort"],
         }
 
 
@@ -422,6 +432,23 @@ class DefaultHostWakeContractTests(unittest.TestCase):
         self.assertEqual(host.operations.count(("complete-wake", "unconfirmed")), 1)
         with self.assertRaises(StandaloneInvocationError):
             invocation.complete(reanchor_succeeds=True)
+
+    def test_successor_model_readback_mismatch_is_unverified(self) -> None:
+        host = InMemoryHost(
+            state=waiting_checkpoint(),
+            wake_ids=("fresh-wake-2",),
+            readback_model="gpt-5.6-terra",
+        )
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+        invocation.begin()
+        invocation.snapshot()
+
+        result = invocation.complete(reanchor_succeeds=True)
+
+        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+        self.assertEqual(result["reason_code"], "scheduled_task_reanchor_mismatch")
+        self.assertEqual(host.state["scheduled_task_disposition"], "PAUSED")
+        self.assertIn("task-2", host.paused_task_ids)
 
     def test_successor_readback_mismatch_is_unverified_and_keeps_checkpoint_paused(self) -> None:
         host = InMemoryHost(

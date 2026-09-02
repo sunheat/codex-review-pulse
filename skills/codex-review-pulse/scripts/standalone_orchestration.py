@@ -510,6 +510,7 @@ class StandaloneInvocation:
             observed_first_run: object = None
             scheduled_created_at: str | None = None
             first_run_mismatch = False
+            readback_failed = False
             completion_failure: Mapping[str, Any] | None = None
             try:
                 response = self.host.schedule_standalone_task(
@@ -523,6 +524,7 @@ class StandaloneInvocation:
                     prompt_sha256=self.prompt_sha256,
                 )
                 successor_id = _task_id(response)
+                readback_failed = True
                 task = self.host.read_task(successor_id)
                 _validate_task_readback(
                     task,
@@ -557,6 +559,7 @@ class StandaloneInvocation:
                         "Standalone task readback returned an invalid first run"
                     )
                 actual_first_run = observed_first_run
+                readback_failed = False
             except Exception:
                 if successor_id is not None:
                     try:
@@ -573,7 +576,12 @@ class StandaloneInvocation:
                         }
                 if completion_failure is None:
                     successor_id = None
-                actual_first_run = observed_first_run if first_run_mismatch else None
+                if first_run_mismatch:
+                    actual_first_run = observed_first_run
+                elif readback_failed:
+                    actual_first_run = ""
+                else:
+                    actual_first_run = None
 
             return self._finish_completion(
                 now=now,

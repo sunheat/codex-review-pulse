@@ -43,7 +43,7 @@ from state_model import (
 
 DEFAULT_CADENCE_SECONDS = 600
 DEFAULT_MODE_SCHEMA_VERSION = 2
-STANDALONE_TASK_PROTOCOL_VERSION = 6
+STANDALONE_TASK_PROTOCOL_VERSION = 7
 SCHEDULE_REANCHOR_TOLERANCE = timedelta(seconds=1)
 HEARTBEAT_BATCH_ORDER = (
     "record-outcome",
@@ -82,10 +82,21 @@ def build_standalone_task_handoff(
     canonical = canonical_repository(repository)
     target = f"{canonical}#{pr_number}"
     effective_policy = normalize_policy(policy)
+    task_settings = json.dumps(
+        {
+            "model": effective_policy["model"],
+            "reasoning_effort": effective_policy["reasoning_effort"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     prompt = (
         "Use $codex-review-pulse from its loaded user-directory installation to "
         f"run exactly one automatic Codex review-remediation wake for {target} in "
-        "this new standalone task/conversation. This is a scheduler-delivered "
+        "this new standalone task/conversation. The structured task execution "
+        f"settings are {task_settings}; preserve them for every scheduled "
+        "successor in this run. "
+        "This is a scheduler-delivered "
         "standalone invocation, not a continuation of another task and not a "
         "same-task heartbeat; never reuse a Codex conversation or targetThreadId. "
         "Load and obey the installed skill's SKILL.md. Treat the scheduler's "

@@ -64,6 +64,11 @@ class DefaultPolicyTests(unittest.TestCase):
         with self.assertRaises(PolicyError):
             normalize_policy({"reasoning_effort": "unsupported"})
 
+    def test_policy_digest_binds_model_configuration(self) -> None:
+        changed = default_policy()
+        changed["model"] = "gpt-5.6-terra"
+        self.assertNotEqual(policy_digest(default_policy()), policy_digest(changed))
+
     def test_deadline_is_canonicalized_and_digest_is_stable(self) -> None:
         policy = normalize_policy(
             {"deadline_at": "2026-08-27T10:00:00+10:00", "max_wakes": None}
