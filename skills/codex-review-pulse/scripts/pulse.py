@@ -43,7 +43,7 @@ from state_model import (
 
 DEFAULT_CADENCE_SECONDS = 600
 DEFAULT_MODE_SCHEMA_VERSION = 2
-STANDALONE_TASK_PROTOCOL_VERSION = 3
+STANDALONE_TASK_PROTOCOL_VERSION = 4
 SCHEDULE_REANCHOR_TOLERANCE = timedelta(seconds=1)
 HEARTBEAT_BATCH_ORDER = (
     "record-outcome",
@@ -82,8 +82,17 @@ def build_standalone_task_handoff(repository: str, pr_number: int) -> dict[str, 
         "this new standalone task/conversation. This is a scheduler-delivered "
         "standalone invocation, not a continuation of another task and not a "
         "same-task heartbeat; never reuse a Codex conversation or targetThreadId. "
-        "Load and obey the installed skill's SKILL.md and the target checkout's "
-        "AGENTS.md. Use only the target repository's Git-common-dir checkpoint as "
+        "Load and obey the installed skill's SKILL.md. Treat the scheduler's "
+        "configured project checkout only as a "
+        "read-only repository locator. After the required task-pause and checkpoint "
+        "preflight, verify the remote PR head and create a new task-owned clean "
+        "linked worktree at that exact head before begin-wake, then load and obey "
+        "that worktree's AGENTS.md. Never reuse a "
+        "worktree from an earlier wake, and never switch, reset, clean, or modify "
+        "the configured/main checkout. Run every repository mutation, validation, "
+        "Git publication command, and pulse command for this wake from the new "
+        "worktree, passing it as --repository-path. Use only the target repository's "
+        "Git-common-dir checkpoint as "
         "cross-run workflow state. Generate one fresh opaque wake_id and run at "
         "most one stable frozen batch. For RUN_BATCH, record each frozen thread "
         "outcome, apply and focused-validate any required repair, then resolve that "
@@ -114,6 +123,9 @@ def build_standalone_task_handoff(repository: str, pr_number: int) -> dict[str, 
         "reuse_conversation": False,
         "target_thread_id": None,
         "checkpoint_scope": "git-common-dir",
+        "checkout_mode": "new-linked-worktree-per-wake",
+        "configured_checkout_role": "read-only-repository-locator",
+        "reuse_worktree": False,
         "prompt_sha256": prompt_digest,
         "batch_order": list(HEARTBEAT_BATCH_ORDER),
         "prompt": prompt,

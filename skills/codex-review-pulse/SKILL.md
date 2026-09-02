@@ -28,7 +28,7 @@ the old heartbeat activated too early, used fixed-cadence overlap, allowed a
 and continued after `PAUSE_BLOCKED`. Do not describe `0.4.0` as production
 ready or use its old scheduled-task protocol as the default.
 
-Version `0.8.0` is the Codex-first default clean-context scheduling candidate. Its
+Version `0.8.1` is the Codex-first default clean-context scheduling candidate. Its
 real scheduled-task and live GitHub integration remains unverified until an
 independent forward test completes; do not describe that integration as proven
 before then.
@@ -152,7 +152,8 @@ to continue with another scheduler or pulse operation.
 
 ```text
 PULSE = "python <loaded-skill-directory>/scripts/pulse.py"
-TARGET = "--repository-path PR_CHECKOUT --repo OWNER/REPO --pr NUMBER"
+CONFIGURED_CHECKOUT = host project checkout, used only as a read-only locator
+TARGET = "--repository-path WAKE_WORKTREE --repo OWNER/REPO --pr NUMBER"
 
 # On the initial user turn, render the target-bound standalone-task prompt and
 # pass its `prompt` field unchanged when creating the standalone scheduler task.
@@ -189,6 +190,18 @@ else if this is a scheduler-delivered invocation:
 else:
     report PAUSE_RECOVERY / invocation_not_scheduler_delivered
     END_INVOCATION
+
+# After the scheduled pause/checkpoint preflight above (or initial task
+# creation), independently read the authoritative remote PR head. Create a new
+# clean linked worktree at that exact commit for this wake. Never reuse an old
+# wake worktree or switch/reset/clean/modify CONFIGURED_CHECKOUT. All remaining
+# pulse commands, repository edits, validation, commit, and push run with
+# WAKE_WORKTREE as --repository-path. Linked worktrees share the repository's
+# Git-common-dir checkpoint without sharing checkout files.
+REMOTE_PR_HEAD = host.read_authoritative_pr_head()
+WAKE_WORKTREE = host.create_clean_linked_worktree(
+    repository=CONFIGURED_CHECKOUT, commit=REMOTE_PR_HEAD, unique_per_wake=true
+)
 
 # On wake 1, begin-wake may create the checkpoint. On later wakes, the direct
 # preflight above is mandatory immediately before this call.
@@ -346,6 +359,16 @@ Treat the initial user turn as wake 1. Create its standalone scheduler task in
 creates one new standalone task/conversation with the same canonical prompt.
 No task may point at or continue another task's Codex conversation.
 
+The scheduler's configured project checkout is only a read-only repository
+locator. After the required scheduled-task pause and checkpoint preflight, each
+wake must create a new task-owned clean linked worktree at the independently
+verified remote PR head. It must run every pulse command, repository mutation,
+validation, commit, and push from that worktree with the worktree passed as
+`--repository-path`. Never reuse an earlier wake's worktree, and never switch,
+reset, clean, or modify the configured/main checkout. A linked worktree retains
+the required Git-common-dir checkpoint continuity while isolating checkout
+files across standalone wakes.
+
 The host invocation is the hard boundary: one invocation can successfully
 begin and plan at most one wake. Only a scheduler-delivered new invocation can
 start a later wake. Results from tools, todo rollover, notebooks, model
@@ -417,6 +440,9 @@ process review artifacts created by that push until a later wake.
 
 The following are default-path safety rules, not optional hardened ceremony:
 
+- Each wake uses a newly created clean linked worktree at the verified remote
+  PR head. The scheduler/project checkout remains read-only and is never the
+  repair workspace, even when the host binds a standalone task to that project.
 - For `fix-now`, focused validation must pass before resolving that exact
   thread. Repair the implementation or a stale PR-scoped test first when the
   autonomous policy permits; otherwise leave the thread unresolved and pause.
@@ -493,31 +519,37 @@ invocation:
 5. Read the checkpoint directly before `begin-wake`; stop with the task paused
    if it is missing/unreadable, has an active wake, has a failure latch, or has
    a future `next_not_before`. Do not replace it from memory or a summary.
-6. Submit `pause confirmed` to `begin-wake` only after the pause tool call
+6. After that preflight, independently verify the remote PR head and create a
+   new task-owned clean linked worktree at that exact commit. Treat the
+   scheduler/project checkout as a read-only locator; never reuse an earlier
+   wake worktree or switch, reset, clean, or modify the configured checkout.
+   Use the new worktree as `--repository-path` for every pulse command and run
+   all edits, validation, commit, and push from it.
+7. Submit `pause confirmed` to `begin-wake` only after the pause tool call
    returns success and the direct preflight passes. A pause failure may use an
    unconfirmed `begin-wake` only to persist `PAUSE_BLOCKED`, then ends this
    invocation. For every scheduled delivery, pass the delivered task's ID as
    `--delivered-task-id`; `pulse.py` compares it with the checkpoint's persisted
    active successor before starting the wake. The initial user wake has no
    delivered successor ID and omits this option.
-7. Run this wake's snapshot, frozen batch, repair/retry, outcome/resolve, and
+8. Run this wake's snapshot, frozen batch, repair/retry, outcome/resolve, and
    aggregate publication work. Stop immediately on any `PAUSE_*` or `STOP_*`.
-8. For `WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head `REQUEST_REVIEW`, choose one
+9. For `WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head `REQUEST_REVIEW`, choose one
    completion timestamp and compute
    `next_not_before = ceil_to_scheduler_precision(wake_completed_at + cadence_seconds)` without calling
    `complete-wake` yet.
-9. Create one new standalone successor task with the unchanged prompt, inspect
+10. Create one new standalone successor task with the unchanged prompt, inspect
    the host-tool result, then read back the successor's actual persisted first
    run and ID. Treat creation and readback as one host handoff.
-10. After successor creation and readback succeed, call `complete-wake` exactly
+11. After successor creation and readback succeed, call `complete-wake` exactly
     once with the same completion timestamp, `--schedule-reanchored`,
     `--scheduled-first-run ACTUAL_FIRST_RUN`, and `--scheduled-task-id` for the
     successor. A stale or mismatched readback persists a blocker and must not
     authorize another wake.
-11. If successor creation or readback fails, call `complete-wake` exactly once
+12. If successor creation or readback fails, call `complete-wake` exactly once
     without `--schedule-reanchored`; this persists the re-anchor blocker and
     keeps the delivered task paused.
-12. Immediately report the result of either `complete-wake` call and end this
+13. Immediately report the result of either `complete-wake` call and end this
     host invocation. Do not list scheduler tasks, reread the checkpoint, roll
     or verify a successor, or call `begin-wake` again. On any other tool
     failure, `PAUSE_*`, terminal result, or unproven success, leave the task

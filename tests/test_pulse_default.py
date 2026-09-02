@@ -59,12 +59,17 @@ class DefaultLifecycleTests(unittest.TestCase):
 
         self.assertEqual(handoff["repository"], "owner/repo")
         self.assertEqual(handoff["pull_request_number"], 17)
-        self.assertEqual(handoff["protocol_version"], 3)
+        self.assertEqual(handoff["protocol_version"], 4)
         self.assertEqual(handoff["scheduler_kind"], "cron")
         self.assertEqual(handoff["conversation_mode"], "standalone")
         self.assertFalse(handoff["reuse_conversation"])
         self.assertIsNone(handoff["target_thread_id"])
         self.assertEqual(handoff["checkpoint_scope"], "git-common-dir")
+        self.assertEqual(handoff["checkout_mode"], "new-linked-worktree-per-wake")
+        self.assertEqual(
+            handoff["configured_checkout_role"], "read-only-repository-locator"
+        )
+        self.assertFalse(handoff["reuse_worktree"])
         self.assertEqual(
             handoff["batch_order"],
             [
@@ -83,6 +88,10 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertIn("Never commit or push before every frozen thread is resolved", handoff["prompt"])
         self.assertIn("new standalone task/conversation", handoff["prompt"])
         self.assertIn("AGENTS.md", handoff["prompt"])
+        self.assertIn("new task-owned clean linked worktree", handoff["prompt"])
+        self.assertIn("passing it as --repository-path", handoff["prompt"])
+        self.assertIn("configured/main checkout", handoff["prompt"])
+        self.assertIn("read-only repository locator", handoff["prompt"])
         self.assertNotIn("same heartbeat", handoff["prompt"].lower())
         self.assertEqual(
             handoff["prompt_sha256"],

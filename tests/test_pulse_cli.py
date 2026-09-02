@@ -296,6 +296,11 @@ class PulseCliTests(unittest.TestCase):
         )
         self.assertEqual(result["conversation_mode"], "standalone")
         self.assertIsNone(result["target_thread_id"])
+        self.assertEqual(result["checkout_mode"], "new-linked-worktree-per-wake")
+        self.assertEqual(
+            result["configured_checkout_role"], "read-only-repository-locator"
+        )
+        self.assertFalse(result["reuse_worktree"])
         self.assertNotIn("same heartbeat", result["prompt"].lower())
 
         alias = harness.json_output(harness.run("standalone-task-prompt"))
