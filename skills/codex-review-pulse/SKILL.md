@@ -280,6 +280,36 @@ if successor_result is success:
           --completion-failure FAILURE_FILE
         report completion
         END_INVOCATION
+    if not first_run_matches(NEXT_NOT_BEFORE, ACTUAL_FIRST_RUN):
+        # The successor exists, but its first run is outside the permitted
+        # completion-relative window. Pause that exact task before persisting
+        # the absorbing recovery state.
+        try:
+            cleanup_result = host.pause_task(SUCCESSOR_ID)
+        except Exception:
+            cleanup_result = None
+        PAUSE_CONFIRMED = cleanup_result is success
+        FAILURE_FILE = write_json(
+            {
+                "reason_code": (
+                    "scheduled_task_reanchor_mismatch"
+                    if PAUSE_CONFIRMED
+                    else "successor_cleanup_unconfirmed"
+                ),
+                "evidence": {
+                    "successor_task_id": SUCCESSOR_ID,
+                    "expected_first_run": NEXT_NOT_BEFORE,
+                    "observed_first_run": ACTUAL_FIRST_RUN,
+                    "pause_confirmed": PAUSE_CONFIRMED,
+                },
+            }
+        )
+        # Do not pass --schedule-reanchored or --scheduled-task-id: this
+        # successor was not verified as the active next task.
+        completion = PULSE TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
+          --completion-failure FAILURE_FILE
+        report completion
+        END_INVOCATION
     completion = PULSE TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
       --schedule-reanchored --scheduled-first-run ACTUAL_FIRST_RUN \
       --scheduled-task-id SUCCESSOR_ID

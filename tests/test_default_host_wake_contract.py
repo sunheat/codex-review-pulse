@@ -442,6 +442,40 @@ class DefaultHostWakeContractTests(unittest.TestCase):
         ])
         self.assertTrue(invocation.ended)
 
+    def test_unconfirmed_review_trigger_cannot_schedule_a_successor(self) -> None:
+        for event in ({}, {"status": "attempted"}):
+            with self.subTest(event=event):
+                host = InMemoryHost(
+                    state=waiting_checkpoint(),
+                    wake_ids=("fresh-wake-2",),
+                )
+                invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+                invocation.begin()
+                host.state["last_decision"] = {
+                    "next_action": "REQUEST_REVIEW",
+                    "mutation_occurred": False,
+                }
+                host.state["trigger_events"] = {"HEAD1": event}
+
+                result = invocation.complete(
+                    reanchor_succeeds=True,
+                    action="REQUEST_REVIEW",
+                )
+
+                self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+                self.assertEqual(result["reason_code"], "review_trigger_not_confirmed")
+                self.assertNotIn(
+                    ("schedule-standalone", "2026-08-26T00:47:00+00:00"),
+                    host.operations,
+                )
+                self.assertNotIn(("read-standalone", "task-2"), host.operations)
+                self.assertEqual(host.state["scheduled_task_disposition"], "PAUSED")
+                self.assertEqual(
+                    host.state["failure_latch"]["reason_code"],
+                    "review_trigger_not_confirmed",
+                )
+                self.assertTrue(invocation.ended)
+
     def test_scheduled_begin_requires_the_persisted_active_successor(self) -> None:
         cases = (
             ("wrong task", {}, "stale-task"),

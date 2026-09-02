@@ -374,6 +374,39 @@ class StandaloneInvocation:
                         actual_first_run=None,
                         successor_id=None,
                     )
+            elif action == "REQUEST_REVIEW":
+                try:
+                    checkpoint = self.host.read_checkpoint_directly()
+                    snapshot = checkpoint.get("last_snapshot")
+                    head_oid = (
+                        snapshot.get("head_oid")
+                        if isinstance(snapshot, Mapping)
+                        else None
+                    )
+                    trigger_events = checkpoint.get("trigger_events")
+                    event = (
+                        trigger_events.get(head_oid, {})
+                        if isinstance(trigger_events, Mapping)
+                        and isinstance(head_oid, str)
+                        else {}
+                    )
+                    trigger_confirmed = (
+                        isinstance(event, Mapping)
+                        and event.get("status") == "emitted"
+                    )
+                except Exception:
+                    event = {}
+                    trigger_confirmed = False
+                if not trigger_confirmed:
+                    return self._finish_completion(
+                        now=now,
+                        actual_first_run=None,
+                        successor_id=None,
+                        completion_failure={
+                            "reason_code": "review_trigger_not_confirmed",
+                            "evidence": dict(event) if isinstance(event, Mapping) else {},
+                        },
+                    )
 
             successor_id: str | None = None
             actual_first_run: object = None
