@@ -62,6 +62,24 @@ class StandaloneTaskHost(Protocol):
     def read_task(self, task_id: str) -> Mapping[str, Any]:
         """Read normalized task metadata and the persisted first-run timestamp."""
 
+    def authorize_successor(
+        self,
+        *,
+        wake_id: str,
+        completed_at: str,
+        task_id: str,
+        created_at: str,
+        first_run: str,
+        cadence_seconds: int,
+    ) -> object:
+        """Durably authorize a verified successor before activation.
+
+        A confirmed result must make an immediate delivery safe by recording
+        the successor identity and active disposition in the checkpoint while
+        the scheduler task is still paused.  The later ``complete-wake`` call
+        finalizes the handoff after activation.
+        """
+
     def activate_task(self, task_id: str) -> object:
         """Activate one verified paused successor and return explicit confirmation."""
 
@@ -561,6 +579,8 @@ class StandaloneInvocation:
             scheduled_created_at: str | None = None
             first_run_mismatch = False
             readback_failed = False
+            authorization_attempted = False
+            authorization_confirmed = False
             completion_failure: Mapping[str, Any] | None = None
             try:
                 response = self.host.schedule_standalone_task(
@@ -615,6 +635,21 @@ class StandaloneInvocation:
                     raise StandaloneInvocationError(
                         "Standalone task readback returned an invalid first run"
                     )
+                authorization_attempted = True
+                if not _confirmed(
+                    self.host.authorize_successor(
+                        wake_id=self.wake_id,
+                        completed_at=now,
+                        task_id=successor_id,
+                        created_at=scheduled_created_at,
+                        first_run=observed_first_run,
+                        cadence_seconds=cadence_seconds,
+                    )
+                ):
+                    raise StandaloneInvocationError(
+                        "Standalone successor authorization was not confirmed"
+                    )
+                authorization_confirmed = True
                 if not _confirmed(self.host.activate_task(successor_id)):
                     raise StandaloneInvocationError(
                         "Standalone successor activation was not confirmed"
@@ -632,6 +667,24 @@ class StandaloneInvocation:
                                 "pause_confirmed": False,
                             },
                         }
+                if (
+                    completion_failure is None
+                    and authorization_attempted
+                    and not authorization_confirmed
+                ):
+                    completion_failure = {
+                        "reason_code": "successor_authorization_unconfirmed",
+                        "evidence": {
+                            "successor_task_id": successor_id,
+                        },
+                    }
+                elif completion_failure is None and authorization_confirmed:
+                    completion_failure = {
+                        "reason_code": "successor_activation_unconfirmed",
+                        "evidence": {
+                            "successor_task_id": successor_id,
+                        },
+                    }
                 if completion_failure is None:
                     successor_id = None
                 if first_run_mismatch:

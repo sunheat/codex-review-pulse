@@ -75,6 +75,7 @@ class InMemoryHost:
         checkpoint_unreadable: bool = False,
         schedule_fails: bool = False,
         schedule_response_omits_id: bool = False,
+        authorize_succeeds: bool = True,
         activate_succeeds: bool = True,
         first_run: str | None = None,
         created_at: str | None = None,
@@ -93,6 +94,7 @@ class InMemoryHost:
         self.checkpoint_unreadable = checkpoint_unreadable
         self.schedule_fails = schedule_fails
         self.schedule_response_omits_id = schedule_response_omits_id
+        self.authorize_succeeds = authorize_succeeds
         self.activate_succeeds = activate_succeeds
         self.first_run = first_run
         self.created_at = created_at
@@ -107,6 +109,7 @@ class InMemoryHost:
         self.created_tasks: dict[str, dict[str, object]] = {}
         self.scheduled_statuses: list[str] = []
         self.paused_task_ids: list[str] = []
+        self.authorized_task_ids: list[str] = []
 
     def new_opaque_wake_id(self) -> str:
         wake_id = next(self._wake_ids)
@@ -192,8 +195,25 @@ class InMemoryHost:
             else task["reasoning_effort"],
         }
 
+    def authorize_successor(
+        self,
+        *,
+        wake_id: str,
+        completed_at: str,
+        task_id: str,
+        created_at: str,
+        first_run: str,
+        cadence_seconds: int,
+    ) -> bool:
+        self.operations.append(("authorize-successor", task_id))
+        if self.authorize_succeeds:
+            self.authorized_task_ids.append(task_id)
+        return self.authorize_succeeds
+
     def activate_task(self, task_id: str) -> bool:
         self.operations.append(("activate-task", task_id))
+        if task_id not in self.authorized_task_ids:
+            raise AssertionError("successor must be authorized before activation")
         if self.activate_succeeds:
             self.created_tasks[task_id]["status"] = "ACTIVE"
         return self.activate_succeeds
@@ -391,8 +411,9 @@ class DefaultHostWakeContractTests(unittest.TestCase):
                 self.assertTrue(invocation.ended)
                 self.assertEqual(host.operations[-1][0], "complete-wake")
                 if reanchor_succeeds:
-                    self.assertEqual(host.operations[-4][0], "schedule-standalone")
-                    self.assertEqual(host.operations[-3][0], "read-standalone")
+                    self.assertEqual(host.operations[-5][0], "schedule-standalone")
+                    self.assertEqual(host.operations[-4][0], "read-standalone")
+                    self.assertEqual(host.operations[-3][0], "authorize-successor")
                     self.assertEqual(host.operations[-2][0], "activate-task")
                     self.assertEqual(result["scheduled_task_id"], "task-2")
                 with self.assertRaises(StandaloneInvocationError):
@@ -421,6 +442,7 @@ class DefaultHostWakeContractTests(unittest.TestCase):
         self.assertEqual(host.created_tasks["task-2"]["first_run"], "2026-08-26T00:47:00+00:00")
         self.assertEqual(host.scheduled_statuses, ["PAUSED"])
         self.assertEqual(host.created_tasks["task-2"]["status"], "ACTIVE")
+        self.assertEqual(host.authorized_task_ids, ["task-2"])
         self.assertEqual(host.operations[:4], [
             ("pause-task", "task-1"),
             ("checkpoint-read", "direct"),
@@ -569,10 +591,29 @@ class DefaultHostWakeContractTests(unittest.TestCase):
 
         result = invocation.complete(reanchor_succeeds=True)
 
-        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
-        self.assertEqual(result["reason_code"], "scheduled_task_reanchor_mismatch")
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "successor_activation_unconfirmed")
         self.assertEqual(host.created_tasks["task-2"]["status"], "PAUSED")
         self.assertIn(("activate-task", "task-2"), host.operations)
+        self.assertIn(("pause-task", "task-2"), host.operations)
+
+    def test_unconfirmed_successor_authorization_never_activates_task(self) -> None:
+        host = InMemoryHost(
+            state=waiting_checkpoint(),
+            wake_ids=("fresh-wake-2",),
+            authorize_succeeds=False,
+        )
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+        invocation.begin()
+        invocation.snapshot()
+
+        result = invocation.complete(reanchor_succeeds=True)
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "successor_authorization_unconfirmed")
+        self.assertEqual(host.created_tasks["task-2"]["status"], "PAUSED")
+        self.assertIn(("authorize-successor", "task-2"), host.operations)
+        self.assertNotIn(("activate-task", "task-2"), host.operations)
         self.assertIn(("pause-task", "task-2"), host.operations)
 
     def test_successor_model_readback_mismatch_is_unverified(self) -> None:
