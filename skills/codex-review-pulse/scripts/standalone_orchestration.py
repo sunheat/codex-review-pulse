@@ -55,11 +55,15 @@ class StandaloneTaskHost(Protocol):
         conversation_mode: str,
         target_thread_id: None,
         prompt_sha256: str,
+        status: str,
     ) -> object:
-        """Create one cadence-only standalone task anchored by persisted creation."""
+        """Create one paused cadence-only task anchored by persisted creation."""
 
     def read_task(self, task_id: str) -> Mapping[str, Any]:
         """Read normalized task metadata and the persisted first-run timestamp."""
+
+    def activate_task(self, task_id: str) -> object:
+        """Activate one verified paused successor and return explicit confirmation."""
 
 
 BeginWake = Callable[[str, str, bool, str | None], Mapping[str, Any]]
@@ -130,6 +134,7 @@ def _validate_task_readback(
         "scheduler_kind": "cron",
         "conversation_mode": "standalone",
         "target_thread_id": None,
+        "status": "PAUSED",
         "prompt": prompt,
         "prompt_sha256": prompt_sha256,
         "cadence_seconds": cadence_seconds,
@@ -241,6 +246,12 @@ class StandaloneInvocation:
     def _end(self, result: Mapping[str, Any]) -> dict[str, Any]:
         self.ended = True
         return deepcopy(dict(result))
+
+    def _pause_successor(self, task_id: str) -> bool:
+        try:
+            return _confirmed(self.host.pause_task(task_id))
+        except Exception:
+            return False
 
     @contextmanager
     def _serialized_operation(self):
@@ -373,10 +384,7 @@ class StandaloneInvocation:
         except Exception as error:
             cleanup_confirmed = True
             if successor_id is not None:
-                try:
-                    cleanup_confirmed = _confirmed(self.host.pause_task(successor_id))
-                except Exception:
-                    cleanup_confirmed = False
+                cleanup_confirmed = self._pause_successor(successor_id)
             self.ended = True
             if successor_id is not None and not cleanup_confirmed:
                 raise StandaloneInvocationError(
@@ -384,7 +392,15 @@ class StandaloneInvocation:
                 ) from error
             raise
         if not isinstance(result, Mapping) or "next_action" not in result:
+            cleanup_confirmed = (
+                successor_id is None or self._pause_successor(successor_id)
+            )
             self.ended = True
+            if successor_id is not None and not cleanup_confirmed:
+                raise StandaloneInvocationError(
+                    "complete-wake returned an invalid result and successor cleanup "
+                    "was not confirmed"
+                )
             raise StandaloneInvocationError("complete-wake returned an invalid result")
         return self._end(result)
 
@@ -556,6 +572,7 @@ class StandaloneInvocation:
                     conversation_mode="standalone",
                     target_thread_id=None,
                     prompt_sha256=self.prompt_sha256,
+                    status="PAUSED",
                 )
                 successor_id = _task_id(response)
                 readback_failed = True
@@ -598,14 +615,15 @@ class StandaloneInvocation:
                     raise StandaloneInvocationError(
                         "Standalone task readback returned an invalid first run"
                     )
+                if not _confirmed(self.host.activate_task(successor_id)):
+                    raise StandaloneInvocationError(
+                        "Standalone successor activation was not confirmed"
+                    )
                 actual_first_run = observed_first_run
                 readback_failed = False
             except Exception:
                 if successor_id is not None:
-                    try:
-                        pause_confirmed = _confirmed(self.host.pause_task(successor_id))
-                    except Exception:
-                        pause_confirmed = False
+                    pause_confirmed = self._pause_successor(successor_id)
                     if not pause_confirmed:
                         completion_failure = {
                             "reason_code": "successor_cleanup_unconfirmed",

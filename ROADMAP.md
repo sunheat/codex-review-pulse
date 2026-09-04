@@ -110,6 +110,14 @@ validation, accepting representation-only sub-second differences while still
 rejecting an earlier represented second. Direct completion callbacks retain
 their exact completion-relative ceiling behavior.
 
+## 0.8.7 paused-successor activation boundary
+
+Standalone successors are created paused, identified and read back inside the
+cleanup boundary, and activated only after their prompt, model, cadence,
+creation anchor, and first run are verified. Missing task IDs therefore leave
+only harmless paused records, while callback exceptions or malformed results
+re-pause every known activated successor before the invocation ends.
+
 ## Deferred milestones
 
 - public-API connector and automatic-review detection bound to a head OID;

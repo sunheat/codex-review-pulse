@@ -49,7 +49,7 @@ from state_model import (
 
 DEFAULT_CADENCE_SECONDS = 600
 DEFAULT_MODE_SCHEMA_VERSION = 2
-STANDALONE_TASK_PROTOCOL_VERSION = 8
+STANDALONE_TASK_PROTOCOL_VERSION = 9
 # The local scheduler exposes task metadata at whole-second precision.  The
 # re-anchor path must use that same representation for expected and observed
 # first-run values; direct completion callbacks retain their exact/ceil path.
@@ -128,11 +128,13 @@ def build_standalone_task_handoff(
         "pass that manifest to pulse retry --pending-repair; the next clean worktree "
         "must verify and apply it before focused validation. Leave push-created "
         "review artifacts for a later wake. When rearming, create one new standalone "
-        "successor task with the unchanged prompt and a host-supported cadence-only "
-        "recurring schedule; do not submit DTSTART. Read back the persisted task ID, "
+        "successor task in PAUSED state with the unchanged prompt and a host-supported "
+        "cadence-only recurring schedule; do not submit DTSTART. Extract its ID inside "
+        "the cleanup boundary, then read back the persisted task ID, status, "
         "creation timestamp, prompt and prompt digest, cron/standalone metadata, "
         "absent target thread, model, reasoning settings, and cadence before accepting "
-        "it. "
+        "it. Activate only that verified successor before complete-wake; malformed "
+        "creation evidence therefore cannot leave an unknown task running. "
         "Derive the first run from persisted created_at plus cadence, then pass both "
         "timestamps to complete-wake. The creation timestamp must be at or after this "
         "wake's completion, so the successor cannot run early. For every scheduled "
@@ -141,8 +143,8 @@ def build_standalone_task_handoff(
         "threads; never merge, enable auto-merge, change the base, force-push, or "
         "create issues. After complete-wake, report the result and end this "
         "invocation immediately; do not start, schedule, or consume another wake. If "
-        "complete-wake raises after successor creation, pause that exact successor and "
-        "confirm cleanup before propagating the failure. "
+        "complete-wake raises or returns malformed data after successor activation, "
+        "pause that exact successor and confirm cleanup before propagating the failure. "
         "Keep the delivered task paused on every PAUSE_* or STOP_* result."
     )
     prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()

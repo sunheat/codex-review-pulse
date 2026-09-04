@@ -28,7 +28,7 @@ the old heartbeat activated too early, used fixed-cadence overlap, allowed a
 and continued after `PAUSE_BLOCKED`. Do not describe `0.4.0` as production
 ready or use its old scheduled-task protocol as the default.
 
-Version `0.8.6` is the Codex-first default clean-context scheduling candidate. Its
+Version `0.8.7` is the Codex-first default clean-context scheduling candidate. Its
 real scheduled-task and live GitHub integration remains unverified until an
 independent forward test completes; do not describe that integration as proven
 before then.
@@ -142,7 +142,9 @@ and every successor reuses that persisted configuration.
 
 The host adapter may pass `--pause-confirmed` to `begin-wake` and
 `--schedule-reanchored` to `complete-wake` only after successful host-tool
-calls. For the supported cadence-only successor path, the latter must include
+calls. The supported cadence-only successor path creates the task paused,
+verifies its ID and metadata, then confirms activation. The latter flag must
+include
 `--scheduled-created-at` from the persisted successor record,
 `--scheduled-first-run` derived from that creation anchor plus the persisted
 cadence, and `--scheduled-task-id`. These flags do not pause or schedule a
@@ -187,6 +189,9 @@ to continue with another scheduler or pulse operation.
 PULSE = "python <loaded-skill-directory>/scripts/pulse.py"
 CONFIGURED_CHECKOUT = host project checkout, used only as a read-only locator
 TARGET = "--repository-path WAKE_WORKTREE --repo OWNER/REPO --pr NUMBER"
+CHECKPOINT_TARGET = (
+    "--repository-path CONFIGURED_CHECKOUT --repo OWNER/REPO --pr NUMBER"
+)
 
 # On the initial user turn, first convert explicit settings from the user's
 # request to POLICY_JSON, then render the target-bound standalone-task prompt
@@ -213,6 +218,11 @@ else if this is a scheduler-delivered invocation:
     # This must be the first scheduler operation in this invocation. The
     # delivered task is distinct from every earlier and later task.
     pause_result = host.pause_task(delivered_task_id)
+    if pause_result is not confirmed:
+        PULSE CHECKPOINT_TARGET --wake-id WAKE_ID begin-wake \
+          --delivered-task-id DELIVERED_TASK_ID
+        report the returned pause result
+        END_INVOCATION
     checkpoint = host.read_checkpoint_directly()
     if checkpoint is missing or unreadable:
         report PAUSE_RECOVERY / checkpoint_unavailable
@@ -223,13 +233,16 @@ else if this is a scheduler-delivered invocation:
     if checkpoint.failure_latch is non-empty:
         report PAUSE_RECOVERY / failure_latched
         END_INVOCATION
-    if checkpoint.next_not_before is later than current time:
-        report PAUSE_BLOCKED / cadence_not_elapsed
-        END_INVOCATION
-    if pause_result is not confirmed:
-        PULSE TARGET --wake-id WAKE_ID begin-wake \
+    preflight = host.scheduled_preflight(
+        checkpoint, delivered_task_id, current time
+    )
+    if preflight is not ready:
+        # This persists identity, disposition, malformed-state, and early
+        # cadence failures before ending the invocation. It uses the existing
+        # configured checkout because WAKE_WORKTREE does not exist yet.
+        PULSE CHECKPOINT_TARGET --wake-id WAKE_ID begin-wake \
           --delivered-task-id DELIVERED_TASK_ID
-        report the returned pause result
+        report the persisted result
         END_INVOCATION
 else:
     report PAUSE_RECOVERY / invocation_not_scheduler_delivered
@@ -315,11 +328,13 @@ COMPLETION_NOW = current UTC time
 successor_result = host.create_standalone_task(
     kind=cron, conversation=standalone, target_thread_id=absent,
     prompt=STANDALONE_HANDOFF.prompt, cadence_seconds=cadence_seconds,
-    model=TASK_MODEL, reasoning_effort=TASK_REASONING_EFFORT
+    model=TASK_MODEL, reasoning_effort=TASK_REASONING_EFFORT,
+    disposition=PAUSED
 )
 if successor_result is success:
-    SUCCESSOR_ID = successor_result.id
+    SUCCESSOR_ID = absent
     try:
+        SUCCESSOR_ID = require_nonempty_id(successor_result)
         SUCCESSOR = host.read_task(SUCCESSOR_ID)
         require SUCCESSOR.prompt == STANDALONE_HANDOFF.prompt
         require SUCCESSOR.prompt_sha256 == sha256(STANDALONE_HANDOFF.prompt)
@@ -329,22 +344,27 @@ if successor_result is success:
         require SUCCESSOR.model == TASK_MODEL
         require SUCCESSOR.reasoning_effort == TASK_REASONING_EFFORT
         require SUCCESSOR.cadence_seconds == cadence_seconds
+        require SUCCESSOR.disposition == PAUSED
         require SUCCESSOR.created_at is at or after COMPLETION_NOW at scheduler precision
         EXPECTED_FIRST_RUN = truncate_to_scheduler_precision(
             SUCCESSOR.created_at + cadence_seconds
         )
         require SUCCESSOR.first_run is present
         require SUCCESSOR.first_run matches EXPECTED_FIRST_RUN at scheduler precision
+        require host.activate_task(SUCCESSOR_ID) is confirmed
         ACTUAL_FIRST_RUN = SUCCESSOR.first_run
     except Exception:
-        # The task exists but its identity, cadence, or creation anchor is
-        # unverified.
-        # Pause that exact task before persisting the absorbing recovery state.
-        try:
-            cleanup_result = host.pause_task(SUCCESSOR_ID)
-        except Exception:
-            cleanup_result = None
-        PAUSE_CONFIRMED = cleanup_result is success
+        # Creation is atomic in PAUSED state. If ID extraction failed, the
+        # unknown task cannot run. If the ID is known, explicitly re-pause it
+        # before persisting the absorbing recovery state.
+        if SUCCESSOR_ID is present:
+            try:
+                cleanup_result = host.pause_task(SUCCESSOR_ID)
+            except Exception:
+                cleanup_result = None
+            PAUSE_CONFIRMED = cleanup_result is success
+        else:
+            PAUSE_CONFIRMED = true
         FAILURE_FILE = write_json(
             {
                 "reason_code": (
@@ -355,6 +375,7 @@ if successor_result is success:
                 "evidence": {
                     "successor_task_id": SUCCESSOR_ID,
                     "pause_confirmed": PAUSE_CONFIRMED,
+                    "created_paused": true,
                 },
             }
         )
@@ -513,7 +534,8 @@ next_not_before = ceil_to_scheduler_precision(wake_completed_at + cadence_second
 
 Never rely on pausing and reactivating a fixed recurring task to reset its
 clock, and do not submit `DTSTART` during immediate automation creation. Create
-one new cadence-only successor immediately after choosing `wake_completed_at`.
+one new paused cadence-only successor immediately after choosing
+`wake_completed_at`.
 Read back its persisted ID, prompt, cadence, and `created_at`; require the
 creation anchor to be at or after `wake_completed_at` at the scheduler's
 representable precision, then derive:
@@ -602,16 +624,20 @@ invocation:
 9. For `WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head `REQUEST_REVIEW`, choose one
    completion timestamp immediately before successor creation without calling
    `complete-wake` yet.
-10. Create one new standalone successor task with the unchanged prompt, the
-   persisted model/reasoning configuration, and a cadence-only recurring
-   schedule. Do not submit `DTSTART` or hand-write a raw scheduling directive.
-   Inspect the host-tool result, then read back the successor's persisted ID,
+10. Create one new standalone successor task in `PAUSED` state with the
+   unchanged prompt, persisted model/reasoning configuration, and a
+   cadence-only recurring schedule. Do not submit `DTSTART` or hand-write a raw
+   scheduling directive. Extract its ID inside the cleanup boundary, then read
+   back the successor's persisted ID,
    prompt and SHA-256, scheduler kind (`cron`), conversation mode
    (`standalone`), absent `target_thread_id`, model, reasoning settings,
-   cadence, and creation timestamp. Require every field to match the
+   cadence, paused disposition, and creation timestamp. Require every field to
+   match the
    canonical handoff, require its creation timestamp to be at or after the
    chosen completion timestamp at scheduler precision, and derive its first
-   run as the whole-second-truncated creation time plus cadence.
+   run as the whole-second-truncated creation time plus cadence. Activate only
+   that verified successor before `complete-wake`; missing-ID creation evidence
+   can therefore leave only a paused task.
 11. After successor creation and readback succeed, call `complete-wake` exactly
     once with the same completion timestamp, `--schedule-reanchored`,
     `--scheduled-created-at`, the derived `--scheduled-first-run`, and
@@ -620,8 +646,9 @@ invocation:
 12. If successor creation or readback fails, call `complete-wake` exactly once
     without `--schedule-reanchored`; this persists the re-anchor blocker and
     keeps the delivered task paused.
-13. If `complete-wake` raises after a successor was created and verified, pause
-    that exact successor and confirm cleanup before propagating the failure.
+13. If `complete-wake` raises or returns malformed data after a successor was
+    activated, pause that exact successor and confirm cleanup before
+    propagating the failure.
 14. Immediately report the result of either `complete-wake` call and end this
     host invocation. Do not list scheduler tasks, reread the checkpoint, roll
     or verify a successor, or call `begin-wake` again. On any other tool
