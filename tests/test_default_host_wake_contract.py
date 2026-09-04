@@ -57,6 +57,7 @@ def waiting_checkpoint(
         wake_id="seed-wake",
         now="2026-08-26T00:26:00+00:00",
         schedule_next_wake=lambda expected: expected,
+        schedule_anchor_created_at="2026-08-26T00:26:00+00:00",
         scheduled_task_id="task-1",
     )
     return state

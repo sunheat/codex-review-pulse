@@ -348,6 +348,8 @@ class PulseCliTests(unittest.TestCase):
             harness.run(
                 "complete-wake",
                 "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:01:00+00:00",
                 "--scheduled-first-run",
                 "2026-08-26T00:11:00+00:00",
                 "--scheduled-task-id",
@@ -387,6 +389,8 @@ class PulseCliTests(unittest.TestCase):
             harness.run(
                 "complete-wake",
                 "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:01:00+00:00",
                 "--scheduled-first-run",
                 "2026-08-26T00:11:00+00:00",
                 now="2026-08-26T00:01:00+00:00",
@@ -400,6 +404,33 @@ class PulseCliTests(unittest.TestCase):
         )
         self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
         self.assertNotEqual(state["scheduled_task_disposition"], "ACTIVE")
+
+    def test_complete_wake_requires_creation_anchor_before_activation(self) -> None:
+        harness = CliHarness(self)
+        harness.begin_and_snapshot()
+
+        result = harness.json_output(
+            harness.run(
+                "complete-wake",
+                "--schedule-reanchored",
+                "--scheduled-first-run",
+                "2026-08-26T00:11:00+00:00",
+                "--scheduled-task-id",
+                "task-1",
+                now="2026-08-26T00:01:00+00:00",
+            )
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "scheduled_task_anchor_missing")
+        state = load_checkpoint(
+            checkpoint_path("owner/repo", 17, repository_path=harness.checkout)
+        )
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+        self.assertEqual(
+            state["failure_latch"]["reason_code"],
+            "scheduled_task_anchor_missing",
+        )
 
     def test_complete_wake_persists_a_successor_readback_failure(self) -> None:
         harness = CliHarness(self)
@@ -454,6 +485,8 @@ class PulseCliTests(unittest.TestCase):
             harness.run(
                 "complete-wake",
                 "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:01:00+00:00",
                 "--scheduled-first-run",
                 "2026-08-26T00:11:00+00:00",
                 "--scheduled-task-id",
@@ -622,6 +655,8 @@ class PulseCliTests(unittest.TestCase):
             harness.run(
                 "complete-wake",
                 "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:01:00+00:00",
                 "--scheduled-first-run",
                 "2026-08-26T00:11:00+00:00",
                 "--scheduled-task-id",
@@ -722,6 +757,8 @@ class PulseCliTests(unittest.TestCase):
             paused.run(
                 "complete-wake",
                 "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:26:00+00:00",
                 now="2026-08-26T00:26:00+00:00",
             )
         )
@@ -736,6 +773,8 @@ class PulseCliTests(unittest.TestCase):
             reanchored.run(
                 "complete-wake",
                 "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:26:00+00:00",
                 "--scheduled-first-run",
                 "2026-08-26T00:36:00+00:00",
                 "--scheduled-task-id",
@@ -773,6 +812,8 @@ class PulseCliTests(unittest.TestCase):
             stale.run(
                 "complete-wake",
                 "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:26:00+00:00",
                 "--scheduled-first-run",
                 "2026-08-26T00:06:00+00:00",
                 now="2026-08-26T00:26:00+00:00",

@@ -136,8 +136,9 @@ does not mutate a task that has already been created.
 The program does not guess model settings from arbitrary prose. A user can
 write, for example, `use model gpt-5.6-terra with reasoning_effort medium` in
 the initial request; the host agent converts that explicit request to
-`--policy-json`. The generated canonical prompt then records the structured
-values, and every successor reuses the persisted configuration.
+`--policy-json`. The generated canonical prompt intentionally does not embed
+these mutable values; the persisted policy and task metadata are authoritative,
+and every successor reuses that persisted configuration.
 
 The host adapter may pass `--pause-confirmed` to `begin-wake` and
 `--schedule-reanchored` to `complete-wake` only after successful host-tool
@@ -520,8 +521,11 @@ next_not_before = ceil_to_scheduler_precision(created_at + cadence_seconds)
 This permits ordinary host-tool creation latency without allowing an early
 wake. If the host cannot prove the creation anchor and cadence, keep the
 disposition `PAUSED` and report the corresponding re-anchor/readback blocker.
-Direct first-run hosts remain backward compatible: their persisted first run
-must equal the completion-relative expectation or be at most one second later.
+The public standalone rearm path must include the persisted task creation
+anchor. A missing or pre-completion anchor remains paused; the persisted first
+run must equal the creation-anchor-plus-cadence expectation or be at most one
+second later. Older injected direct-first-run integrations remain compatible
+with the legacy completion callback path.
 
 Multiple pushes that finish before the next wake naturally coalesce into the
 latest head accepted by that wake's stable GraphQL snapshot. A head change

@@ -88,20 +88,13 @@ def build_standalone_task_handoff(
     canonical = canonical_repository(repository)
     target = f"{canonical}#{pr_number}"
     effective_policy = normalize_policy(policy)
-    task_settings = json.dumps(
-        {
-            "model": effective_policy["model"],
-            "reasoning_effort": effective_policy["reasoning_effort"],
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
     prompt = (
         "Use $codex-review-pulse from its loaded user-directory installation to "
         f"run exactly one automatic Codex review-remediation wake for {target} in "
         "this new standalone task/conversation. The structured task execution "
-        f"settings are {task_settings}; preserve them for every scheduled "
-        "successor in this run. "
+        "settings are authoritative in the persisted automation policy and task "
+        "metadata; preserve those settings for every scheduled successor in this "
+        "run. "
         "This is a scheduler-delivered "
         "standalone invocation, not a continuation of another task and not a "
         "same-task heartbeat; never reuse a Codex conversation or targetThreadId. "
@@ -1456,8 +1449,14 @@ def complete_wake(
     schedule_anchor_created_at: str | None = None,
     scheduled_task_id: str | None = None,
     completion_failure: Mapping[str, Any] | None = None,
+    require_schedule_anchor: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Complete one wake after proving schedule anchoring and successor identity."""
+    """Complete one wake after proving schedule anchoring and successor identity.
+
+    The public CLI passes ``require_schedule_anchor=True`` for its standalone
+    reanchor path. The default remains compatible with injected direct-first-run
+    callbacks used by older integrations.
+    """
     now = _iso(now)
     state = ensure_default_lifecycle(checkpoint)
     persisted_cadence = state["automation_policy"]["cadence_seconds"]
@@ -1531,6 +1530,26 @@ def complete_wake(
     next_not_before = _ceil_to_second(
         completed_at + timedelta(seconds=effective_cadence)
     ).isoformat()
+    if (
+        require_schedule_anchor
+        and schedule_next_wake is not None
+        and schedule_anchor_created_at is None
+    ):
+        return_state_result = _pause(
+            state,
+            reason_code="scheduled_task_anchor_missing",
+            now=now,
+            evidence={
+                "wake_completed_at": now,
+                "scheduled_task_created_at": None,
+                "scheduled_task_id": scheduled_task_id,
+            },
+            action="PAUSE_RECOVERY",
+            mutation_occurred=mutation_occurred,
+        )
+        state["next_not_before"] = next_not_before
+        state["last_wake_id"] = wake_id
+        return state, return_state_result
     state["wake_completed_at"] = now
     state["next_not_before"] = next_not_before
     state["active_wake_id"] = None
@@ -2258,6 +2277,7 @@ def main() -> None:
             schedule_anchor_created_at=args.scheduled_created_at,
             scheduled_task_id=args.scheduled_task_id,
             completion_failure=completion_failure,
+            require_schedule_anchor=args.schedule_reanchored,
         )
         _write(path, state, result)
         return

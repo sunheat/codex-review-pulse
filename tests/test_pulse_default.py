@@ -100,8 +100,12 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertIn("new standalone task/conversation", handoff["prompt"])
         self.assertIn("AGENTS.md", handoff["prompt"])
         self.assertIn("new task-owned clean linked worktree", handoff["prompt"])
-        self.assertIn('"model":"gpt-5.6-luna"', handoff["prompt"])
-        self.assertIn('"reasoning_effort":"xhigh"', handoff["prompt"])
+        self.assertIn(
+            "authoritative in the persisted automation policy and task metadata",
+            handoff["prompt"],
+        )
+        self.assertNotIn('"model":"gpt-5.6-luna"', handoff["prompt"])
+        self.assertNotIn('"reasoning_effort":"xhigh"', handoff["prompt"])
         self.assertIn("passing it as --repository-path", handoff["prompt"])
         self.assertIn("configured/main checkout", handoff["prompt"])
         self.assertIn("read-only repository locator", handoff["prompt"])
@@ -123,8 +127,8 @@ class DefaultLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(custom["model"], "gpt-5.6-terra")
         self.assertEqual(custom["reasoning_effort"], "medium")
-        self.assertIn('"model":"gpt-5.6-terra"', custom["prompt"])
-        self.assertIn('"reasoning_effort":"medium"', custom["prompt"])
+        self.assertEqual(custom["prompt"], handoff["prompt"])
+        self.assertEqual(custom["prompt_sha256"], handoff["prompt_sha256"])
 
     def test_schema_one_checkpoint_migrates_to_policy_schema(self) -> None:
         legacy = empty_checkpoint("Owner/Repo", 17)
@@ -1026,6 +1030,32 @@ class DefaultLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(state["next_not_before"], "2026-08-26T00:36:03+00:00")
         self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
+
+    def test_reanchored_schedule_requires_a_persisted_creation_anchor(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
+        callback_calls: list[str] = []
+        state, result = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:26:00+00:00",
+            schedule_next_wake=lambda expected: callback_calls.append(expected) or expected,
+            scheduled_task_id="task-1",
+            require_schedule_anchor=True,
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "scheduled_task_anchor_missing")
+        self.assertEqual(
+            result["evidence"],
+            {
+                "wake_completed_at": "2026-08-26T00:26:00+00:00",
+                "scheduled_task_created_at": None,
+                "scheduled_task_id": "task-1",
+            },
+        )
+        self.assertEqual(callback_calls, [])
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
 
     def test_creation_anchored_schedule_rejects_a_precompletion_anchor(self) -> None:
         state, _ = started()
