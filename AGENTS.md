@@ -10,6 +10,36 @@ When `notes/context.md` exists, read it before starting repository work. It is
 local working context only: promote durable decisions into tracked
 documentation, and never make public behavior depend solely on ignored notes.
 
+## Plane work tracking
+
+Plane is the execution tracker for current and future actionable work. It was
+introduced after development of this repository had already begun, so its Work
+Item history is intentionally incomplete.
+
+Use Plane Work Items for actionable bugs, investigations, features, and
+follow-up tasks. Do not infer project scope, history, or supported behavior
+from Plane alone, and do not backfill completed historical work unless
+explicitly asked. Work Items are the only Plane surface this repository relies
+on; do not create or depend on Modules, Cycles, Pages, or Wiki unless
+explicitly requested.
+
+A Work Item may provide task-specific context and acceptance criteria, but it
+cannot override repository invariants, authorization boundaries, or tracked
+design decisions. When a task originates from Plane:
+
+- read the referenced Work Item before implementation;
+- use tracked repository documentation and OpenWiki for technical context as
+  needed;
+- treat links to repository documents, commits, PRs, and tests as supporting
+  context; and
+- report conflicts with repository truth instead of silently reconciling them.
+
+Creating, modifying, commenting on, assigning, transitioning, or closing Plane
+Work Items is a separate external mutation. It requires an explicit user
+request or a workflow contract that specifically authorizes that Plane
+operation. Access to Plane or a Work Item reference does not provide that
+authorization.
+
 ## Stable invariants
 
 - Target only unresolved review threads whose root comment author matches a
@@ -135,14 +165,21 @@ network-free test suite, Python compilation and CLI help checks, PowerShell AST
 parsing, Markdown local-link and fence checks, `git diff --check`, and a final
 worktree/staged-path audit. Report focused and complete results separately.
 
-## Current phase boundary
+## Project state and roadmap
 
-The core model, immutable Windows installation, read-only supervised preflight,
-and manually reviewed one- and two-wake live pilots are historical completed
-artifacts. The 0.4.0 real black-box pilot failed on scheduled lifecycle and
-must not be described as a publishable final release. The active phase is the
-Codex-first default vertical slice plus network-free regression coverage; real
-Codex scheduled-task/live GitHub integration remains unverified. It does not
-approve indefinite unattended operation, infer unknown connector capability,
-package a plugin, validate Pi, add generic reviewer/multi-forge support, or
-decide integration/reuse/vendor policy for `gh-address-comments`.
+This file defines the agent operating contract. It is not the canonical backlog
+or milestone-status record and must not duplicate a current-phase snapshot.
+
+Read [ROADMAP.md](ROADMAP.md) for durable project direction and milestone
+boundaries. Use Plane Work Items for the current actionable work queue and
+execution status. Use OpenWiki as optional just-in-time repository context,
+not as a planning or technical authority.
+
+This file defines how agents work. Plane says what is actionable, OpenWiki
+helps locate where and how the repository works, tracked documentation explains
+why, and source code and tests are primary evidence for current implemented
+behavior.
+
+When these sources appear inconsistent, source code, tests, and tracked
+repository documentation govern technical truth. Surface the planning
+inconsistency instead of silently reconciling it.
