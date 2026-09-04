@@ -1073,6 +1073,22 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "scheduled_task_anchor_mismatch")
         self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
 
+    def test_creation_anchored_schedule_accepts_same_scheduler_second_as_completion(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
+        state, result = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:26:00.500000+00:00",
+            schedule_next_wake=lambda _: "2026-08-26T00:36:00+00:00",
+            schedule_anchor_created_at="2026-08-26T00:26:00+00:00",
+            scheduled_task_id="task-1",
+        )
+
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        self.assertEqual(result["next_not_before"], "2026-08-26T00:36:00+00:00")
+        self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
+
     def test_active_schedule_requires_a_delivered_task_id(self) -> None:
         state, _ = started()
         state, _ = pulse.record_snapshot(

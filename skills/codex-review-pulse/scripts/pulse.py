@@ -1591,7 +1591,13 @@ def complete_wake(
             parsed_anchor = _utc(schedule_anchor_created_at)
         except (TypeError, ValueError):
             parsed_anchor = None
-        if parsed_anchor is None or parsed_anchor < completed_at:
+        # Scheduler task metadata is represented at whole-second precision.
+        # Compare at that precision so a task created later in the same
+        # represented second is not rejected because ``now`` retained
+        # microseconds.
+        if parsed_anchor is None or parsed_anchor.replace(
+            microsecond=0
+        ) < completed_at.replace(microsecond=0):
             return_state_result = _pause(
                 state,
                 reason_code="scheduled_task_anchor_mismatch",

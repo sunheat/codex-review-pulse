@@ -571,7 +571,13 @@ class StandaloneInvocation:
                         "Standalone task readback returned no persisted creation time"
                     )
                 created_at = _utc(raw_created_at)
-                if created_at < completion:
+                # Scheduler task metadata is represented at whole-second
+                # precision.  Compare both timestamps at that precision so a
+                # task created later in the same represented second is not
+                # rejected because ``now`` retained microseconds.
+                if created_at.replace(microsecond=0) < completion.replace(
+                    microsecond=0
+                ):
                     raise StandaloneInvocationError(
                         "Standalone task creation predates wake completion"
                     )

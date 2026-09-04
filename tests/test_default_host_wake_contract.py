@@ -423,6 +423,26 @@ class DefaultHostWakeContractTests(unittest.TestCase):
             host.created_tasks["task-2"]["reasoning_effort"], "medium"
         )
 
+    def test_successor_creation_same_scheduler_second_as_completion_is_accepted(self) -> None:
+        host = InMemoryHost(
+            state=waiting_checkpoint(),
+            wake_ids=("fresh-wake-2",),
+            created_at="2026-08-26T00:37:00+00:00",
+        )
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+        invocation.begin()
+        invocation.snapshot()
+
+        result = invocation.invocation.complete(
+            action="WAIT_REVIEW",
+            now="2026-08-26T00:37:00.500000+00:00",
+            cadence_seconds=600,
+        )
+
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        self.assertEqual(result["scheduled_task_created_at"], "2026-08-26T00:37:00+00:00")
+        self.assertEqual(result["scheduled_task_id"], "task-2")
+
     def test_successor_creation_failure_completes_once_and_keeps_checkpoint_paused(self) -> None:
         host = InMemoryHost(
             state=waiting_checkpoint(),

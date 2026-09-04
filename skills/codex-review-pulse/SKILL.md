@@ -329,10 +329,13 @@ if successor_result is success:
         require SUCCESSOR.model == TASK_MODEL
         require SUCCESSOR.reasoning_effort == TASK_REASONING_EFFORT
         require SUCCESSOR.cadence_seconds == cadence_seconds
-        require SUCCESSOR.created_at >= COMPLETION_NOW
-        ACTUAL_FIRST_RUN = ceil_to_scheduler_precision(
+        require SUCCESSOR.created_at is at or after COMPLETION_NOW at scheduler precision
+        EXPECTED_FIRST_RUN = ceil_to_scheduler_precision(
             SUCCESSOR.created_at + cadence_seconds
         )
+        require SUCCESSOR.first_run is present
+        require SUCCESSOR.first_run matches EXPECTED_FIRST_RUN at scheduler precision
+        ACTUAL_FIRST_RUN = SUCCESSOR.first_run
     except Exception:
         # The task exists but its identity, cadence, or creation anchor is
         # unverified.
@@ -511,8 +514,9 @@ next_not_before = ceil_to_scheduler_precision(wake_completed_at + cadence_second
 Never rely on pausing and reactivating a fixed recurring task to reset its
 clock, and do not submit `DTSTART` during immediate automation creation. Create
 one new cadence-only successor immediately after choosing `wake_completed_at`.
-Read back its persisted ID, prompt, cadence, and `created_at`; require
-`created_at >= wake_completed_at`, then derive:
+Read back its persisted ID, prompt, cadence, and `created_at`; require the
+creation anchor to be at or after `wake_completed_at` at the scheduler's
+representable precision, then derive:
 
 ```text
 next_not_before = ceil_to_scheduler_precision(created_at + cadence_seconds)
