@@ -151,7 +151,7 @@ class InMemoryHost:
             raise AssertionError("test host requires a creation timestamp")
         first_run = (
             datetime.fromisoformat(created_at) + timedelta(seconds=cadence_seconds)
-        ).isoformat()
+        ).replace(microsecond=0).isoformat()
         self.created_tasks[task_id] = {
             "prompt": prompt,
             "first_run": first_run,
@@ -442,6 +442,60 @@ class DefaultHostWakeContractTests(unittest.TestCase):
         self.assertEqual(result["next_action"], "WAIT_REVIEW")
         self.assertEqual(result["scheduled_task_created_at"], "2026-08-26T00:37:00+00:00")
         self.assertEqual(result["scheduled_task_id"], "task-2")
+
+    def test_truncated_scheduler_first_run_is_accepted_after_later_creation(self) -> None:
+        host = InMemoryHost(
+            state=waiting_checkpoint(),
+            wake_ids=("fresh-wake-2",),
+            created_at="2026-09-02T08:46:13.793000+00:00",
+        )
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+        invocation.begin()
+        invocation.snapshot()
+
+        result = invocation.invocation.complete(
+            action="WAIT_REVIEW",
+            now="2026-09-02T08:46:13.761000+00:00",
+            cadence_seconds=600,
+        )
+
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        self.assertEqual(
+            host.created_tasks["task-2"]["first_run"],
+            "2026-09-02T08:56:13+00:00",
+        )
+        self.assertEqual(result["next_not_before"], "2026-09-02T08:56:13+00:00")
+        self.assertEqual(
+            result["scheduled_task_created_at"],
+            "2026-09-02T08:46:13.793000+00:00",
+        )
+
+    def test_genuinely_early_scheduler_first_run_is_rejected(self) -> None:
+        host = InMemoryHost(
+            state=waiting_checkpoint(),
+            wake_ids=("fresh-wake-2",),
+            created_at="2026-09-02T08:46:13.793000+00:00",
+        )
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+        invocation.begin()
+        invocation.snapshot()
+        host.first_run = "2026-09-02T08:56:12+00:00"
+
+        result = invocation.invocation.complete(
+            action="WAIT_REVIEW",
+            now="2026-09-02T08:46:13.761000+00:00",
+            cadence_seconds=600,
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+        self.assertEqual(result["reason_code"], "scheduled_task_reanchor_mismatch")
+        self.assertEqual(
+            result["evidence"],
+            {
+                "expected_first_run": "2026-09-02T08:56:13+00:00",
+                "observed_first_run": "2026-09-02T08:56:12+00:00",
+            },
+        )
 
     def test_successor_creation_failure_completes_once_and_keeps_checkpoint_paused(self) -> None:
         host = InMemoryHost(

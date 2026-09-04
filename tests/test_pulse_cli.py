@@ -804,7 +804,43 @@ class PulseCliTests(unittest.TestCase):
             )
         )
         self.assertEqual(result["next_action"], "WAIT_REVIEW")
-        self.assertEqual(result["next_not_before"], "2026-08-26T00:36:03+00:00")
+        self.assertEqual(result["next_not_before"], "2026-08-26T00:36:02+00:00")
+
+        incident = CliHarness(self)
+        incident.begin_and_snapshot()
+        result = incident.json_output(
+            incident.run(
+                "complete-wake",
+                "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-09-02T08:46:13.793000+00:00",
+                "--scheduled-first-run",
+                "2026-09-02T08:56:13+00:00",
+                "--scheduled-task-id",
+                "task-incident",
+                now="2026-09-02T08:46:13.761000+00:00",
+            )
+        )
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        self.assertEqual(result["next_not_before"], "2026-09-02T08:56:13+00:00")
+
+        early = CliHarness(self)
+        early.begin_and_snapshot()
+        result = early.json_output(
+            early.run(
+                "complete-wake",
+                "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-09-02T08:46:13.793000+00:00",
+                "--scheduled-first-run",
+                "2026-09-02T08:56:12+00:00",
+                "--scheduled-task-id",
+                "task-early",
+                now="2026-09-02T08:46:13.761000+00:00",
+            )
+        )
+        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+        self.assertEqual(result["reason_code"], "scheduled_task_reanchor_mismatch")
 
         stale = CliHarness(self)
         stale.begin_and_snapshot()

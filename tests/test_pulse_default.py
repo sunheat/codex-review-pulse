@@ -1023,12 +1023,12 @@ class DefaultLifecycleTests(unittest.TestCase):
         )
 
         self.assertEqual(result["next_action"], "WAIT_REVIEW")
-        self.assertEqual(result["next_not_before"], "2026-08-26T00:36:03+00:00")
+        self.assertEqual(result["next_not_before"], "2026-08-26T00:36:02+00:00")
         self.assertEqual(
             result["scheduled_task_created_at"],
             "2026-08-26T00:26:02.250000+00:00",
         )
-        self.assertEqual(state["next_not_before"], "2026-08-26T00:36:03+00:00")
+        self.assertEqual(state["next_not_before"], "2026-08-26T00:36:02+00:00")
         self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
 
     def test_reanchored_schedule_requires_a_persisted_creation_anchor(self) -> None:
@@ -1088,6 +1088,73 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertEqual(result["next_action"], "WAIT_REVIEW")
         self.assertEqual(result["next_not_before"], "2026-08-26T00:36:00+00:00")
         self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
+
+    def test_creation_anchored_schedule_accepts_truncated_scheduler_first_run(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
+        state, result = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-09-02T08:46:13.761000+00:00",
+            schedule_next_wake=lambda _: "2026-09-02T08:56:13+00:00",
+            schedule_anchor_created_at="2026-09-02T08:46:13.793000+00:00",
+            scheduled_task_id="task-1",
+        )
+
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        self.assertEqual(result["next_not_before"], "2026-09-02T08:56:13+00:00")
+        self.assertEqual(
+            result["scheduled_task_created_at"],
+            "2026-09-02T08:46:13.793000+00:00",
+        )
+        self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
+
+    def test_creation_anchored_schedule_rejects_genuinely_early_first_run(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
+        state, result = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-09-02T08:46:13.761000+00:00",
+            schedule_next_wake=lambda _: "2026-09-02T08:56:12+00:00",
+            schedule_anchor_created_at="2026-09-02T08:46:13.793000+00:00",
+            scheduled_task_id="task-1",
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+        self.assertEqual(result["reason_code"], "scheduled_task_reanchor_mismatch")
+        self.assertEqual(
+            result["evidence"],
+            {
+                "expected_first_run": "2026-09-02T08:56:13+00:00",
+                "observed_first_run": "2026-09-02T08:56:12+00:00",
+            },
+        )
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+
+    def test_creation_anchored_schedule_keeps_one_second_late_tolerance(self) -> None:
+        for observed, accepted in (
+            ("2026-09-02T08:56:14+00:00", True),
+            ("2026-09-02T08:56:15+00:00", False),
+        ):
+            with self.subTest(observed=observed):
+                state, _ = started()
+                state, _ = pulse.record_snapshot(
+                    state, snapshot(), wake_id="wake-1", now=NOW
+                )
+                state, result = pulse.complete_wake(
+                    state,
+                    wake_id="wake-1",
+                    now="2026-09-02T08:46:13.761000+00:00",
+                    schedule_next_wake=lambda _: observed,
+                    schedule_anchor_created_at="2026-09-02T08:46:13.793000+00:00",
+                    scheduled_task_id="task-1",
+                )
+
+                self.assertEqual(
+                    result["next_action"],
+                    "WAIT_REVIEW" if accepted else "PAUSE_BLOCKED",
+                )
 
     def test_active_schedule_requires_a_delivered_task_id(self) -> None:
         state, _ = started()

@@ -50,6 +50,10 @@ from state_model import (
 DEFAULT_CADENCE_SECONDS = 600
 DEFAULT_MODE_SCHEMA_VERSION = 2
 STANDALONE_TASK_PROTOCOL_VERSION = 8
+# The local scheduler exposes task metadata at whole-second precision.  The
+# re-anchor path must use that same representation for expected and observed
+# first-run values; direct completion callbacks retain their exact/ceil path.
+SCHEDULER_TIMESTAMP_PRECISION = "whole-second-truncation"
 SCHEDULE_REANCHOR_TOLERANCE = timedelta(seconds=1)
 HEARTBEAT_BATCH_ORDER = (
     "record-outcome",
@@ -305,14 +309,23 @@ def _ceil_to_second(value: str | datetime) -> datetime:
     return parsed.replace(microsecond=0)
 
 
+def _truncate_to_scheduler_precision(value: str | datetime) -> datetime:
+    """Represent a scheduler timestamp using its authoritative whole second."""
+    return _utc(value).replace(microsecond=0)
+
+
 def _schedule_times_match(
     expected: str | datetime,
     observed: str | datetime,
     *,
     ordered: bool,
+    scheduler_precision: bool = False,
 ) -> bool:
     """Compare schedule instants with a bounded, direction-aware tolerance."""
-    delta = _utc(observed) - _utc(expected)
+    normalize = (
+        _truncate_to_scheduler_precision if scheduler_precision else _utc
+    )
+    delta = normalize(observed) - normalize(expected)
     if ordered:
         return timedelta(0) <= delta <= SCHEDULE_REANCHOR_TOLERANCE
     return -SCHEDULE_REANCHOR_TOLERANCE <= delta <= SCHEDULE_REANCHOR_TOLERANCE
@@ -1595,9 +1608,9 @@ def complete_wake(
         # Compare at that precision so a task created later in the same
         # represented second is not rejected because ``now`` retained
         # microseconds.
-        if parsed_anchor is None or parsed_anchor.replace(
-            microsecond=0
-        ) < completed_at.replace(microsecond=0):
+        if parsed_anchor is None or _truncate_to_scheduler_precision(
+            parsed_anchor
+        ) < _truncate_to_scheduler_precision(completed_at):
             return_state_result = _pause(
                 state,
                 reason_code="scheduled_task_anchor_mismatch",
@@ -1611,7 +1624,7 @@ def complete_wake(
             state["next_not_before"] = next_not_before
             state["last_wake_id"] = wake_id
             return state, return_state_result
-        next_not_before = _ceil_to_second(
+        next_not_before = _truncate_to_scheduler_precision(
             parsed_anchor + timedelta(seconds=effective_cadence)
         ).isoformat()
         state["next_not_before"] = next_not_before
@@ -1625,6 +1638,7 @@ def complete_wake(
         next_not_before,
         observed_first_run,
         ordered=True,
+        scheduler_precision=schedule_anchor_created_at is not None,
     ):
         return_state_result = _pause(
             state,

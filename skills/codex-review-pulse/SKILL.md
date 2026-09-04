@@ -28,7 +28,7 @@ the old heartbeat activated too early, used fixed-cadence overlap, allowed a
 and continued after `PAUSE_BLOCKED`. Do not describe `0.4.0` as production
 ready or use its old scheduled-task protocol as the default.
 
-Version `0.8.5` is the Codex-first default clean-context scheduling candidate. Its
+Version `0.8.6` is the Codex-first default clean-context scheduling candidate. Its
 real scheduled-task and live GitHub integration remains unverified until an
 independent forward test completes; do not describe that integration as proven
 before then.
@@ -330,7 +330,7 @@ if successor_result is success:
         require SUCCESSOR.reasoning_effort == TASK_REASONING_EFFORT
         require SUCCESSOR.cadence_seconds == cadence_seconds
         require SUCCESSOR.created_at is at or after COMPLETION_NOW at scheduler precision
-        EXPECTED_FIRST_RUN = ceil_to_scheduler_precision(
+        EXPECTED_FIRST_RUN = truncate_to_scheduler_precision(
             SUCCESSOR.created_at + cadence_seconds
         )
         require SUCCESSOR.first_run is present
@@ -519,12 +519,18 @@ creation anchor to be at or after `wake_completed_at` at the scheduler's
 representable precision, then derive:
 
 ```text
-next_not_before = ceil_to_scheduler_precision(created_at + cadence_seconds)
+next_not_before = truncate_to_scheduler_precision(created_at + cadence_seconds)
 ```
 
-This permits ordinary host-tool creation latency without allowing an early
-wake. If the host cannot prove the creation anchor and cadence, keep the
-disposition `PAUSED` and report the corresponding re-anchor/readback blocker.
+The host-supported scheduler represents task metadata by truncating fractional
+seconds. The controller applies that same whole-second representation to the
+creation anchor, expected first run, and read-back first run; this accepts a
+sub-second representation difference without adding an arbitrary early-wake
+tolerance. A first run in an earlier represented second still fails closed.
+The creation anchor must still be at or after `wake_completed_at` at the
+scheduler's representable precision. If the host cannot prove the creation
+anchor and cadence, keep the disposition `PAUSED` and report the corresponding
+re-anchor/readback blocker.
 The public standalone rearm path must include the persisted task creation
 anchor. A missing or pre-completion anchor remains paused; the persisted first
 run must equal the creation-anchor-plus-cadence expectation or be at most one
@@ -604,8 +610,8 @@ invocation:
    (`standalone`), absent `target_thread_id`, model, reasoning settings,
    cadence, and creation timestamp. Require every field to match the
    canonical handoff, require its creation timestamp to be at or after the
-   chosen completion timestamp, and derive its first run as creation time plus
-   cadence.
+   chosen completion timestamp at scheduler precision, and derive its first
+   run as the whole-second-truncated creation time plus cadence.
 11. After successor creation and readback succeed, call `complete-wake` exactly
     once with the same completion timestamp, `--schedule-reanchored`,
     `--scheduled-created-at`, the derived `--scheduled-first-run`, and

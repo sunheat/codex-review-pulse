@@ -40,9 +40,12 @@ prompt and digest, scheduler/conversation metadata, absent target attachment,
 model, reasoning settings, cadence, and creation timestamp. Pass
 `--schedule-reanchored` with
 `--scheduled-created-at`, `--scheduled-first-run` derived from creation time
-plus cadence, and `--scheduled-task-id`. The controller requires the creation
-anchor not to predate wake completion and verifies the derived first run with
-scheduler-precision tolerance.
+plus cadence, and `--scheduled-task-id`. The host-supported scheduler exposes
+task metadata at whole-second precision by truncating fractional seconds, so
+the controller applies that same quantization to the creation anchor, expected
+first run, and read-back value. It still rejects a first run in an earlier
+represented second and requires the creation anchor not to predate wake
+completion at scheduler precision.
 
 Use a clean source repository and an exact release-candidate commit throughout
 the commands below. OpenAI documents `$HOME/.agents/skills` as the user-level
@@ -67,7 +70,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
 This extracts `skills/codex-review-pulse` from the named Git commit into
 `$env:USERPROFILE\.agents\skills\codex-review-pulse`. It does not copy the
 mutable working-tree files and does not create a symlink. The installed
-manifest records version `0.8.5`, the full source commit, and SHA-256 file
+manifest records version `0.8.6`, the full source commit, and SHA-256 file
 hashes. Verification independently reconstructs that inventory from the pinned
 Git commit, so changing both an installed file and its adjacent manifest does
 not reauthorize the modified bytes.
@@ -81,7 +84,7 @@ explicit alternate configured location.
 
 ```powershell
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
-  --expected-version 0.8.5 `
+  --expected-version 0.8.6 `
   --expected-source-commit $commit
 ```
 
@@ -100,7 +103,7 @@ python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_prefligh
   --repo OWNER/REPO `
   --pr NUMBER `
   --repository-path C:\path\to\target-repository `
-  --expected-skill-version 0.8.5 `
+  --expected-skill-version 0.8.6 `
   --expected-source-commit $commit `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector `

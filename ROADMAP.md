@@ -101,6 +101,15 @@ The network-free tests do not create real scheduler tasks, install skills, or
 mutate GitHub. Real Codex scheduled-task and live GitHub integration remains
 unverified.
 
+## 0.8.6 scheduler timestamp quantization
+
+The host-supported scheduler's task metadata is authoritative at whole-second
+precision with fractional seconds truncated. The standalone re-anchor host and
+controller use that same quantization for creation-anchor and first-run
+validation, accepting representation-only sub-second differences while still
+rejecting an earlier represented second. Direct completion callbacks retain
+their exact completion-relative ceiling behavior.
+
 ## Deferred milestones
 
 - public-API connector and automatic-review detection bound to a head OID;

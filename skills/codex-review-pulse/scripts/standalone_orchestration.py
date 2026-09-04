@@ -19,6 +19,9 @@ from default_policy import PolicyError, normalize_policy
 
 
 REARM_ACTIONS = {"WAIT_REVIEW", "WAIT_RETRY", "REQUEST_REVIEW", "RUN_BATCH"}
+# The local scheduler exposes task metadata at whole-second precision.  Keep
+# host-side derivation aligned with pulse.py's re-anchor validation.
+SCHEDULER_TIMESTAMP_PRECISION = "whole-second-truncation"
 
 
 class StandaloneInvocationError(RuntimeError):
@@ -86,18 +89,18 @@ def _utc(value: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _ceil_to_second(value: datetime) -> datetime:
-    value = value.astimezone(UTC)
-    if value.microsecond:
-        value += timedelta(seconds=1)
-    return value.replace(microsecond=0)
+def _truncate_to_scheduler_precision(value: datetime) -> datetime:
+    """Represent a scheduler timestamp using its authoritative whole second."""
+    return value.astimezone(UTC).replace(microsecond=0)
 
 
 def _first_run_matches(expected: str, observed: object) -> bool:
     if not isinstance(observed, str) or not observed.strip():
         return False
     try:
-        delta = _utc(observed) - _utc(expected)
+        delta = _truncate_to_scheduler_precision(_utc(observed)) - (
+            _truncate_to_scheduler_precision(_utc(expected))
+        )
     except (TypeError, ValueError):
         return False
     return timedelta(0) <= delta <= timedelta(seconds=1)
@@ -582,7 +585,7 @@ class StandaloneInvocation:
                         "Standalone task creation predates wake completion"
                     )
                 scheduled_created_at = created_at.isoformat()
-                expected_first_run = _ceil_to_second(
+                expected_first_run = _truncate_to_scheduler_precision(
                     created_at + timedelta(seconds=cadence_seconds)
                 ).isoformat()
                 observed_first_run = task.get("first_run")
