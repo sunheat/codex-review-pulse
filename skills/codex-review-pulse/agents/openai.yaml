@@ -1,4 +1,4 @@
 interface:
   display_name: "Codex Review Pulse"
   short_description: "Autonomously fix Codex PR review issues until clean"
-  default_prompt: "Use $codex-review-pulse to automatically fix this pull request's Codex review issues until no new issues appear. Run pulse.py adjacent to the loaded installed SKILL.md; use its canonical heartbeat prompt and publication gate; continue across completion-relative wakes until a Codex-specific stop condition or hard safety blocker."
+  default_prompt: "Use $codex-review-pulse to automatically fix this pull request's Codex review issues until no new issues appear. Run pulse.py adjacent to the loaded installed SKILL.md; use its canonical standalone-task prompt and publication gate; continue in a new clean-context task/conversation across completion-relative wakes until a Codex-specific stop condition or hard safety blocker."

@@ -153,6 +153,18 @@ class CliHarness:
             capture_output=True,
             text=True,
         )
+        subprocess.run(
+            ["git", "-C", str(self.checkout), "-c", "user.name=Pulse Test", "-c", "user.email=pulse@example.test", "commit", "--allow-empty", "-m", "test: initialize checkout"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.initial_head = subprocess.run(
+            ["git", "-C", str(self.checkout), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
         self.fake_bin = root / "bin"
         self.fake_bin.mkdir()
         (self.fake_bin / "fake_gh.py").write_text(FAKE_GH, encoding="utf-8")
@@ -163,7 +175,13 @@ class CliHarness:
         self.fixture_path = root / "fixture.json"
         self.counts_path = root / "mutation-count.txt"
         self.calls_path = root / "graphql-count.txt"
-        self.write_fixture(fixture or self.default_fixture())
+        payload = dict(fixture or self.default_fixture())
+        if payload.get("head_oid") == "HEAD1":
+            payload["head_oid"] = self.initial_head
+        for review in payload.get("reviews", []):
+            if review.get("commit", {}).get("oid") == "HEAD1":
+                review["commit"]["oid"] = payload["head_oid"]
+        self.write_fixture(payload)
 
     @staticmethod
     def default_fixture() -> dict:
@@ -273,12 +291,16 @@ class PulseCliTests(unittest.TestCase):
         self.assertIn("confirm-policy", root_help)
         self.assertIn("configure-policy", root_help)
         self.assertIn("heartbeat-prompt", root_help)
+        self.assertIn("standalone-task-prompt", root_help)
         self.assertIn("prepare-publication", root_help)
         self.assertIn("--pause-confirmed", begin_help)
+        self.assertIn("--delivered-task-id", begin_help)
         self.assertIn("--policy-json", begin_help)
         self.assertIn("--policy-json", configure_help)
         self.assertIn("--schedule-reanchored", complete_help)
         self.assertIn("--scheduled-first-run", complete_help)
+        self.assertIn("--scheduled-created-at", complete_help)
+        self.assertIn("--completion-failure", complete_help)
 
     def test_canonical_heartbeat_prompt_is_rendered_without_a_checkpoint(self) -> None:
         harness = CliHarness(self)
@@ -291,6 +313,161 @@ class PulseCliTests(unittest.TestCase):
             result["batch_order"].index("exact-resolution"),
             result["batch_order"].index("commit"),
         )
+        self.assertEqual(result["conversation_mode"], "standalone")
+        self.assertEqual(result["model"], "gpt-5.6-luna")
+        self.assertEqual(result["reasoning_effort"], "xhigh")
+        self.assertIsNone(result["target_thread_id"])
+        self.assertEqual(result["checkout_mode"], "new-linked-worktree-per-wake")
+        self.assertEqual(
+            result["configured_checkout_role"], "read-only-repository-locator"
+        )
+        self.assertFalse(result["reuse_worktree"])
+        self.assertEqual(
+            result["schedule_anchor_mode"], "persisted-created-at-plus-cadence"
+        )
+        self.assertFalse(result["submit_dtstart"])
+        self.assertNotIn("same heartbeat", result["prompt"].lower())
+
+        alias = harness.json_output(harness.run("standalone-task-prompt"))
+        self.assertEqual(alias, result)
+
+        custom = harness.json_output(
+            harness.run(
+                "--policy-json",
+                '{"model":"gpt-5.6-terra","reasoning_effort":"medium"}',
+                "standalone-task-prompt",
+            )
+        )
+        self.assertEqual(custom["model"], "gpt-5.6-terra")
+        self.assertEqual(custom["reasoning_effort"], "medium")
+
+    def test_public_begin_wake_authenticates_the_delivered_task(self) -> None:
+        harness = CliHarness(self)
+        harness.begin_and_snapshot()
+        harness.json_output(
+            harness.run(
+                "complete-wake",
+                "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:01:00+00:00",
+                "--scheduled-first-run",
+                "2026-08-26T00:11:00+00:00",
+                "--scheduled-task-id",
+                "task-1",
+                now="2026-08-26T00:01:00+00:00",
+            )
+        )
+        calls_before = harness.graphql_count()
+
+        result = harness.json_output(
+            harness.run(
+                "begin-wake",
+                "--pause-confirmed",
+                "--delivered-task-id",
+                "stale-task",
+                wake_id="wake-2",
+                now="2026-08-26T00:11:00+00:00",
+            )
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "scheduled_task_identity_mismatch")
+        self.assertEqual(harness.graphql_count(), calls_before)
+        state = load_checkpoint(
+            checkpoint_path("owner/repo", 17, repository_path=harness.checkout)
+        )
+        self.assertEqual(
+            state["failure_latch"]["reason_code"],
+            "scheduled_task_identity_mismatch",
+        )
+
+    def test_complete_wake_requires_a_successor_id_before_activation(self) -> None:
+        harness = CliHarness(self)
+        harness.begin_and_snapshot()
+
+        result = harness.json_output(
+            harness.run(
+                "complete-wake",
+                "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:01:00+00:00",
+                "--scheduled-first-run",
+                "2026-08-26T00:11:00+00:00",
+                now="2026-08-26T00:01:00+00:00",
+            )
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "scheduled_task_identity_missing")
+        state = load_checkpoint(
+            checkpoint_path("owner/repo", 17, repository_path=harness.checkout)
+        )
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+        self.assertNotEqual(state["scheduled_task_disposition"], "ACTIVE")
+
+    def test_complete_wake_requires_creation_anchor_before_activation(self) -> None:
+        harness = CliHarness(self)
+        harness.begin_and_snapshot()
+
+        result = harness.json_output(
+            harness.run(
+                "complete-wake",
+                "--schedule-reanchored",
+                "--scheduled-first-run",
+                "2026-08-26T00:11:00+00:00",
+                "--scheduled-task-id",
+                "task-1",
+                now="2026-08-26T00:01:00+00:00",
+            )
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "scheduled_task_anchor_missing")
+        state = load_checkpoint(
+            checkpoint_path("owner/repo", 17, repository_path=harness.checkout)
+        )
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+        self.assertEqual(
+            state["failure_latch"]["reason_code"],
+            "scheduled_task_anchor_missing",
+        )
+
+    def test_complete_wake_persists_a_successor_readback_failure(self) -> None:
+        harness = CliHarness(self)
+        harness.begin_and_snapshot()
+        failure_path = Path(harness.directory.name) / "completion-failure.json"
+        failure_path.write_text(
+            json.dumps(
+                {
+                    "reason_code": "successor_cleanup_unconfirmed",
+                    "evidence": {
+                        "successor_task_id": "task-2",
+                        "pause_confirmed": False,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = harness.json_output(
+            harness.run(
+                "complete-wake",
+                "--completion-failure",
+                str(failure_path),
+                now="2026-08-26T00:01:00+00:00",
+            )
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "successor_cleanup_unconfirmed")
+        state = load_checkpoint(
+            checkpoint_path("owner/repo", 17, repository_path=harness.checkout)
+        )
+        self.assertEqual(
+            state["failure_latch"]["reason_code"],
+            "successor_cleanup_unconfirmed",
+        )
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
 
     def test_prompt_policy_is_persisted_on_initial_wake_and_can_be_updated(self) -> None:
         harness = CliHarness(self)
@@ -308,8 +485,12 @@ class PulseCliTests(unittest.TestCase):
             harness.run(
                 "complete-wake",
                 "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:01:00+00:00",
                 "--scheduled-first-run",
                 "2026-08-26T00:11:00+00:00",
+                "--scheduled-task-id",
+                "task-1",
                 now="2026-08-26T00:01:00+00:00",
             )
         )
@@ -325,6 +506,20 @@ class PulseCliTests(unittest.TestCase):
         self.assertEqual(state["automation_policy"]["max_wakes"], 8)
         self.assertFalse(state["automation_policy"]["allow_test_changes"])
         self.assertEqual(state["automation_policy"]["notifications"], "every-wake")
+
+        model_update = harness.json_output(
+            harness.run(
+                "configure-policy",
+                "--policy-json",
+                '{"model":"gpt-5.6-terra","reasoning_effort":"medium"}',
+            )
+        )
+        self.assertEqual(model_update["next_action"], "POLICY_UPDATED")
+        state = load_checkpoint(
+            checkpoint_path("owner/repo", 17, repository_path=harness.checkout)
+        )
+        self.assertEqual(state["automation_policy"]["model"], "gpt-5.6-terra")
+        self.assertEqual(state["automation_policy"]["reasoning_effort"], "medium")
 
     def test_confirm_policy_resumes_a_supervised_frozen_batch(self) -> None:
         harness = CliHarness(
@@ -460,8 +655,12 @@ class PulseCliTests(unittest.TestCase):
             harness.run(
                 "complete-wake",
                 "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:01:00+00:00",
                 "--scheduled-first-run",
                 "2026-08-26T00:11:00+00:00",
+                "--scheduled-task-id",
+                "task-1",
                 now="2026-08-26T00:01:00+00:00",
             )
         )
@@ -473,6 +672,8 @@ class PulseCliTests(unittest.TestCase):
             harness.run(
                 "begin-wake",
                 "--pause-confirmed",
+                "--delivered-task-id",
+                "task-1",
                 wake_id="wake-2",
                 now="2026-08-26T00:11:00+00:00",
             )
@@ -556,6 +757,8 @@ class PulseCliTests(unittest.TestCase):
             paused.run(
                 "complete-wake",
                 "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:26:00+00:00",
                 now="2026-08-26T00:26:00+00:00",
             )
         )
@@ -570,8 +773,12 @@ class PulseCliTests(unittest.TestCase):
             reanchored.run(
                 "complete-wake",
                 "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:26:00+00:00",
                 "--scheduled-first-run",
                 "2026-08-26T00:36:00+00:00",
+                "--scheduled-task-id",
+                "task-2",
                 now="2026-08-26T00:26:00+00:00",
             )
         )
@@ -579,6 +786,61 @@ class PulseCliTests(unittest.TestCase):
         state = load_checkpoint(checkpoint_path("owner/repo", 17, repository_path=reanchored.checkout))
         self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
         self.assertEqual(state["next_not_before"], "2026-08-26T00:36:00+00:00")
+        self.assertEqual(state["scheduled_task_id"], "task-2")
+
+        creation_anchored = CliHarness(self)
+        creation_anchored.begin_and_snapshot()
+        result = creation_anchored.json_output(
+            creation_anchored.run(
+                "complete-wake",
+                "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:26:02.250000+00:00",
+                "--scheduled-first-run",
+                "2026-08-26T00:36:03+00:00",
+                "--scheduled-task-id",
+                "task-3",
+                now="2026-08-26T00:26:00+00:00",
+            )
+        )
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        self.assertEqual(result["next_not_before"], "2026-08-26T00:36:02+00:00")
+
+        incident = CliHarness(self)
+        incident.begin_and_snapshot()
+        result = incident.json_output(
+            incident.run(
+                "complete-wake",
+                "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-09-02T08:46:13.793000+00:00",
+                "--scheduled-first-run",
+                "2026-09-02T08:56:13+00:00",
+                "--scheduled-task-id",
+                "task-incident",
+                now="2026-09-02T08:46:13.761000+00:00",
+            )
+        )
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        self.assertEqual(result["next_not_before"], "2026-09-02T08:56:13+00:00")
+
+        early = CliHarness(self)
+        early.begin_and_snapshot()
+        result = early.json_output(
+            early.run(
+                "complete-wake",
+                "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-09-02T08:46:13.793000+00:00",
+                "--scheduled-first-run",
+                "2026-09-02T08:56:12+00:00",
+                "--scheduled-task-id",
+                "task-early",
+                now="2026-09-02T08:46:13.761000+00:00",
+            )
+        )
+        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+        self.assertEqual(result["reason_code"], "scheduled_task_reanchor_mismatch")
 
         stale = CliHarness(self)
         stale.begin_and_snapshot()
@@ -586,6 +848,8 @@ class PulseCliTests(unittest.TestCase):
             stale.run(
                 "complete-wake",
                 "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:26:00+00:00",
                 "--scheduled-first-run",
                 "2026-08-26T00:06:00+00:00",
                 now="2026-08-26T00:26:00+00:00",
@@ -613,7 +877,7 @@ class PulseCliTests(unittest.TestCase):
             {
                 "id": "R1",
                 "state": "APPROVED",
-                "commit": {"oid": "HEAD1"},
+                "commit": {"oid": fixture["head_oid"]},
                 "author": {"login": "chatgpt-codex-connector"},
             }
         ]

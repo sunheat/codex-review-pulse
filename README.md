@@ -30,15 +30,15 @@ wake, and continued after `PAUSE_BLOCKED` by clearing a latch with a generated
 recovery authorization. The old scheduled-task semantics must not be used as
 the default or described as production-ready.
 
-Version `0.7.1` is the current Codex-first default automation-policy candidate.
+Version `0.8.8` is the current Codex-first default clean-context scheduling candidate.
 Its real scheduled-task and live GitHub integration remains unverified until an
 independent forward test completes.
 
 Default checkpoint writes use atomic file replacement under the target
 repository's Git common directory. The checkpoint includes `wake_id`, wake
-phase/timestamps, completion-relative `next_not_before`, heartbeat disposition,
-review epoch, targeted batch, per-thread outcomes, resolution evidence, and
-publication/recovery status. Only a final `WAIT_REVIEW`, `WAIT_RETRY`, or
+phase/timestamps, completion-relative `next_not_before`, standalone task kind
+and successor ID, review epoch, targeted batch, per-thread outcomes, resolution
+evidence, and publication/recovery status. Only a final `WAIT_REVIEW`, `WAIT_RETRY`, or
 successful same-head `REQUEST_REVIEW` may rearm a next wake; all stop and pause
 results remain `PAUSED`.
 
@@ -86,7 +86,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py update \
   --source-repository . \
   --source-commit "$commit"
 python "$HOME/.agents/skills/codex-review-pulse/scripts/manage_pilot_install.py" verify \
-  --expected-version 0.7.1 \
+  --expected-version 0.8.8 \
   --expected-source-commit "$commit"
 ```
 
@@ -104,7 +104,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
   --source-repository . `
   --source-commit $commit
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
-  --expected-version 0.7.1 `
+  --expected-version 0.8.8 `
   --expected-source-commit $commit
 ```
 
@@ -115,7 +115,7 @@ no other runner targets the PR:
 ```powershell
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_preflight.py `
   --repo OWNER/REPO --pr NUMBER `
-  --expected-skill-version 0.7.1 `
+  --expected-skill-version 0.8.8 `
   --expected-source-commit $commit `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector `
@@ -156,16 +156,72 @@ target before computing the Git-common-directory checkpoint path and rejects a
 later target mismatch instead of drifting to another PR. An ambiguous checkout
 must be stopped and supplied an explicit `--repo OWNER/REPO --pr NUMBER`.
 
-The host keeps the heartbeat `PAUSED` while a wake is running and reanchors
-only a later `WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head
-`REQUEST_REVIEW` to the first scheduler-representable instant at or after
-`wake_completed_at + cadence_seconds`. The persisted first run may be equal to
-or at most one second later than that ordered target; unordered timestamp
-comparisons allow one second on either side. The default policy has no
-wake/deadline/retry budget; prompt-supplied limits are persisted and stop with
-`STOP_POLICY_LIMIT`. All other stop, pause, recovery, closed, expired, and
-unknown results remain paused. See the
+Each scheduler delivery runs in a new standalone task/conversation. The host
+pauses the delivered task, then creates one paused successor with the unchanged
+canonical prompt only after a rearmable result. The host-supported path creates
+a cadence-only recurring task without `DTSTART`, reads back its persisted ID,
+prompt and digest, scheduler/conversation metadata, absent target attachment,
+model, reasoning settings, cadence, paused status, and creation timestamp, and
+derives its first run from `created_at + cadence_seconds`. It activates only
+the verified task before checkpoint completion. The host-supported scheduler
+represents these
+timestamps by truncating fractional seconds; the controller uses the same
+whole-second quantization for the creation anchor and first-run comparison,
+while still rejecting a first run in an earlier represented second. The
+creation anchor must not predate `wake_completed_at` at scheduler precision; the
+invocation ends immediately after `complete-wake`.
+The default policy has no wake/deadline/retry budget;
+prompt-supplied limits are persisted and stop with `STOP_POLICY_LIMIT`. All
+other stop, pause, recovery, closed, expired, and unknown results remain
+paused. See the
 [default Skill](skills/codex-review-pulse/SKILL.md).
+
+Every Codex cron pause or activation preserves the complete persisted task
+definition and changes only its status. A status-only update is rejected by the
+local host, so the task metadata must be read before the first pause mutation.
+
+### Task model configuration
+
+The default path exposes the scheduled task's model settings through the
+persisted `automation_policy`. Its defaults are:
+
+```json
+{"model":"gpt-5.6-luna","reasoning_effort":"xhigh"}
+```
+
+The same fields can be supplied in `--policy-json` for the initial
+`standalone-task-prompt` or `begin-wake`, or changed later with
+`configure-policy` when no wake or frozen batch is active. For example:
+
+```powershell
+python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pulse.py `
+  --repo OWNER/REPO --pr NUMBER `
+  --policy-json '{"model":"gpt-5.6-luna","reasoning_effort":"xhigh"}' `
+  standalone-task-prompt
+```
+
+`standalone-task-prompt` returns these values for the host to map to its
+scheduled-task fields (`model` and `reasoningEffort`). The host must apply the
+same values when creating each standalone successor, and the program verifies
+them during successor readback. A policy update affects later successors; it
+does not mutate an already-created task. Model availability remains a host
+capability and is not hard-coded in the repository.
+
+In the user's initial request, explicit wording such as “use model
+`gpt-5.6-terra` with `reasoning_effort=medium`” is converted by the host agent
+to the structured policy fields before it renders the handoff. The program
+does not perform fuzzy parsing of arbitrary prose. The generated canonical
+prompt records the selected settings, and every scheduled successor reuses
+the persisted values.
+
+Each delivery also creates a new clean linked worktree at the independently
+verified remote PR head. The scheduler's configured project checkout is only a
+read-only repository locator: it is never switched, reset, cleaned, or used as
+the repair workspace. Pulse commands, edits, validation, commit, and push all
+run from the wake-owned worktree, while the linked worktree shares the
+Git-common-dir checkpoint required for safe cross-wake continuity. Before a
+batch is frozen, the pulse CLI verifies that the worktree `HEAD` still matches
+the stable snapshot head and pauses on a mismatch.
 
 Any number of pushes completed before the next wake are intentionally
 coalesced: the next stable snapshot processes only the latest observed head.
@@ -187,7 +243,9 @@ pauses recovery instead of being folded into that active batch.
 - Focused-validate and resolve each exact frozen thread before aggregate
   validation and publication. In autonomous mode, repair a stale PR-scoped
   test or implementation defect and retry recoverable failures instead of
-  stopping at the first red check; repeated no-progress failures still pause.
+  stopping at the first red check; persist an immutable patch manifest for any
+  uncommitted fix before a retry wake, and restore it in the next clean worktree.
+  Repeated no-progress failures still pause.
 - Publish at most one commit and one push for the aggregate batch.
 - Refuse to overwrite an unexpectedly advanced PR head.
 - Stop immediately when no targeted Codex threads remain and either a

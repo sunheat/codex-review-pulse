@@ -15,6 +15,11 @@ import pulse  # noqa: E402
 
 
 NOW = "2026-08-26T00:00:00+00:00"
+PENDING_REPAIR = {
+    "patch_path": "C:/git-common/codex-review-pulse/pending.patch",
+    "patch_sha256": "a" * 64,
+    "frozen_head_oid": "HEAD1",
+}
 
 
 def snapshot(
@@ -39,20 +44,43 @@ def snapshot(
 
 def started(checkpoint=None, *, wake_id: str = "wake-1", now: str = NOW):
     state = checkpoint or empty_checkpoint("Owner/Repo", 17)
+    delivered_task_id = (
+        state.get("scheduled_task_id")
+        if state.get("scheduled_task_disposition") == "ACTIVE"
+        else None
+    )
     return pulse.begin_wake(
         state,
         wake_id=wake_id,
         now=now,
         pause_heartbeat=lambda: True,
+        delivered_task_id=delivered_task_id,
     )
 
 
 class DefaultLifecycleTests(unittest.TestCase):
-    def test_heartbeat_handoff_is_target_bound_and_orders_publication(self) -> None:
+    def test_standalone_handoff_is_target_bound_and_orders_publication(self) -> None:
         handoff = pulse.build_heartbeat_handoff("Owner/Repo", 17)
 
         self.assertEqual(handoff["repository"], "owner/repo")
         self.assertEqual(handoff["pull_request_number"], 17)
+        self.assertEqual(handoff["protocol_version"], 10)
+        self.assertEqual(handoff["model"], "gpt-5.6-luna")
+        self.assertEqual(handoff["reasoning_effort"], "xhigh")
+        self.assertEqual(handoff["scheduler_kind"], "cron")
+        self.assertEqual(handoff["conversation_mode"], "standalone")
+        self.assertFalse(handoff["reuse_conversation"])
+        self.assertIsNone(handoff["target_thread_id"])
+        self.assertEqual(handoff["checkpoint_scope"], "git-common-dir")
+        self.assertEqual(handoff["checkout_mode"], "new-linked-worktree-per-wake")
+        self.assertEqual(
+            handoff["configured_checkout_role"], "read-only-repository-locator"
+        )
+        self.assertFalse(handoff["reuse_worktree"])
+        self.assertEqual(
+            handoff["schedule_anchor_mode"], "persisted-created-at-plus-cadence"
+        )
+        self.assertFalse(handoff["submit_dtstart"])
         self.assertEqual(
             handoff["batch_order"],
             [
@@ -69,6 +97,40 @@ class DefaultLifecycleTests(unittest.TestCase):
         )
         self.assertIn("owner/repo#17", handoff["prompt"])
         self.assertIn("Never commit or push before every frozen thread is resolved", handoff["prompt"])
+        self.assertIn("new standalone task/conversation", handoff["prompt"])
+        self.assertIn("AGENTS.md", handoff["prompt"])
+        self.assertIn("new task-owned clean linked worktree", handoff["prompt"])
+        self.assertIn(
+            "authoritative in the persisted automation policy and task metadata",
+            handoff["prompt"],
+        )
+        self.assertNotIn('"model":"gpt-5.6-luna"', handoff["prompt"])
+        self.assertNotIn('"reasoning_effort":"xhigh"', handoff["prompt"])
+        self.assertIn("passing it as --repository-path", handoff["prompt"])
+        self.assertIn("configured/main checkout", handoff["prompt"])
+        self.assertIn("read-only repository locator", handoff["prompt"])
+        self.assertIn("do not submit DTSTART", handoff["prompt"])
+        self.assertIn("full cron update payload", handoff["prompt"])
+        self.assertIn("Never send a status-only update", handoff["prompt"])
+        self.assertIn("persisted created_at plus cadence", handoff["prompt"])
+        self.assertNotIn("same heartbeat", handoff["prompt"].lower())
+        self.assertEqual(
+            handoff["prompt_sha256"],
+            __import__("hashlib").sha256(handoff["prompt"].encode()).hexdigest(),
+        )
+        self.assertEqual(
+            pulse.build_standalone_task_handoff("owner/repo", 17), handoff
+        )
+
+        custom = pulse.build_standalone_task_handoff(
+            "owner/repo",
+            17,
+            policy={"model": "gpt-5.6-terra", "reasoning_effort": "medium"},
+        )
+        self.assertEqual(custom["model"], "gpt-5.6-terra")
+        self.assertEqual(custom["reasoning_effort"], "medium")
+        self.assertEqual(custom["prompt"], handoff["prompt"])
+        self.assertEqual(custom["prompt_sha256"], handoff["prompt_sha256"])
 
     def test_schema_one_checkpoint_migrates_to_policy_schema(self) -> None:
         legacy = empty_checkpoint("Owner/Repo", 17)
@@ -92,6 +154,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
 
         # HEAD2 and then HEAD3 were pushed before the scheduler delivered wake 2.
@@ -127,12 +190,14 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         state, result = pulse.begin_wake(
             state,
             wake_id="wake-2",
             now="2026-08-26T00:11:00+00:00",
             pause_heartbeat=lambda: True,
+            delivered_task_id="task-1",
         )
         self.assertEqual(result["next_action"], "STOP_POLICY_LIMIT")
         self.assertEqual(result["reason_code"], "maximum_wakes_reached")
@@ -199,13 +264,16 @@ class DefaultLifecycleTests(unittest.TestCase):
             reason_code="transient_validation_failure",
             now=NOW,
             signature="test-failure",
+            pending_repair=PENDING_REPAIR,
         )
         self.assertEqual(result["next_action"], "WAIT_RETRY")
+        self.assertEqual(state["active_batch"]["pending_repair"], PENDING_REPAIR)
         state, _ = pulse.complete_wake(
             state,
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         self.assertEqual(state["wake_phase"], "retry_waiting")
         state, result = started(
@@ -234,6 +302,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             reason_code="transient_validation_failure",
             now=NOW,
             signature="test-failure",
+            pending_repair=PENDING_REPAIR,
         )
         self.assertEqual(result["next_action"], "WAIT_RETRY")
 
@@ -245,6 +314,7 @@ class DefaultLifecycleTests(unittest.TestCase):
                 classification="fix-now",
                 now=NOW,
             )
+
         with self.assertRaisesRegex(pulse.DefaultWakeError, "terminal boundary"):
             pulse.resolve_default_thread(
                 state,
@@ -273,8 +343,56 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         self.assertEqual(completed["next_action"], "WAIT_RETRY")
+
+    def test_retry_with_uncommitted_fix_requires_a_pending_repair_manifest(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(
+            state, snapshot(targeted=["T1"]), wake_id="wake-1", now=NOW
+        )
+        state, _ = pulse.freeze_default_batch(state, wake_id="wake-1")
+        state, _ = pulse.record_default_outcome(
+            state,
+            wake_id="wake-1",
+            thread_id="T1",
+            classification="fix-now",
+            now=NOW,
+        )
+
+        state, result = pulse.record_retry(
+            state,
+            wake_id="wake-1",
+            reason_code="transient_validation_failure",
+            now=NOW,
+            signature="test-failure",
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "pending_repair_unpersisted")
+        self.assertEqual(state["failure_latch"]["reason_code"], "pending_repair_unpersisted")
+
+    def test_freeze_pauses_when_worktree_head_differs_from_snapshot(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(
+            state, snapshot(targeted=["T1"]), wake_id="wake-1", now=NOW
+        )
+
+        state, result = pulse.freeze_default_batch(
+            state,
+            wake_id="wake-1",
+            worktree_head_oid="OTHER_HEAD",
+            now=NOW,
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "worktree_head_mismatch")
+        self.assertEqual(
+            result["evidence"],
+            {"snapshot_head_oid": "HEAD1", "worktree_head_oid": "OTHER_HEAD"},
+        )
+        self.assertIsNone(state["active_batch"])
 
     def test_retry_resume_preserves_frozen_targets_when_review_threads_disappear(self) -> None:
         state, _ = started()
@@ -294,6 +412,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         state, _ = started(
             state, wake_id="wake-2", now="2026-08-26T00:11:00+00:00"
@@ -327,6 +446,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         state, _ = started(
             state, wake_id="wake-2", now="2026-08-26T00:11:00+00:00"
@@ -368,6 +488,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         state, _ = started(state, wake_id="wake-2", now="2026-08-26T00:11:00+00:00")
         state, result = pulse.record_retry(
@@ -658,6 +779,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
 
         state, _ = started(
@@ -734,6 +856,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         with self.assertRaisesRegex(pulse.DefaultWakeError, "unfinished"):
             pulse.update_default_policy(
@@ -884,9 +1007,181 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:26:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         self.assertEqual(result["next_not_before"], "2026-08-26T00:36:00+00:00")
         self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
+
+    def test_creation_anchored_schedule_uses_persisted_task_creation_time(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
+        state, result = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:26:00+00:00",
+            schedule_next_wake=lambda _: "2026-08-26T00:36:03+00:00",
+            schedule_anchor_created_at="2026-08-26T00:26:02.250000+00:00",
+            scheduled_task_id="task-1",
+        )
+
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        self.assertEqual(result["next_not_before"], "2026-08-26T00:36:02+00:00")
+        self.assertEqual(
+            result["scheduled_task_created_at"],
+            "2026-08-26T00:26:02.250000+00:00",
+        )
+        self.assertEqual(state["next_not_before"], "2026-08-26T00:36:02+00:00")
+        self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
+
+    def test_reanchored_schedule_requires_a_persisted_creation_anchor(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
+        callback_calls: list[str] = []
+        state, result = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:26:00+00:00",
+            schedule_next_wake=lambda expected: callback_calls.append(expected) or expected,
+            scheduled_task_id="task-1",
+            require_schedule_anchor=True,
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "scheduled_task_anchor_missing")
+        self.assertEqual(
+            result["evidence"],
+            {
+                "wake_completed_at": "2026-08-26T00:26:00+00:00",
+                "scheduled_task_created_at": None,
+                "scheduled_task_id": "task-1",
+            },
+        )
+        self.assertEqual(callback_calls, [])
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+
+    def test_creation_anchored_schedule_rejects_a_precompletion_anchor(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
+        state, result = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:26:00+00:00",
+            schedule_next_wake=lambda _: "2026-08-26T00:35:59+00:00",
+            schedule_anchor_created_at="2026-08-26T00:25:59+00:00",
+            scheduled_task_id="task-1",
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+        self.assertEqual(result["reason_code"], "scheduled_task_anchor_mismatch")
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+
+    def test_creation_anchored_schedule_accepts_same_scheduler_second_as_completion(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
+        state, result = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:26:00.500000+00:00",
+            schedule_next_wake=lambda _: "2026-08-26T00:36:00+00:00",
+            schedule_anchor_created_at="2026-08-26T00:26:00+00:00",
+            scheduled_task_id="task-1",
+        )
+
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        self.assertEqual(result["next_not_before"], "2026-08-26T00:36:00+00:00")
+        self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
+
+    def test_creation_anchored_schedule_accepts_truncated_scheduler_first_run(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
+        state, result = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-09-02T08:46:13.761000+00:00",
+            schedule_next_wake=lambda _: "2026-09-02T08:56:13+00:00",
+            schedule_anchor_created_at="2026-09-02T08:46:13.793000+00:00",
+            scheduled_task_id="task-1",
+        )
+
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        self.assertEqual(result["next_not_before"], "2026-09-02T08:56:13+00:00")
+        self.assertEqual(
+            result["scheduled_task_created_at"],
+            "2026-09-02T08:46:13.793000+00:00",
+        )
+        self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
+
+    def test_creation_anchored_schedule_rejects_genuinely_early_first_run(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
+        state, result = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-09-02T08:46:13.761000+00:00",
+            schedule_next_wake=lambda _: "2026-09-02T08:56:12+00:00",
+            schedule_anchor_created_at="2026-09-02T08:46:13.793000+00:00",
+            scheduled_task_id="task-1",
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+        self.assertEqual(result["reason_code"], "scheduled_task_reanchor_mismatch")
+        self.assertEqual(
+            result["evidence"],
+            {
+                "expected_first_run": "2026-09-02T08:56:13+00:00",
+                "observed_first_run": "2026-09-02T08:56:12+00:00",
+            },
+        )
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+
+    def test_creation_anchored_schedule_keeps_one_second_late_tolerance(self) -> None:
+        for observed, accepted in (
+            ("2026-09-02T08:56:14+00:00", True),
+            ("2026-09-02T08:56:15+00:00", False),
+        ):
+            with self.subTest(observed=observed):
+                state, _ = started()
+                state, _ = pulse.record_snapshot(
+                    state, snapshot(), wake_id="wake-1", now=NOW
+                )
+                state, result = pulse.complete_wake(
+                    state,
+                    wake_id="wake-1",
+                    now="2026-09-02T08:46:13.761000+00:00",
+                    schedule_next_wake=lambda _: observed,
+                    schedule_anchor_created_at="2026-09-02T08:46:13.793000+00:00",
+                    scheduled_task_id="task-1",
+                )
+
+                self.assertEqual(
+                    result["next_action"],
+                    "WAIT_REVIEW" if accepted else "PAUSE_BLOCKED",
+                )
+
+    def test_active_schedule_requires_a_delivered_task_id(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(
+            state, snapshot(), wake_id="wake-1", now=NOW
+        )
+        state, _ = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:01:00+00:00",
+            schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
+        )
+
+        state, result = pulse.begin_wake(
+            state,
+            wake_id="wake-2",
+            now="2026-08-26T00:11:00+00:00",
+            pause_heartbeat=lambda: True,
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "scheduled_task_identity_mismatch")
+        self.assertEqual(result["evidence"]["delivered_task_id"], None)
+        self.assertEqual(state["failure_latch"]["reason_code"], "scheduled_task_identity_mismatch")
 
     def test_schedule_reanchor_tolerance_is_direction_aware(self) -> None:
         expected = "2026-08-26T00:36:00+00:00"
@@ -948,6 +1243,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:26:00.250000+00:00",
             schedule_next_wake=lambda expected: "2026-08-26T00:36:02+00:00",
+            scheduled_task_id="task-1",
         )
         self.assertEqual(result["next_action"], "WAIT_REVIEW")
         self.assertEqual(result["next_not_before"], "2026-08-26T00:36:01+00:00")
@@ -961,6 +1257,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:26:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         for index, when in enumerate(("00:10:00", "00:20:00", "00:30:00"), start=2):
             candidate = deepcopy(state)
@@ -969,6 +1266,7 @@ class DefaultLifecycleTests(unittest.TestCase):
                 wake_id=f"wake-{index}",
                 now=f"2026-08-26T{when}+00:00",
                 pause_heartbeat=lambda: True,
+                delivered_task_id="task-1",
             )
             self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
             self.assertEqual(result["reason_code"], "cadence_not_elapsed")
@@ -1019,6 +1317,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
         state, _ = started(state, wake_id="wake-2", now="2026-08-26T00:11:00+00:00")
         state, result = pulse.record_snapshot(
@@ -1029,7 +1328,7 @@ class DefaultLifecycleTests(unittest.TestCase):
         clean = empty_checkpoint("Owner/Repo", 17)
         clean, _ = started(clean)
         clean, _ = pulse.record_snapshot(clean, snapshot(eyes=True), wake_id="wake-1", now=NOW)
-        clean, _ = pulse.complete_wake(clean, wake_id="wake-1", now="2026-08-26T00:01:00+00:00", schedule_next_wake=lambda expected: expected)
+        clean, _ = pulse.complete_wake(clean, wake_id="wake-1", now="2026-08-26T00:01:00+00:00", schedule_next_wake=lambda expected: expected, scheduled_task_id="task-1")
         clean, _ = started(clean, wake_id="wake-2", now="2026-08-26T00:11:00+00:00")
         clean, result = pulse.record_snapshot(clean, snapshot(), wake_id="wake-2", now="2026-08-26T00:11:00+00:00")
         self.assertEqual(result["next_action"], "WAIT_REVIEW")
@@ -1038,6 +1337,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-2",
             now="2026-08-26T00:12:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-2",
         )
         clean, _ = started(clean, wake_id="wake-3", now="2026-08-26T00:22:00+00:00")
         clean, result = pulse.record_snapshot(
@@ -1224,6 +1524,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
 
         self.assertTrue(completed["mutation_occurred"])
@@ -1270,6 +1571,7 @@ class DefaultLifecycleTests(unittest.TestCase):
             wake_id="wake-1",
             now="2026-08-26T00:01:00+00:00",
             schedule_next_wake=lambda expected: expected,
+            scheduled_task_id="task-1",
         )
 
         self.assertTrue(completed["mutation_occurred"])
@@ -1367,7 +1669,7 @@ class DefaultLifecycleTests(unittest.TestCase):
     def test_trigger_is_once_per_head_and_empty_followup_pauses(self) -> None:
         state, _ = started()
         state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
-        state, _ = pulse.complete_wake(state, wake_id="wake-1", now="2026-08-26T00:01:00+00:00", schedule_next_wake=lambda expected: expected)
+        state, _ = pulse.complete_wake(state, wake_id="wake-1", now="2026-08-26T00:01:00+00:00", schedule_next_wake=lambda expected: expected, scheduled_task_id="task-1")
         state, _ = started(state, wake_id="wake-2", now="2026-08-26T00:11:00+00:00")
         state, result = pulse.record_snapshot(state, snapshot(), wake_id="wake-2", now="2026-08-26T00:11:00+00:00")
         self.assertEqual(result["next_action"], "REQUEST_REVIEW")
@@ -1384,7 +1686,7 @@ class DefaultLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(result["reason_code"], "review_trigger_recorded")
         self.assertTrue(result["mutation_occurred"])
-        state, completed = pulse.complete_wake(state, wake_id="wake-2", now="2026-08-26T00:12:00+00:00", schedule_next_wake=lambda expected: expected)
+        state, completed = pulse.complete_wake(state, wake_id="wake-2", now="2026-08-26T00:12:00+00:00", schedule_next_wake=lambda expected: expected, scheduled_task_id="task-2")
         self.assertTrue(completed["mutation_occurred"])
         state, _ = started(state, wake_id="wake-3", now="2026-08-26T00:22:00+00:00")
         state, result = pulse.record_snapshot(state, snapshot(), wake_id="wake-3", now="2026-08-26T00:22:00+00:00")

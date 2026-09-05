@@ -87,11 +87,49 @@ Pushes completed before the next wake continue to coalesce into the latest
 stable observed head. Head changes after a batch is frozen continue to pause
 recovery, so this release does not weaken the frozen-head publication gate.
 
+## 0.8.0 standalone clean-context scheduling
+
+Version `0.8.0` changes the default host handoff from a same-task heartbeat to
+standalone scheduled tasks. Each scheduler delivery is a new task/conversation
+with the fixed, target-bound prompt, the installed skill, the target
+`AGENTS.md`, and the Git-common-dir checkpoint as its only cross-run workflow
+state. The injected host orchestration guard proves one fresh wake per
+invocation, pause-before-preflight ordering, one successor per rearmable wake,
+and immediate termination after `complete-wake`.
+
+The network-free tests do not create real scheduler tasks, install skills, or
+mutate GitHub. Real Codex scheduled-task and live GitHub integration remains
+unverified.
+
+## 0.8.6 scheduler timestamp quantization
+
+The host-supported scheduler's task metadata is authoritative at whole-second
+precision with fractional seconds truncated. The standalone re-anchor host and
+controller use that same quantization for creation-anchor and first-run
+validation, accepting representation-only sub-second differences while still
+rejecting an earlier represented second. Direct completion callbacks retain
+their exact completion-relative ceiling behavior.
+
+## 0.8.7 paused-successor activation boundary
+
+Standalone successors are created paused, identified and read back inside the
+cleanup boundary, and activated only after their prompt, model, cadence,
+creation anchor, and first run are verified. Missing task IDs therefore leave
+only harmless paused records, while callback exceptions or malformed results
+re-pause every known activated successor before the invocation ends.
+
+## 0.8.8 metadata-preserving task status updates
+
+Codex cron status transitions now require a metadata read followed by a full
+persisted task update that changes only status. This prevents the local host
+from rejecting pause or activation attempts that omit required cron fields and
+leaving a live task paired with a fail-closed checkpoint.
+
 ## Deferred milestones
 
 - public-API connector and automatic-review detection bound to a head OID;
 - independent real scheduled-task integration and long-term unattended
-  heartbeat evidence;
+  clean-context evidence;
 - broader production notification/pause integration and multi-wake recovery
   history beyond the completed bounded evidence;
 - Codex plugin packaging and marketplace distribution;

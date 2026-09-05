@@ -12,12 +12,19 @@ from __future__ import annotations
 import argparse
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+import hashlib
 import json
 from pathlib import Path
+import subprocess
 import sys
 from typing import Any, Callable, Mapping
 
-from checkpoint_store import checkpoint_path, load_checkpoint, save_checkpoint
+from checkpoint_store import (
+    checkpoint_path,
+    git_common_directory,
+    load_checkpoint,
+    save_checkpoint,
+)
 from default_policy import (
     PolicyError,
     apply_policy_overrides,
@@ -42,7 +49,11 @@ from state_model import (
 
 DEFAULT_CADENCE_SECONDS = 600
 DEFAULT_MODE_SCHEMA_VERSION = 2
-HEARTBEAT_PROTOCOL_VERSION = 2
+STANDALONE_TASK_PROTOCOL_VERSION = 10
+# The local scheduler exposes task metadata at whole-second precision.  The
+# re-anchor path must use that same representation for expected and observed
+# first-run values; direct completion callbacks retain their exact/ceil path.
+SCHEDULER_TIMESTAMP_PRECISION = "whole-second-truncation"
 SCHEDULE_REANCHOR_TOLERANCE = timedelta(seconds=1)
 HEARTBEAT_BATCH_ORDER = (
     "record-outcome",
@@ -71,37 +82,108 @@ class DefaultWakeError(RuntimeError):
     """Raised when a default wake attempts an operation after its boundary."""
 
 
-def build_heartbeat_handoff(repository: str, pr_number: int) -> dict[str, Any]:
-    """Return the canonical target-bound prompt for later scheduled wakes."""
+def build_standalone_task_handoff(
+    repository: str,
+    pr_number: int,
+    *,
+    policy: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the immutable handoff for one clean-context scheduled task."""
     canonical = canonical_repository(repository)
     target = f"{canonical}#{pr_number}"
+    effective_policy = normalize_policy(policy)
     prompt = (
         "Use $codex-review-pulse from its loaded user-directory installation to "
-        f"continue automatic Codex review remediation for {target}. "
-        "For each scheduler-delivered invocation, pause this same heartbeat first, "
-        "inspect the checkpoint directly, and run at most one stable frozen batch "
-        "with one fresh wake_id. For RUN_BATCH, record each frozen thread outcome, "
-        "apply and focused-validate any required repair, then resolve that exact "
-        "thread while the PR head still equals the frozen head. Never commit or push "
-        "before every frozen thread is resolved. After all exact resolutions, run "
-        "aggregate validation; run prepare-publication before commit and again "
+        f"run exactly one automatic Codex review-remediation wake for {target} in "
+        "this new standalone task/conversation. The structured task execution "
+        "settings are authoritative in the persisted automation policy and task "
+        "metadata; preserve those settings for every scheduled successor in this "
+        "run. "
+        "This is a scheduler-delivered "
+        "standalone invocation, not a continuation of another task and not a "
+        "same-task heartbeat; never reuse a Codex conversation or targetThreadId. "
+        "Before every Codex automation status transition, read the task's persisted "
+        "definition and submit the full cron update payload: preserve kind, name, "
+        "prompt, recurrence, model, reasoning, project, environment, and destination, "
+        "changing only status. Never send a status-only update. The metadata read is "
+        "not a scheduler mutation; the full pause update remains the first scheduler "
+        "operation of a delivered wake. "
+        "Load and obey the installed skill's SKILL.md. Treat the scheduler's "
+        "configured project checkout only as a "
+        "read-only repository locator. After the required task-pause and checkpoint "
+        "preflight, verify the remote PR head and create a new task-owned clean "
+        "linked worktree at that exact head before begin-wake, then load and obey "
+        "that worktree's AGENTS.md. Never reuse a "
+        "worktree from an earlier wake, and never switch, reset, clean, or modify "
+        "the configured/main checkout. Run every repository mutation, validation, "
+        "Git publication command, and pulse command for this wake from the new "
+        "worktree, passing it as --repository-path. Use only the target repository's "
+        "Git-common-dir checkpoint as "
+        "cross-run workflow state. Generate one fresh opaque wake_id and run at "
+        "most one stable frozen batch. For RUN_BATCH, verify that the wake "
+        "worktree's git rev-parse HEAD equals snapshot.head_oid before freezing; "
+        "the freeze guard rejects a mismatch. Then record each frozen thread "
+        "outcome, apply and focused-validate any required repair, then resolve that "
+        "exact thread while the PR head still equals the frozen head. Never commit "
+        "or push before every frozen thread is resolved. After all exact resolutions, "
+        "run aggregate validation; run prepare-publication before commit and again "
         "immediately before push; explicitly stage intended paths; commit and push "
         "at most once; verify the published head; then record the publication result. "
-        "Leave push-created review artifacts for a later wake. When rearming, compute "
-        "the next first run from this wake's completion time, round it up to the "
-        "scheduler's representable precision, update the heartbeat, read back its "
-        "persisted first run, and pass that timestamp to complete-wake; never reuse "
-        "an earlier DTSTART. Preserve non-target "
+        "If a fix-now repair leaves uncommitted changes and a recoverable retry is "
+        "needed, write an immutable patch plus manifest under the Git-common dir and "
+        "pass that manifest to pulse retry --pending-repair; the next clean worktree "
+        "must verify and apply it before focused validation. Leave push-created "
+        "review artifacts for a later wake. When rearming, create one new standalone "
+        "successor task in PAUSED state with the unchanged prompt and a host-supported "
+        "cadence-only recurring schedule; do not submit DTSTART. Extract its ID inside "
+        "the cleanup boundary, then read back the persisted task ID, status, "
+        "creation timestamp, prompt and prompt digest, cron/standalone metadata, "
+        "absent target thread, model, reasoning settings, and cadence before accepting "
+        "it. Activate only that verified successor before complete-wake; malformed "
+        "creation evidence therefore cannot leave an unknown task running. "
+        "Derive the first run from persisted created_at plus cadence, then pass both "
+        "timestamps to complete-wake. The creation timestamp must be at or after this "
+        "wake's completion, so the successor cannot run early. For every scheduled "
+        "delivery, pass its exact task ID to begin-wake as --delivered-task-id "
+        "so pulse.py authenticates the persisted successor. Preserve non-target "
         "threads; never merge, enable auto-merge, change the base, force-push, or "
-        "create issues. Keep the heartbeat paused on every PAUSE_* or STOP_* result."
+        "create issues. After complete-wake, report the result and end this "
+        "invocation immediately; do not start, schedule, or consume another wake. If "
+        "complete-wake raises or returns malformed data after successor activation, "
+        "pause that exact successor and confirm cleanup before propagating the failure. "
+        "Keep the delivered task paused on every PAUSE_* or STOP_* result."
     )
+    prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     return {
-        "protocol_version": HEARTBEAT_PROTOCOL_VERSION,
+        "protocol_version": STANDALONE_TASK_PROTOCOL_VERSION,
         "repository": canonical,
         "pull_request_number": pr_number,
+        "model": effective_policy["model"],
+        "reasoning_effort": effective_policy["reasoning_effort"],
+        "scheduler_kind": "cron",
+        "conversation_mode": "standalone",
+        "reuse_conversation": False,
+        "target_thread_id": None,
+        "checkpoint_scope": "git-common-dir",
+        "checkout_mode": "new-linked-worktree-per-wake",
+        "configured_checkout_role": "read-only-repository-locator",
+        "reuse_worktree": False,
+        "schedule_anchor_mode": "persisted-created-at-plus-cadence",
+        "submit_dtstart": False,
+        "prompt_sha256": prompt_digest,
         "batch_order": list(HEARTBEAT_BATCH_ORDER),
         "prompt": prompt,
     }
+
+
+def build_heartbeat_handoff(
+    repository: str,
+    pr_number: int,
+    *,
+    policy: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Backward-compatible alias for the standalone task handoff."""
+    return build_standalone_task_handoff(repository, pr_number, policy=policy)
 
 
 def _policy_pause(state: dict[str, Any], *, now: str, operation: str) -> dict[str, Any]:
@@ -235,14 +317,23 @@ def _ceil_to_second(value: str | datetime) -> datetime:
     return parsed.replace(microsecond=0)
 
 
+def _truncate_to_scheduler_precision(value: str | datetime) -> datetime:
+    """Represent a scheduler timestamp using its authoritative whole second."""
+    return _utc(value).replace(microsecond=0)
+
+
 def _schedule_times_match(
     expected: str | datetime,
     observed: str | datetime,
     *,
     ordered: bool,
+    scheduler_precision: bool = False,
 ) -> bool:
     """Compare schedule instants with a bounded, direction-aware tolerance."""
-    delta = _utc(observed) - _utc(expected)
+    normalize = (
+        _truncate_to_scheduler_precision if scheduler_precision else _utc
+    )
+    delta = normalize(observed) - normalize(expected)
     if ordered:
         return timedelta(0) <= delta <= SCHEDULE_REANCHOR_TOLERANCE
     return -SCHEDULE_REANCHOR_TOLERANCE <= delta <= SCHEDULE_REANCHOR_TOLERANCE
@@ -276,6 +367,8 @@ def ensure_default_lifecycle(checkpoint: dict[str, Any]) -> dict[str, Any]:
         "wake_mutation_occurred": False,
         "next_not_before": None,
         "scheduled_task_disposition": "PAUSED",
+        "scheduled_task_kind": "standalone",
+        "scheduled_task_id": None,
         "wake_count": 0,
         "failure_latch": None,
         "last_wake_id": None,
@@ -305,6 +398,13 @@ def ensure_default_lifecycle(checkpoint: dict[str, Any]) -> dict[str, Any]:
     result["automation_policy_digest"] = policy_digest(result["automation_policy"])
     if result.get("scheduled_task_disposition") not in {"PAUSED", "ACTIVE"}:
         raise ValueError("Scheduled task disposition is invalid")
+    if result.get("scheduled_task_kind") != "standalone":
+        raise ValueError("Scheduled task kind must be standalone")
+    scheduled_task_id = result.get("scheduled_task_id")
+    if scheduled_task_id is not None and (
+        not isinstance(scheduled_task_id, str) or not scheduled_task_id.strip()
+    ):
+        raise ValueError("Scheduled task ID is invalid")
     wake_count = result.get("wake_count")
     if not isinstance(wake_count, int) or isinstance(wake_count, bool) or wake_count < 0:
         raise ValueError("Default wake count is invalid")
@@ -497,8 +597,9 @@ def begin_wake(
     cadence_seconds: int | None = None,
     policy_overrides: Mapping[str, Any] | None = None,
     pause_heartbeat: Callable[[], object] | None = None,
+    delivered_task_id: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Begin at most one wake, pausing the host heartbeat before PR work."""
+    """Begin one wake after authenticating any scheduled delivery."""
     if not isinstance(wake_id, str) or not wake_id.strip():
         raise ValueError("A non-empty wake_id is required")
     now = _iso(now)
@@ -527,6 +628,10 @@ def begin_wake(
     )
     if isinstance(effective_cadence, bool) or not isinstance(effective_cadence, int) or effective_cadence <= 0:
         raise ValueError("Cadence must be positive")
+    if delivered_task_id is not None and (
+        not isinstance(delivered_task_id, str) or not delivered_task_id.strip()
+    ):
+        raise ValueError("Delivered task ID must be a non-empty string")
 
     if state.get("wake_phase") in {"terminal", "closed"}:
         raise DefaultWakeError(
@@ -552,6 +657,30 @@ def begin_wake(
             evidence=state["failure_latch"],
             action="PAUSE_RECOVERY",
         )
+        return state, result
+
+    active_schedule = state.get("scheduled_task_disposition") == "ACTIVE"
+    if (active_schedule and delivered_task_id is None) or (
+        delivered_task_id is not None
+        and (
+            not active_schedule
+            or state.get("scheduled_task_id") != delivered_task_id
+        )
+    ):
+        result = _pause(
+            state,
+            reason_code="scheduled_task_identity_mismatch",
+            now=now,
+            evidence={
+                "delivered_task_id": delivered_task_id,
+                "scheduled_task_id": state.get("scheduled_task_id"),
+                "scheduled_task_disposition": state.get(
+                    "scheduled_task_disposition"
+                ),
+            },
+            action="PAUSE_RECOVERY",
+        )
+        state["last_wake_id"] = wake_id
         return state, result
 
     policy = state["automation_policy"]
@@ -620,6 +749,24 @@ def begin_wake(
     state["last_wake_result"] = None
     state["resume_pending_batch"] = pending_batch
     if pending_batch:
+        pending_repair = (state.get("active_batch") or {}).get("pending_repair")
+        fix_now_threads = [
+            thread_id
+            for thread_id, outcome in (
+                (state.get("active_batch") or {}).get("thread_outcomes") or {}
+            ).items()
+            if isinstance(outcome, Mapping) and outcome.get("classification") == "fix-now"
+        ]
+        if fix_now_threads and not isinstance(pending_repair, Mapping):
+            result = _pause(
+                state,
+                reason_code="pending_repair_missing",
+                now=now,
+                evidence={"thread_ids": sorted(fix_now_threads)},
+                action="PAUSE_RECOVERY",
+            )
+            state["last_wake_id"] = wake_id
+            return state, result
         state["wake_phase"] = "processing"
         state["last_decision"] = _decision(
             "RUN_BATCH",
@@ -629,6 +776,7 @@ def begin_wake(
             targeted_thread_ids=list(
                 (state.get("active_batch") or {}).get("targeted_thread_ids") or []
             ),
+            **({"pending_repair": deepcopy(pending_repair)} if pending_repair else {}),
         )
     result = _decision(
         "WAKE_STARTED",
@@ -840,7 +988,11 @@ def record_snapshot(
 
 
 def freeze_default_batch(
-    checkpoint: dict[str, Any], *, wake_id: str
+    checkpoint: dict[str, Any],
+    *,
+    wake_id: str,
+    worktree_head_oid: str | None = None,
+    now: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     state = ensure_default_lifecycle(checkpoint)
     _require_active_wake(state, wake_id)
@@ -854,6 +1006,19 @@ def freeze_default_batch(
     thread_ids = snapshot.get("targeted_unresolved_thread_ids") or []
     if not head_oid:
         raise DefaultWakeError("The normalized snapshot has no frozen head")
+    if worktree_head_oid is not None and worktree_head_oid != head_oid:
+        result = _pause(
+            state,
+            reason_code="worktree_head_mismatch",
+            now=_iso(now or datetime.now(UTC).isoformat()),
+            evidence={
+                "snapshot_head_oid": head_oid,
+                "worktree_head_oid": worktree_head_oid,
+            },
+            action="PAUSE_RECOVERY",
+        )
+        state["last_wake_id"] = wake_id
+        return state, result
     state = freeze_batch(state, head_oid, thread_ids)
     state["wake_phase"] = "frozen"
     state["last_decision"] = deepcopy(decision)
@@ -919,6 +1084,7 @@ def record_retry(
     evidence: Any = None,
     signature: str | None = None,
     count_no_progress: bool = False,
+    pending_repair: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Persist a recoverable failure and make the next wake retryable."""
     if not isinstance(reason_code, str) or not reason_code.strip():
@@ -934,6 +1100,50 @@ def record_retry(
         result = _policy_pause(state, now=_iso(now), operation="validation_failure")
         state["last_wake_id"] = wake_id
         return state, result
+    batch = state.get("active_batch")
+    fix_now_threads = (
+        [
+            thread_id
+            for thread_id, outcome in (batch.get("thread_outcomes") or {}).items()
+            if isinstance(outcome, Mapping) and outcome.get("classification") == "fix-now"
+        ]
+        if isinstance(batch, Mapping)
+        else []
+    )
+    existing_pending_repair = (
+        batch.get("pending_repair") if isinstance(batch, Mapping) else None
+    )
+    if (
+        fix_now_threads
+        and pending_repair is None
+        and not isinstance(existing_pending_repair, Mapping)
+    ):
+        result = _pause(
+            state,
+            reason_code="pending_repair_unpersisted",
+            now=_iso(now),
+            evidence={"thread_ids": sorted(fix_now_threads)},
+            action="PAUSE_RECOVERY",
+        )
+        state["last_wake_id"] = wake_id
+        return state, result
+    if pending_repair is not None:
+        if not isinstance(pending_repair, Mapping):
+            raise ValueError("Pending repair must be a JSON object")
+        if not isinstance(batch, Mapping):
+            raise ValueError("A pending repair requires an active frozen batch")
+        frozen_head_oid = batch.get("frozen_head_oid")
+        patch_path = pending_repair.get("patch_path")
+        patch_sha256 = pending_repair.get("patch_sha256")
+        if not isinstance(patch_path, str) or not patch_path.strip():
+            raise ValueError("Pending repair patch_path is required")
+        if not isinstance(patch_sha256, str) or len(patch_sha256) != 64 or any(
+            character not in "0123456789abcdefABCDEF" for character in patch_sha256
+        ):
+            raise ValueError("Pending repair patch_sha256 must be a SHA-256 hex digest")
+        if pending_repair.get("frozen_head_oid") != frozen_head_oid:
+            raise ValueError("Pending repair frozen head does not match the active batch")
+        batch["pending_repair"] = deepcopy(dict(pending_repair))
     if count_no_progress and not signature:
         raise ValueError("A failure signature is required to count no progress")
     retry_state = state.setdefault("retry_state", {})
@@ -1257,8 +1467,17 @@ def complete_wake(
     now: str,
     cadence_seconds: int | None = None,
     schedule_next_wake: Callable[[str], object] | None = None,
+    schedule_anchor_created_at: str | None = None,
+    scheduled_task_id: str | None = None,
+    completion_failure: Mapping[str, Any] | None = None,
+    require_schedule_anchor: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Complete one wake after proving the persisted completion-relative first run."""
+    """Complete one wake after proving schedule anchoring and successor identity.
+
+    The public CLI passes ``require_schedule_anchor=True`` for its standalone
+    reanchor path. The default remains compatible with injected direct-first-run
+    callbacks used by older integrations.
+    """
     now = _iso(now)
     state = ensure_default_lifecycle(checkpoint)
     persisted_cadence = state["automation_policy"]["cadence_seconds"]
@@ -1269,6 +1488,12 @@ def complete_wake(
     effective_cadence = persisted_cadence
     if isinstance(effective_cadence, bool) or not isinstance(effective_cadence, int) or effective_cadence <= 0:
         raise ValueError("Cadence must be positive")
+    if scheduled_task_id is not None and (
+        not isinstance(scheduled_task_id, str) or not scheduled_task_id.strip()
+    ):
+        raise ValueError("Scheduled task ID must be a non-empty string")
+    if schedule_anchor_created_at is not None and schedule_next_wake is None:
+        raise ValueError("A schedule creation anchor requires re-anchor confirmation")
     if state.get("last_wake_id") == wake_id and state.get("active_wake_id") is None and state.get("last_wake_result"):
         return state, deepcopy(state["last_wake_result"])
     _require_active_wake(state, wake_id, allow_retry_completion=True)
@@ -1277,6 +1502,20 @@ def complete_wake(
     mutation_occurred = bool(state.get("wake_mutation_occurred")) or bool(
         decision.get("mutation_occurred")
     )
+    if completion_failure is not None:
+        reason_code = completion_failure.get("reason_code")
+        if not isinstance(reason_code, str) or not reason_code.strip():
+            raise ValueError("Completion failure reason code is required")
+        result = _pause(
+            state,
+            reason_code=reason_code,
+            now=now,
+            evidence=completion_failure.get("evidence"),
+            action="PAUSE_RECOVERY",
+            mutation_occurred=mutation_occurred,
+        )
+        state["last_wake_id"] = wake_id
+        return state, result
     if action == "RUN_BATCH":
         publication = (state.get("active_batch") or {}).get("publication") or {}
         if publication.get("status") != "succeeded":
@@ -1312,6 +1551,26 @@ def complete_wake(
     next_not_before = _ceil_to_second(
         completed_at + timedelta(seconds=effective_cadence)
     ).isoformat()
+    if (
+        require_schedule_anchor
+        and schedule_next_wake is not None
+        and schedule_anchor_created_at is None
+    ):
+        return_state_result = _pause(
+            state,
+            reason_code="scheduled_task_anchor_missing",
+            now=now,
+            evidence={
+                "wake_completed_at": now,
+                "scheduled_task_created_at": None,
+                "scheduled_task_id": scheduled_task_id,
+            },
+            action="PAUSE_RECOVERY",
+            mutation_occurred=mutation_occurred,
+        )
+        state["next_not_before"] = next_not_before
+        state["last_wake_id"] = wake_id
+        return state, return_state_result
     state["wake_completed_at"] = now
     state["next_not_before"] = next_not_before
     state["active_wake_id"] = None
@@ -1323,6 +1582,8 @@ def complete_wake(
         next_not_before=next_not_before,
         mutation_occurred=mutation_occurred,
     )
+    if scheduled_task_id is not None:
+        result["scheduled_task_id"] = scheduled_task_id
     observed_first_run: object = None
     if schedule_next_wake is not None:
         try:
@@ -1345,6 +1606,38 @@ def complete_wake(
         return state, return_state_result
 
     raw_observed_first_run = observed_first_run
+    parsed_anchor: datetime | None = None
+    if schedule_anchor_created_at is not None:
+        try:
+            parsed_anchor = _utc(schedule_anchor_created_at)
+        except (TypeError, ValueError):
+            parsed_anchor = None
+        # Scheduler task metadata is represented at whole-second precision.
+        # Compare at that precision so a task created later in the same
+        # represented second is not rejected because ``now`` retained
+        # microseconds.
+        if parsed_anchor is None or _truncate_to_scheduler_precision(
+            parsed_anchor
+        ) < _truncate_to_scheduler_precision(completed_at):
+            return_state_result = _pause(
+                state,
+                reason_code="scheduled_task_anchor_mismatch",
+                now=now,
+                evidence={
+                    "wake_completed_at": now,
+                    "scheduled_task_created_at": schedule_anchor_created_at,
+                },
+                mutation_occurred=mutation_occurred,
+            )
+            state["next_not_before"] = next_not_before
+            state["last_wake_id"] = wake_id
+            return state, return_state_result
+        next_not_before = _truncate_to_scheduler_precision(
+            parsed_anchor + timedelta(seconds=effective_cadence)
+        ).isoformat()
+        state["next_not_before"] = next_not_before
+        result["next_not_before"] = next_not_before
+        result["scheduled_task_created_at"] = parsed_anchor.isoformat()
     try:
         observed_first_run = _utc(str(raw_observed_first_run))
     except (TypeError, ValueError):
@@ -1353,6 +1646,7 @@ def complete_wake(
         next_not_before,
         observed_first_run,
         ordered=True,
+        scheduler_precision=schedule_anchor_created_at is not None,
     ):
         return_state_result = _pause(
             state,
@@ -1368,7 +1662,27 @@ def complete_wake(
         state["last_wake_id"] = wake_id
         return state, return_state_result
 
+    if scheduled_task_id is None:
+        return_state_result = _pause(
+            state,
+            reason_code="scheduled_task_identity_missing",
+            now=now,
+            evidence={
+                "expected_first_run": next_not_before,
+                "observed_first_run": raw_observed_first_run,
+                "scheduled_task_id": scheduled_task_id,
+            },
+            action="PAUSE_RECOVERY",
+            mutation_occurred=mutation_occurred,
+        )
+        state["next_not_before"] = next_not_before
+        state["last_wake_id"] = wake_id
+        return state, return_state_result
+
     state["scheduled_task_disposition"] = "ACTIVE"
+    state["scheduled_task_kind"] = "standalone"
+    if scheduled_task_id is not None:
+        state["scheduled_task_id"] = scheduled_task_id
     state["wake_phase"] = "retry_waiting" if action == "WAIT_RETRY" else "completed"
     state["last_wake_id"] = wake_id
     _set_last_result(state, result)
@@ -1481,6 +1795,45 @@ def _assert_checkpoint_target(
         raise RuntimeError("Checkpoint target does not match the requested pull request")
 
 
+def _checkout_head(repository_path: str | Path) -> str:
+    process = subprocess.run(
+        ["git", "-C", str(repository_path), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if process.returncode != 0:
+        raise RuntimeError(process.stderr.strip() or "Unable to read worktree HEAD")
+    head_oid = process.stdout.strip()
+    if not head_oid:
+        raise RuntimeError("Worktree HEAD is empty")
+    return head_oid
+
+
+def _load_pending_repair(
+    manifest_path: Path, *, repository_path: str | Path
+) -> dict[str, Any]:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError("Pending repair manifest must be a JSON object")
+    patch_path = manifest.get("patch_path")
+    if not isinstance(patch_path, str) or not patch_path.strip():
+        raise ValueError("Pending repair patch_path is required")
+    patch = Path(patch_path).resolve()
+    common = git_common_directory(repository_path)
+    try:
+        patch.relative_to(common)
+    except ValueError as error:
+        raise ValueError("Pending repair patch must be under the Git common directory") from error
+    if not patch.is_file():
+        raise ValueError("Pending repair patch does not exist")
+    expected_sha256 = manifest.get("patch_sha256")
+    actual_sha256 = hashlib.sha256(patch.read_bytes()).hexdigest()
+    if expected_sha256 != actual_sha256:
+        raise ValueError("Pending repair patch SHA-256 does not match its manifest")
+    manifest["patch_path"] = str(patch)
+    return manifest
+
+
 def _state_path(
     args: argparse.Namespace,
     *,
@@ -1517,10 +1870,13 @@ def parse_args() -> argparse.Namespace:
         description="Run one Codex-first default wake without hardened contract ceremony",
         epilog=(
             "Host handoff:\n"
-            "  pause the scheduled task before begin-wake; pass --pause-confirmed "
+            "  pause the delivered standalone task before begin-wake; pass --pause-confirmed "
             "after success.\n"
-            "  re-anchor and read back the next run before complete-wake "
-            "--schedule-reanchored --scheduled-first-run ACTUAL_FIRST_RUN."
+            "  create/read back one cadence-only standalone successor before "
+            "complete-wake --schedule-reanchored "
+            "--scheduled-created-at PERSISTED_CREATED_AT "
+            "--scheduled-first-run DERIVED_FIRST_RUN "
+            "--scheduled-task-id SUCCESSOR_ID."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1543,7 +1899,11 @@ def parse_args() -> argparse.Namespace:
 
     commands.add_parser(
         "heartbeat-prompt",
-        help="Render the canonical target-bound prompt for scheduled wakes",
+        help="Render the standalone-task prompt (legacy command name)",
+    )
+    commands.add_parser(
+        "standalone-task-prompt",
+        help="Render the canonical clean-context standalone-task prompt",
     )
 
     begin = commands.add_parser(
@@ -1556,9 +1916,16 @@ def parse_args() -> argparse.Namespace:
         help="Acknowledge that the host pause call succeeded; pulse.py does not perform it",
     )
     begin.add_argument(
+        "--delivered-task-id",
+        help="Scheduled task ID delivered by the host; must match the persisted successor",
+    )
+    begin.add_argument(
         "--policy-json",
         dest="command_policy_json",
-        help="JSON object of prompt-derived policy overrides for the initial wake",
+        help=(
+            "JSON object of prompt-derived policy overrides for the initial wake; "
+            "supports model and reasoning_effort"
+        ),
     )
 
     commands.add_parser("snapshot", help="Fetch and normalize one stable PR snapshot")
@@ -1592,6 +1959,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Count this retry only when the same validation failure made no progress",
     )
+    retry.add_argument(
+        "--pending-repair",
+        type=Path,
+        help="JSON manifest for an uncommitted repair patch retained across retry wakes",
+    )
 
     configure = commands.add_parser(
         "configure-policy",
@@ -1600,7 +1972,10 @@ def parse_args() -> argparse.Namespace:
     configure.add_argument(
         "--policy-json",
         dest="command_policy_json",
-        help="JSON object of prompt-derived policy overrides",
+        help=(
+            "JSON object of prompt-derived policy overrides; supports model and "
+            "reasoning_effort"
+        ),
     )
 
     confirm = commands.add_parser(
@@ -1627,17 +2002,42 @@ def parse_args() -> argparse.Namespace:
     complete.add_argument(
         "--schedule-reanchored",
         action="store_true",
-        help="Confirm that the host re-anchor call succeeded and its first run was read back",
+        help="Confirm that the host successor create and schedule readback succeeded",
     )
     complete.add_argument(
         "--scheduled-first-run",
-        help="Actual persisted first-run timestamp read back after the host re-anchor",
+        help=(
+            "Verified first run, either persisted directly or derived from the "
+            "persisted task creation anchor plus cadence"
+        ),
+    )
+    complete.add_argument(
+        "--scheduled-created-at",
+        help=(
+            "Persisted successor creation timestamp when the host anchors a "
+            "recurring schedule at task creation"
+        ),
+    )
+    complete.add_argument(
+        "--scheduled-task-id",
+        help="ID of the newly created standalone successor task",
+    )
+    complete.add_argument(
+        "--completion-failure",
+        type=Path,
+        help=(
+            "JSON file describing a successor handoff failure to persist as "
+            "PAUSE_RECOVERY; do not combine with --schedule-reanchored"
+        ),
     )
     complete.add_argument("--cadence-seconds", type=int)
     parser.add_argument(
         "--policy-json",
         dest="root_policy_json",
-        help="JSON object of prompt-derived policy overrides (initial wake or configure-policy)",
+        help=(
+            "JSON object of prompt-derived policy overrides (initial wake or "
+            "configure-policy), including model and reasoning_effort"
+        ),
     )
     args = parser.parse_args()
     command_policy_json = getattr(args, "command_policy_json", None)
@@ -1657,7 +2057,7 @@ def main() -> None:
     policy_overrides = (
         parse_policy_json(args.policy_json) if args.policy_json is not None else None
     )
-    if args.command == "heartbeat-prompt":
+    if args.command in {"heartbeat-prompt", "standalone-task-prompt"}:
         supplied_checkpoint = load_checkpoint(args.state_file) if args.state_file else None
         repository, pr_number = _resolve_command_target(
             args,
@@ -1665,7 +2065,11 @@ def main() -> None:
         )
         print(
             json.dumps(
-                build_heartbeat_handoff(repository, pr_number),
+                build_standalone_task_handoff(
+                    repository,
+                    pr_number,
+                    policy=policy_overrides,
+                ),
                 indent=2,
                 sort_keys=True,
             )
@@ -1691,6 +2095,7 @@ def main() -> None:
             now=now,
             policy_overrides=policy_overrides,
             pause_heartbeat=lambda: args.pause_confirmed,
+            delivered_task_id=args.delivered_task_id,
         )
         _write(path, state, result)
         return
@@ -1761,8 +2166,29 @@ def main() -> None:
         return
 
     if args.command == "freeze":
-        state, batch = freeze_default_batch(state, wake_id=args.wake_id)
-        _write(path, state, {"next_action": "RUN_BATCH", "batch": batch})
+        try:
+            worktree_head_oid = _checkout_head(args.repository_path)
+        except RuntimeError as error:
+            result = _pause(
+                state,
+                reason_code="worktree_head_unavailable",
+                now=now,
+                evidence={"error": str(error)},
+                action="PAUSE_RECOVERY",
+            )
+            state["last_wake_id"] = args.wake_id
+            _write(path, state, result)
+            return
+        state, outcome = freeze_default_batch(
+            state,
+            wake_id=args.wake_id,
+            worktree_head_oid=worktree_head_oid,
+            now=now,
+        )
+        if state.get("wake_phase") != "frozen":
+            _write(path, state, outcome)
+            return
+        _write(path, state, {"next_action": "RUN_BATCH", "batch": outcome})
         return
     if args.command == "record":
         state, result = record_default_outcome(
@@ -1816,6 +2242,14 @@ def main() -> None:
             if args.evidence is not None
             else None
         )
+        pending_repair = (
+            _load_pending_repair(
+                args.pending_repair,
+                repository_path=args.repository_path,
+            )
+            if args.pending_repair is not None
+            else None
+        )
         state, result = record_retry(
             state,
             wake_id=args.wake_id,
@@ -1824,6 +2258,7 @@ def main() -> None:
             evidence=evidence,
             signature=args.signature,
             count_no_progress=args.no_progress,
+            pending_repair=pending_repair,
         )
         _write(path, state, result)
         return
@@ -1841,6 +2276,22 @@ def main() -> None:
         _write(path, state, result)
         return
     if args.command == "complete-wake":
+        completion_failure = None
+        if args.completion_failure is not None:
+            try:
+                completion_failure = json.loads(
+                    args.completion_failure.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError) as error:
+                raise RuntimeError(
+                    f"Cannot read completion failure JSON: {args.completion_failure}"
+                ) from error
+            if not isinstance(completion_failure, dict):
+                raise RuntimeError("Completion failure JSON must be an object")
+            if args.schedule_reanchored:
+                raise RuntimeError(
+                    "--completion-failure cannot be combined with --schedule-reanchored"
+                )
         state, result = complete_wake(
             state,
             wake_id=args.wake_id,
@@ -1851,6 +2302,10 @@ def main() -> None:
                 if args.schedule_reanchored
                 else None
             ),
+            schedule_anchor_created_at=args.scheduled_created_at,
+            scheduled_task_id=args.scheduled_task_id,
+            completion_failure=completion_failure,
+            require_schedule_anchor=args.schedule_reanchored,
         )
         _write(path, state, result)
         return

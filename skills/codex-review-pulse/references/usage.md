@@ -16,9 +16,10 @@ The standard short request selects the Codex-first default path:
 Automatically fix this PR's Codex review issues until no new issues appear.
 ```
 
-It uses one paused-before-work wake at a time. Only a completion-relative
-`WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head `REQUEST_REVIEW` may rearm
-the next wake.
+It uses one paused-before-work wake at a time. Each later wake is delivered in
+a new standalone task/conversation. Only a completion-relative `WAIT_REVIEW`,
+`WAIT_RETRY`, or successful same-head `REQUEST_REVIEW` may create the next
+standalone task.
 The hardened commands below must not be used to reintroduce the old activation
 lifecycle. Repository-specific scope and trusted-input boundaries belong in
 the target repository's `AGENTS.md`.
@@ -33,13 +34,24 @@ drift is rejected.
 
 The host adapter's `--pause-confirmed` and `--schedule-reanchored` inputs are
 post-success confirmations only. They do not call or authorize a Codex
-automation operation. Pass `--schedule-reanchored` only after the task update
-succeeds and pair it with `--scheduled-first-run` containing the persisted
-first run read back from the task. The controller verifies that timestamp
-against its completion-relative expectation. Schedule timestamps are rounded
-up to the scheduler's representable precision; the ordered first-run check
-allows equality or a delay of at most one second. Comparisons without a
-logical ordering allow one second on either side.
+automation operation. The supported local-host path creates a paused
+cadence-only standalone successor without `DTSTART`, then reads back its
+persisted ID, prompt and digest, scheduler/conversation metadata, absent target attachment,
+model, reasoning settings, cadence, paused status, and creation timestamp.
+Activate only the verified task, then pass
+`--schedule-reanchored` with
+`--scheduled-created-at`, `--scheduled-first-run` derived from creation time
+plus cadence, and `--scheduled-task-id`. The host-supported scheduler exposes
+task metadata at whole-second precision by truncating fractional seconds, so
+the controller applies that same quantization to the creation anchor, expected
+first run, and read-back value. It still rejects a first run in an earlier
+represented second and requires the creation anchor not to predate wake
+completion at scheduler precision.
+
+For Codex cron task status changes, first read the persisted task definition.
+The pause or activation update must retain its kind, name, prompt, recurrence,
+model, reasoning effort, project, execution environment, and destination while
+changing only status; a status-only update is rejected by the local host.
 
 Use a clean source repository and an exact release-candidate commit throughout
 the commands below. OpenAI documents `$HOME/.agents/skills` as the user-level
@@ -64,7 +76,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
 This extracts `skills/codex-review-pulse` from the named Git commit into
 `$env:USERPROFILE\.agents\skills\codex-review-pulse`. It does not copy the
 mutable working-tree files and does not create a symlink. The installed
-manifest records version `0.7.1`, the full source commit, and SHA-256 file
+manifest records version `0.8.8`, the full source commit, and SHA-256 file
 hashes. Verification independently reconstructs that inventory from the pinned
 Git commit, so changing both an installed file and its adjacent manifest does
 not reauthorize the modified bytes.
@@ -78,7 +90,7 @@ explicit alternate configured location.
 
 ```powershell
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
-  --expected-version 0.7.1 `
+  --expected-version 0.8.8 `
   --expected-source-commit $commit
 ```
 
@@ -97,7 +109,7 @@ python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_prefligh
   --repo OWNER/REPO `
   --pr NUMBER `
   --repository-path C:\path\to\target-repository `
-  --expected-skill-version 0.7.1 `
+  --expected-skill-version 0.8.8 `
   --expected-source-commit $commit `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector `

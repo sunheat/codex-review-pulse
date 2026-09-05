@@ -10,6 +10,36 @@ When `notes/context.md` exists, read it before starting repository work. It is
 local working context only: promote durable decisions into tracked
 documentation, and never make public behavior depend solely on ignored notes.
 
+## Plane work tracking
+
+Plane is the execution tracker for current and future actionable work. It was
+introduced after development of this repository had already begun, so its Work
+Item history is intentionally incomplete.
+
+Use Plane Work Items for actionable bugs, investigations, features, and
+follow-up tasks. Do not infer project scope, history, or supported behavior
+from Plane alone, and do not backfill completed historical work unless
+explicitly asked. Work Items are the only Plane surface this repository relies
+on; do not create or depend on Modules, Cycles, Pages, or Wiki unless
+explicitly requested.
+
+A Work Item may provide task-specific context and acceptance criteria, but it
+cannot override repository invariants, authorization boundaries, or tracked
+design decisions. When a task originates from Plane:
+
+- read the referenced Work Item before implementation;
+- use tracked repository documentation and OpenWiki for technical context as
+  needed;
+- treat links to repository documents, commits, PRs, and tests as supporting
+  context; and
+- report conflicts with repository truth instead of silently reconciling them.
+
+Creating, modifying, commenting on, assigning, transitioning, or closing Plane
+Work Items is a separate external mutation. It requires an explicit user
+request or a workflow contract that specifically authorizes that Plane
+operation. Access to Plane or a Work Item reference does not provide that
+authorization.
+
 ## Stable invariants
 
 - Target only unresolved review threads whose root comment author matches a
@@ -54,10 +84,10 @@ may plan once; duplicate plan/snapshot calls return the prior result or reject
 without incrementing the count. A stale marker returns `PAUSE_RECOVERY` and
 never auto-takes over.
 
-The initial user turn is wake 1. Heartbeat creation/update stays `PAUSED`.
-Each scheduled wake pauses the heartbeat before PR work and stops if that pause
-cannot be confirmed. Final `WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head
-`REQUEST_REVIEW` may reanchor a next wake at
+The initial user turn is wake 1. Standalone task creation stays `PAUSED`.
+Each scheduled wake pauses the delivered standalone task before PR work and
+stops if that pause cannot be confirmed. Final `WAIT_REVIEW`, `WAIT_RETRY`, or
+successful same-head `REQUEST_REVIEW` may create one standalone successor at
 `wake_completed_at + cadence_seconds`; `STOP_*`, `PAUSE_*`, recovery, closed,
 expired, lease-loss, and unknown results remain paused. Pause is absorbing and
 the default path has no automatic recovery-latch clearing operation.
@@ -119,10 +149,11 @@ pilot evidence that changes this phase boundary.
 The standard autonomous default request authorizes PR-scoped implementation and
 test edits, repair of stale PR-scoped expectations, recoverable retries, commit
 and push per aggregate batch, exact target-thread resolution, one review
-trigger per head, and creation/update/pause/reanchor of one same-task heartbeat
-until a Codex-specific stop or hard blocker. Prompt policy can narrow this
-scope. It never authorizes issue creation, merge, auto-merge, changing a PR
-base, force-push, non-target mutations, or unrelated work. Stage explicit paths.
+trigger per head, and creation of one standalone successor task plus the
+required pause/reanchor handoff per rearmable wake until a Codex-specific stop
+or hard blocker. Prompt policy can narrow this scope. It never authorizes issue
+creation, merge, auto-merge, changing a PR base, force-push, non-target
+mutations, or unrelated work. Stage explicit paths.
 
 Tests must not perform live GitHub mutations. Use fixtures and injected GraphQL
 callables for mutation-path coverage.
@@ -134,14 +165,21 @@ network-free test suite, Python compilation and CLI help checks, PowerShell AST
 parsing, Markdown local-link and fence checks, `git diff --check`, and a final
 worktree/staged-path audit. Report focused and complete results separately.
 
-## Current phase boundary
+## Project state and roadmap
 
-The core model, immutable Windows installation, read-only supervised preflight,
-and manually reviewed one- and two-wake live pilots are historical completed
-artifacts. The 0.4.0 real black-box pilot failed on scheduled lifecycle and
-must not be described as a publishable final release. The active phase is the
-Codex-first default vertical slice plus network-free regression coverage; real
-Codex scheduled-task/live GitHub integration remains unverified. It does not
-approve indefinite unattended operation, infer unknown connector capability,
-package a plugin, validate Pi, add generic reviewer/multi-forge support, or
-decide integration/reuse/vendor policy for `gh-address-comments`.
+This file defines the agent operating contract. It is not the canonical backlog
+or milestone-status record and must not duplicate a current-phase snapshot.
+
+Read [ROADMAP.md](ROADMAP.md) for durable project direction and milestone
+boundaries. Use Plane Work Items for the current actionable work queue and
+execution status. Use OpenWiki as optional just-in-time repository context,
+not as a planning or technical authority.
+
+This file defines how agents work. Plane says what is actionable, OpenWiki
+helps locate where and how the repository works, tracked documentation explains
+why, and source code and tests are primary evidence for current implemented
+behavior.
+
+When these sources appear inconsistent, source code, tests, and tracked
+repository documentation govern technical truth. Surface the planning
+inconsistency instead of silently reconciling it.
