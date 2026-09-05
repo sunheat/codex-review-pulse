@@ -48,6 +48,11 @@ first run, and read-back value. It still rejects a first run in an earlier
 represented second and requires the creation anchor not to predate wake
 completion at scheduler precision.
 
+For Codex cron task status changes, first read the persisted task definition.
+The pause or activation update must retain its kind, name, prompt, recurrence,
+model, reasoning effort, project, execution environment, and destination while
+changing only status; a status-only update is rejected by the local host.
+
 Use a clean source repository and an exact release-candidate commit throughout
 the commands below. OpenAI documents `$HOME/.agents/skills` as the user-level
 local skill location; the install manager uses it by default. Codex normally
@@ -71,7 +76,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
 This extracts `skills/codex-review-pulse` from the named Git commit into
 `$env:USERPROFILE\.agents\skills\codex-review-pulse`. It does not copy the
 mutable working-tree files and does not create a symlink. The installed
-manifest records version `0.8.7`, the full source commit, and SHA-256 file
+manifest records version `0.8.8`, the full source commit, and SHA-256 file
 hashes. Verification independently reconstructs that inventory from the pinned
 Git commit, so changing both an installed file and its adjacent manifest does
 not reauthorize the modified bytes.
@@ -85,7 +90,7 @@ explicit alternate configured location.
 
 ```powershell
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
-  --expected-version 0.8.7 `
+  --expected-version 0.8.8 `
   --expected-source-commit $commit
 ```
 
@@ -104,7 +109,7 @@ python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_prefligh
   --repo OWNER/REPO `
   --pr NUMBER `
   --repository-path C:\path\to\target-repository `
-  --expected-skill-version 0.8.7 `
+  --expected-skill-version 0.8.8 `
   --expected-source-commit $commit `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector `

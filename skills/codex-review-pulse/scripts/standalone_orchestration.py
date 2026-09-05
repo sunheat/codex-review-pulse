@@ -39,7 +39,7 @@ class StandaloneTaskHost(Protocol):
         """Return a fresh ID for this invocation only."""
 
     def pause_task(self, task_id: str) -> object:
-        """Pause the delivered task and return an explicit confirmation."""
+        """Pause using the host's full persisted task metadata and confirm it."""
 
     def read_checkpoint_directly(self) -> Mapping[str, Any]:
         """Read the Git-common-dir checkpoint without model context."""
@@ -81,7 +81,7 @@ class StandaloneTaskHost(Protocol):
         """
 
     def activate_task(self, task_id: str) -> object:
-        """Activate one verified paused successor and return explicit confirmation."""
+        """Activate with the host's full persisted task metadata and confirm it."""
 
 
 BeginWake = Callable[[str, str, bool, str | None], Mapping[str, Any]]

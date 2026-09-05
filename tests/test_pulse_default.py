@@ -64,7 +64,7 @@ class DefaultLifecycleTests(unittest.TestCase):
 
         self.assertEqual(handoff["repository"], "owner/repo")
         self.assertEqual(handoff["pull_request_number"], 17)
-        self.assertEqual(handoff["protocol_version"], 9)
+        self.assertEqual(handoff["protocol_version"], 10)
         self.assertEqual(handoff["model"], "gpt-5.6-luna")
         self.assertEqual(handoff["reasoning_effort"], "xhigh")
         self.assertEqual(handoff["scheduler_kind"], "cron")
@@ -110,6 +110,8 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertIn("configured/main checkout", handoff["prompt"])
         self.assertIn("read-only repository locator", handoff["prompt"])
         self.assertIn("do not submit DTSTART", handoff["prompt"])
+        self.assertIn("full cron update payload", handoff["prompt"])
+        self.assertIn("Never send a status-only update", handoff["prompt"])
         self.assertIn("persisted created_at plus cadence", handoff["prompt"])
         self.assertNotIn("same heartbeat", handoff["prompt"].lower())
         self.assertEqual(

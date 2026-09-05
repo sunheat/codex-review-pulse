@@ -49,7 +49,7 @@ from state_model import (
 
 DEFAULT_CADENCE_SECONDS = 600
 DEFAULT_MODE_SCHEMA_VERSION = 2
-STANDALONE_TASK_PROTOCOL_VERSION = 9
+STANDALONE_TASK_PROTOCOL_VERSION = 10
 # The local scheduler exposes task metadata at whole-second precision.  The
 # re-anchor path must use that same representation for expected and observed
 # first-run values; direct completion callbacks retain their exact/ceil path.
@@ -102,6 +102,12 @@ def build_standalone_task_handoff(
         "This is a scheduler-delivered "
         "standalone invocation, not a continuation of another task and not a "
         "same-task heartbeat; never reuse a Codex conversation or targetThreadId. "
+        "Before every Codex automation status transition, read the task's persisted "
+        "definition and submit the full cron update payload: preserve kind, name, "
+        "prompt, recurrence, model, reasoning, project, environment, and destination, "
+        "changing only status. Never send a status-only update. The metadata read is "
+        "not a scheduler mutation; the full pause update remains the first scheduler "
+        "operation of a delivered wake. "
         "Load and obey the installed skill's SKILL.md. Treat the scheduler's "
         "configured project checkout only as a "
         "read-only repository locator. After the required task-pause and checkpoint "

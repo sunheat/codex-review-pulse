@@ -28,7 +28,7 @@ the old heartbeat activated too early, used fixed-cadence overlap, allowed a
 and continued after `PAUSE_BLOCKED`. Do not describe `0.4.0` as production
 ready or use its old scheduled-task protocol as the default.
 
-Version `0.8.7` is the Codex-first default clean-context scheduling candidate. Its
+Version `0.8.8` is the Codex-first default clean-context scheduling candidate. Its
 real scheduled-task and live GitHub integration remains unverified until an
 independent forward test completes; do not describe that integration as proven
 before then.
@@ -151,6 +151,16 @@ cadence, and `--scheduled-task-id`. These flags do not pause or schedule a
 Codex task themselves; a success boolean is never evidence that the host
 operation or completion-relative successor handoff succeeded.
 
+### Codex task status updates
+
+For a Codex cron task, a pause or activation must preserve the task's complete
+persisted definition. Read its task metadata first, then submit a full update
+containing its kind, name, prompt, recurrence, model, reasoning effort, project,
+execution environment, and destination, changing only `status`. Do not submit
+a status-only update: the local host rejects it before the pause can be
+confirmed. Reading task metadata is not a scheduler mutation; the full pause
+update remains the first scheduler mutation of a delivered wake.
+
 ### Host invocation boundary
 
 A host invocation is the unit of execution and may consume at most one pulse
@@ -217,7 +227,8 @@ if this is the initial explicit user request:
 else if this is a scheduler-delivered invocation:
     # This must be the first scheduler operation in this invocation. The
     # delivered task is distinct from every earlier and later task.
-    pause_result = host.pause_task(delivered_task_id)
+    DELIVERED_TASK = host.read_task_definition(delivered_task_id)
+    pause_result = host.update_task(DELIVERED_TASK, status=PAUSED)
     if pause_result is not confirmed:
         PULSE CHECKPOINT_TARGET --wake-id WAKE_ID begin-wake \
           --delivered-task-id DELIVERED_TASK_ID
@@ -351,6 +362,7 @@ if successor_result is success:
         )
         require SUCCESSOR.first_run is present
         require SUCCESSOR.first_run matches EXPECTED_FIRST_RUN at scheduler precision
+        # Activation is another complete metadata-preserving task update.
         require host.activate_task(SUCCESSOR_ID) is confirmed
         ACTUAL_FIRST_RUN = SUCCESSOR.first_run
     except Exception:

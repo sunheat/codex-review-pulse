@@ -118,6 +118,13 @@ creation anchor, and first run are verified. Missing task IDs therefore leave
 only harmless paused records, while callback exceptions or malformed results
 re-pause every known activated successor before the invocation ends.
 
+## 0.8.8 metadata-preserving task status updates
+
+Codex cron status transitions now require a metadata read followed by a full
+persisted task update that changes only status. This prevents the local host
+from rejecting pause or activation attempts that omit required cron fields and
+leaving a live task paired with a fail-closed checkpoint.
+
 ## Deferred milestones
 
 - public-API connector and automatic-review detection bound to a head OID;
