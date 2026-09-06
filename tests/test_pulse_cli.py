@@ -258,7 +258,7 @@ class CliHarness:
 
 
 class PulseCliTests(unittest.TestCase):
-    def test_successor_authorization_persists_before_activation(self) -> None:
+    def test_successor_authorization_makes_delivery_safe_before_activation(self) -> None:
         fixture = CliHarness.default_fixture()
         fixture["eyes"] = [{
             "id": "EYES1",
@@ -276,9 +276,11 @@ class PulseCliTests(unittest.TestCase):
         result = h.json_output(h.run("authorize-successor", *schedule, now="2026-08-26T00:26:00Z"))
         self.assertEqual(result["next_action"], "SUCCESSOR_AUTHORIZED")
         state = load_checkpoint(path)
-        self.assertEqual(state["active_wake_id"], "wake-1")
+        self.assertIsNone(state["active_wake_id"])
         self.assertEqual(state["scheduled_task_id"], "verified-successor")
-        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+        self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
+        self.assertEqual(state["wake_phase"], "successor_authorized")
+        self.assertEqual(state["next_not_before"], "2026-08-26T00:36:00+00:00")
         final = h.json_output(h.run("complete-wake", *schedule, now="2026-08-26T00:26:00Z"))
         self.assertEqual(final["next_action"], "WAIT_REVIEW")
         self.assertEqual(load_checkpoint(path)["wake_count"], 1)

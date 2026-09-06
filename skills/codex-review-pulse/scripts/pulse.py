@@ -1518,9 +1518,24 @@ def complete_wake(
         raise ValueError("Scheduled task ID must be a non-empty string")
     if schedule_anchor_created_at is not None and schedule_next_wake is None:
         raise ValueError("A schedule creation anchor requires re-anchor confirmation")
-    if state.get("last_wake_id") == wake_id and state.get("active_wake_id") is None and state.get("last_wake_result"):
+    authorization = state.get("successor_authorization")
+    authorized_handoff = (
+        state.get("active_wake_id") is None
+        and isinstance(authorization, Mapping)
+        and authorization.get("wake_id") == wake_id
+    )
+    if (
+        state.get("last_wake_id") == wake_id
+        and state.get("active_wake_id") is None
+        and state.get("last_wake_result")
+        and not authorized_handoff
+    ):
         return state, deepcopy(state["last_wake_result"])
-    _require_active_wake(state, wake_id, allow_retry_completion=True)
+    if authorized_handoff:
+        if state.get("wake_phase") != "successor_authorized":
+            raise DefaultWakeError("Successor authorization is not ready for completion")
+    else:
+        _require_active_wake(state, wake_id, allow_retry_completion=True)
     decision = state.get("last_decision") or {}
     action = decision.get("next_action")
     mutation_occurred = bool(state.get("wake_mutation_occurred")) or bool(
@@ -1693,7 +1708,6 @@ def complete_wake(
         state["last_wake_id"] = wake_id
         return state, return_state_result
 
-    authorization = state.get("successor_authorization")
     if isinstance(authorization, Mapping):
         authorization_matches = authorization.get("wake_id") == wake_id
         expected_task_id = authorization.get("scheduled_task_id")
@@ -1760,6 +1774,8 @@ def complete_wake(
     state["scheduled_task_kind"] = "standalone"
     if scheduled_task_id is not None:
         state["scheduled_task_id"] = scheduled_task_id
+    if authorized_handoff:
+        state["successor_authorization"] = None
     state["wake_phase"] = "retry_waiting" if action == "WAIT_RETRY" else "completed"
     state["last_wake_id"] = wake_id
     _set_last_result(state, result)
@@ -1797,6 +1813,10 @@ def authorize_successor(
         scheduler_precision=True,
     ):
         raise DefaultWakeError("Successor first run does not match its creation anchor")
+    next_not_before = _ceil_to_second(
+        completed_at
+        + timedelta(seconds=state["automation_policy"]["cadence_seconds"])
+    ).isoformat()
     state["successor_authorization"] = {
         "wake_id": wake_id,
         "scheduled_task_id": scheduled_task_id,
@@ -1805,13 +1825,22 @@ def authorize_successor(
     }
     state["scheduled_task_id"] = scheduled_task_id
     state["scheduled_task_kind"] = "standalone"
-    state["scheduled_task_disposition"] = "PAUSED"
+    # The host task is still paused, but this exact verified successor is now
+    # the durable delivery authority.  Clear the finished wake before host
+    # activation so an immediate delivery cannot be rejected as incomplete.
+    state["active_wake_id"] = None
+    state["wake_completed_at"] = completed_at.isoformat()
+    state["next_not_before"] = next_not_before
+    state["scheduled_task_disposition"] = "ACTIVE"
+    state["wake_phase"] = "successor_authorized"
+    state["last_wake_id"] = wake_id
     result = {
         "next_action": "SUCCESSOR_AUTHORIZED",
         "reason_code": "successor_authorized",
         "scheduled_task_id": scheduled_task_id,
         "scheduled_created_at": created_at.isoformat(),
         "scheduled_first_run": _iso(scheduled_first_run),
+        "next_not_before": next_not_before,
         "mutation_occurred": False,
     }
     state["last_wake_result"] = deepcopy(result)
