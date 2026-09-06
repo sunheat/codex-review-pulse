@@ -258,6 +258,59 @@ class CliHarness:
 
 
 class PulseCliTests(unittest.TestCase):
+    def test_successor_authorization_persists_before_activation(self) -> None:
+        h = CliHarness(self)
+        path = h.begin_and_snapshot()
+        schedule = (
+            "--schedule-reanchored", "--scheduled-created-at", "2026-08-26T00:26:00Z",
+            "--scheduled-first-run", "2026-08-26T00:36:00Z",
+            "--scheduled-task-id", "verified-successor",
+        )
+        result = h.json_output(h.run("authorize-successor", *schedule, now="2026-08-26T00:26:00Z"))
+        self.assertEqual(result["next_action"], "SUCCESSOR_AUTHORIZED")
+        state = load_checkpoint(path)
+        self.assertIsNone(state["active_wake_id"])
+        self.assertEqual(state["scheduled_task_id"], "verified-successor")
+        self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
+        final = h.json_output(h.run("complete-wake", *schedule, now="2026-08-26T00:26:00Z"))
+        self.assertEqual(final["next_action"], "WAIT_REVIEW")
+        self.assertEqual(load_checkpoint(path)["wake_count"], 1)
+
+    def test_pending_patch_restore_is_required_and_checks_bytes(self) -> None:
+        import hashlib
+        import pulse
+        h = CliHarness(self)
+        h.begin_and_snapshot()
+        state = load_checkpoint(checkpoint_path("owner/repo", 17, repository_path=h.checkout))
+        content = b"diff --git a/repair.txt b/repair.txt\nnew file mode 100644\n--- /dev/null\n+++ b/repair.txt\n@@ -0,0 +1 @@\n+restored\n"
+        patch = h.checkout / ".git" / "pending.patch"
+        patch.write_bytes(content)
+        state["resume_pending_batch"] = True
+        state["active_batch"] = {
+            "frozen_head_oid": h.initial_head,
+            "targeted_thread_ids": ["T1"],
+            "thread_outcomes": {"T1": {"classification": "fix-now"}},
+            "pending_repair": {
+                "patch_path": str(patch),
+                "patch_sha256": hashlib.sha256(content).hexdigest(),
+                "frozen_head_oid": h.initial_head,
+            },
+        }
+        calls = []
+        with self.assertRaisesRegex(pulse.DefaultWakeError, "Restore"):
+            pulse.resolve_default_thread(state, wake_id="wake-1", thread_id="T1", graphql_call=lambda *a: calls.append(a))
+        self.assertEqual(calls, [])
+        patch.write_bytes(content + b"tampered")
+        with self.assertRaisesRegex(pulse.DefaultWakeError, "SHA-256"):
+            pulse.restore_pending_repair(state, wake_id="wake-1", repository_path=h.checkout)
+        self.assertFalse((h.checkout / "repair.txt").exists())
+        patch.write_bytes(content)
+        pulse.restore_pending_repair(state, wake_id="wake-1", repository_path=h.checkout)
+        self.assertEqual((h.checkout / "repair.txt").read_text(), "restored\n")
+        pulse._require_restored_repair(state, "wake-1")
+        with self.assertRaises(pulse.DefaultWakeError):
+            pulse._require_restored_repair(state, "wake-2")
+
     def test_host_confirmation_flags_are_public_in_help(self) -> None:
         root_help = subprocess.run(
             [sys.executable, str(PULSE), "--help"],

@@ -49,7 +49,7 @@ from state_model import (
 
 DEFAULT_CADENCE_SECONDS = 600
 DEFAULT_MODE_SCHEMA_VERSION = 2
-STANDALONE_TASK_PROTOCOL_VERSION = 10
+STANDALONE_TASK_PROTOCOL_VERSION = 11
 # The local scheduler exposes task metadata at whole-second precision.  The
 # re-anchor path must use that same representation for expected and observed
 # first-run values; direct completion callbacks retain their exact/ceil path.
@@ -111,8 +111,9 @@ def build_standalone_task_handoff(
         "Load and obey the installed skill's SKILL.md. Treat the scheduler's "
         "configured project checkout only as a "
         "read-only repository locator. After the required task-pause and checkpoint "
-        "preflight, verify the remote PR head and create a new task-owned clean "
-        "linked worktree at that exact head before begin-wake, then load and obey "
+        "preflight, persist begin-wake using the configured checkout before any "
+        "fallible setup. Then verify the remote PR head and create a new task-owned clean "
+        "linked worktree at that exact head, then load and obey "
         "that worktree's AGENTS.md. Never reuse a "
         "worktree from an earlier wake, and never switch, reset, clean, or modify "
         "the configured/main checkout. Run every repository mutation, validation, "
@@ -139,7 +140,8 @@ def build_standalone_task_handoff(
         "the cleanup boundary, then read back the persisted task ID, status, "
         "creation timestamp, prompt and prompt digest, cron/standalone metadata, "
         "absent target thread, model, reasoning settings, and cadence before accepting "
-        "it. Activate only that verified successor before complete-wake; malformed "
+        "it. Run authorize-successor with its verified ID and schedule before activation, "
+        "then activate only that verified successor before complete-wake; malformed "
         "creation evidence therefore cannot leave an unknown task running. "
         "Derive the first run from persisted created_at plus cadence, then pass both "
         "timestamps to complete-wake. The creation timestamp must be at or after this "
@@ -748,6 +750,7 @@ def begin_wake(
     state["last_decision"] = None
     state["last_wake_result"] = None
     state["resume_pending_batch"] = pending_batch
+    state["pending_repair_restored"] = None
     if pending_batch:
         pending_repair = (state.get("active_batch") or {}).get("pending_repair")
         fix_now_threads = [
@@ -1202,6 +1205,15 @@ def record_retry(
     return state, result
 
 
+def _require_restored_repair(state: Mapping[str, Any], wake_id: str) -> None:
+    if state.get("resume_pending_batch") and (
+        state.get("active_batch") or {}
+    ).get("pending_repair") and (
+        state.get("pending_repair_restored") or {}
+    ).get("wake_id") != wake_id:
+        raise DefaultWakeError("Restore and verify the pending repair before resolution or publication")
+
+
 def resolve_default_thread(
     checkpoint: dict[str, Any],
     *,
@@ -1224,6 +1236,7 @@ def resolve_default_thread(
         raise DefaultWakeError("Thread is not in the active frozen batch")
     if thread_id not in batch.get("thread_outcomes", {}):
         raise DefaultWakeError("Record the thread outcome before exact resolution")
+    _require_restored_repair(state, wake_id)
     if thread_id in batch.get("resolved_thread_ids", []):
         _consume_thread_resolution_confirmation(state)
         return state, {"id": thread_id, "isResolved": True, "alreadyResolved": True}
@@ -1268,6 +1281,7 @@ def prepare_default_publication(
     """Authorize commit/push only after exact resolution on the frozen head."""
     state = ensure_default_lifecycle(checkpoint)
     _require_active_wake(state, wake_id)
+    _require_restored_repair(state, wake_id)
     if (
         state["automation_policy"]["publication"] != "auto"
         and not _policy_confirmation_allows(state, "aggregate_publication")
@@ -1834,6 +1848,48 @@ def _load_pending_repair(
     return manifest
 
 
+def restore_pending_repair(
+    state: dict[str, Any], *, wake_id: str, repository_path: str | Path
+) -> dict[str, Any]:
+    """Verify stored bytes and restore them only into this wake's clean checkout."""
+    _require_active_wake(state, wake_id)
+    batch = state.get("active_batch") or {}
+    manifest = batch.get("pending_repair")
+    if not state.get("resume_pending_batch") or not isinstance(manifest, dict):
+        raise DefaultWakeError("No pending repair to restore")
+    patch = Path(manifest["patch_path"]).resolve()
+    patch.relative_to(git_common_directory(repository_path))
+    content = patch.read_bytes()
+    if hashlib.sha256(content).hexdigest() != manifest.get("patch_sha256"):
+        raise DefaultWakeError("Pending repair patch SHA-256 mismatch")
+    if _checkout_head(repository_path) != batch.get("frozen_head_oid") or (
+        manifest.get("frozen_head_oid") != batch.get("frozen_head_oid")
+    ):
+        raise DefaultWakeError("Pending repair frozen head mismatch")
+    checkout = str(Path(repository_path).resolve())
+    restored = state.get("pending_repair_restored") or {}
+    if restored.get("wake_id") == wake_id and restored.get("checkout") == checkout:
+        return {"next_action": "PENDING_REPAIR_RESTORED", "already_restored": True}
+    dirty = subprocess.run(
+        ["git", "-C", checkout, "status", "--porcelain"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    if dirty.strip():
+        raise DefaultWakeError("Pending repair requires a clean wake worktree")
+    subprocess.run(
+        ["git", "-C", checkout, "apply", "--check", "-"], input=content,
+        capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "-C", checkout, "apply", "-"], input=content,
+        capture_output=True, check=True,
+    )
+    state["pending_repair_restored"] = {
+        "wake_id": wake_id, "checkout": checkout, "patch_sha256": manifest["patch_sha256"],
+    }
+    return {"next_action": "PENDING_REPAIR_RESTORED", "already_restored": False}
+
+
 def _state_path(
     args: argparse.Namespace,
     *,
@@ -1930,6 +1986,7 @@ def parse_args() -> argparse.Namespace:
 
     commands.add_parser("snapshot", help="Fetch and normalize one stable PR snapshot")
     commands.add_parser("freeze", help="Freeze the targeted threads from the snapshot")
+    commands.add_parser("restore-repair", help="Verify and apply a resumed pending patch")
 
     record = commands.add_parser("record", help="Persist one thread outcome")
     record.add_argument("--thread-id", required=True)
@@ -1997,6 +2054,7 @@ def parse_args() -> argparse.Namespace:
 
     complete = commands.add_parser(
         "complete-wake",
+        aliases=["authorize-successor"],
         help="Complete the wake after the host re-anchors its next run",
     )
     complete.add_argument(
@@ -2201,6 +2259,16 @@ def main() -> None:
         )
         _write(path, state, result)
         return
+    if args.command == "restore-repair":
+        result = restore_pending_repair(
+            state, wake_id=args.wake_id, repository_path=args.repository_path
+        )
+        _write(path, state, result)
+        return
+    if args.command in {"resolve", "prepare-publication"} and state.get("resume_pending_batch") and (state.get("active_batch") or {}).get("pending_repair"):
+        restored = state.get("pending_repair_restored") or {}
+        if restored.get("checkout") != str(Path(args.repository_path).resolve()):
+            raise DefaultWakeError("Pending repair was not restored in this worktree")
     if args.command == "resolve":
         from resolve_thread import graphql
 
@@ -2275,7 +2343,12 @@ def main() -> None:
         )
         _write(path, state, result)
         return
-    if args.command == "complete-wake":
+    if args.command in {"complete-wake", "authorize-successor"}:
+        if args.command == "authorize-successor" and (
+            not args.schedule_reanchored or not args.scheduled_task_id
+            or not args.scheduled_created_at or not args.scheduled_first_run
+        ):
+            raise DefaultWakeError("Successor authorization requires verified task and schedule")
         completion_failure = None
         if args.completion_failure is not None:
             try:
@@ -2292,6 +2365,13 @@ def main() -> None:
                 raise RuntimeError(
                     "--completion-failure cannot be combined with --schedule-reanchored"
                 )
+        if completion_failure and state.get("successor_authorization_wake_id") == args.wake_id:
+            result = _pause(
+                state, reason_code=completion_failure["reason_code"], now=now,
+                evidence=completion_failure.get("evidence"), action="PAUSE_RECOVERY",
+            )
+            _write(path, state, result)
+            return
         state, result = complete_wake(
             state,
             wake_id=args.wake_id,
@@ -2307,6 +2387,9 @@ def main() -> None:
             completion_failure=completion_failure,
             require_schedule_anchor=args.schedule_reanchored,
         )
+        if args.command == "authorize-successor" and result.get("next_action") in REARM_ACTIONS:
+            state["successor_authorization_wake_id"] = args.wake_id
+            result = {**result, "next_action": "SUCCESSOR_AUTHORIZED"}
         _write(path, state, result)
         return
     raise RuntimeError(f"Unsupported command: {args.command}")

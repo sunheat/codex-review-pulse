@@ -64,7 +64,7 @@ class DefaultLifecycleTests(unittest.TestCase):
 
         self.assertEqual(handoff["repository"], "owner/repo")
         self.assertEqual(handoff["pull_request_number"], 17)
-        self.assertEqual(handoff["protocol_version"], 10)
+        self.assertEqual(handoff["protocol_version"], 11)
         self.assertEqual(handoff["model"], "gpt-5.6-luna")
         self.assertEqual(handoff["reasoning_effort"], "xhigh")
         self.assertEqual(handoff["scheduler_kind"], "cron")
