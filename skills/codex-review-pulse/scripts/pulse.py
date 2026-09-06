@@ -711,15 +711,31 @@ def begin_wake(
         return state, result
 
     next_not_before = state.get("next_not_before")
-    if next_not_before is not None and _utc(now) < _utc(next_not_before):
-        result = _pause(
-            state,
-            reason_code="cadence_not_elapsed",
-            now=now,
-            evidence={"next_not_before": next_not_before, "wake_id": wake_id},
-        )
-        state["last_wake_id"] = wake_id
-        return state, result
+    if next_not_before is not None:
+        try:
+            not_before = _utc(next_not_before)
+        except (TypeError, ValueError) as error:
+            result = _pause(
+                state,
+                reason_code="checkpoint_invalid",
+                now=now,
+                evidence={
+                    "next_not_before": next_not_before,
+                    "error": str(error),
+                },
+                action="PAUSE_RECOVERY",
+            )
+            state["last_wake_id"] = wake_id
+            return state, result
+        if _utc(now) < not_before:
+            result = _pause(
+                state,
+                reason_code="cadence_not_elapsed",
+                now=now,
+                evidence={"next_not_before": next_not_before, "wake_id": wake_id},
+            )
+            state["last_wake_id"] = wake_id
+            return state, result
 
     # The scheduler adapter is deliberately injected.  Without an explicit
     # confirmation, no PR snapshot or mutation is allowed for this wake.
@@ -1559,6 +1575,7 @@ def complete_wake(
     next_not_before = _ceil_to_second(
         completed_at + timedelta(seconds=effective_cadence)
     ).isoformat()
+    expected_first_run = next_not_before
     if (
         require_schedule_anchor
         and schedule_next_wake is not None
@@ -1640,7 +1657,13 @@ def complete_wake(
             state["next_not_before"] = next_not_before
             state["last_wake_id"] = wake_id
             return state, return_state_result
+        # Keep the lifecycle deadline relative to the recorded completion.
+        # The task's own first run remains anchored to its persisted creation
+        # timestamp, which is validated separately below.
         next_not_before = _truncate_to_scheduler_precision(
+            completed_at + timedelta(seconds=effective_cadence)
+        ).isoformat()
+        expected_first_run = _truncate_to_scheduler_precision(
             parsed_anchor + timedelta(seconds=effective_cadence)
         ).isoformat()
         state["next_not_before"] = next_not_before
@@ -1651,7 +1674,7 @@ def complete_wake(
     except (TypeError, ValueError):
         observed_first_run = None
     if observed_first_run is None or not _schedule_times_match(
-        next_not_before,
+        expected_first_run,
         observed_first_run,
         ordered=True,
         scheduler_precision=schedule_anchor_created_at is not None,
@@ -1661,7 +1684,7 @@ def complete_wake(
             reason_code="scheduled_task_reanchor_mismatch",
             now=now,
             evidence={
-                "expected_first_run": next_not_before,
+                "expected_first_run": expected_first_run,
                 "observed_first_run": raw_observed_first_run,
             },
             mutation_occurred=mutation_occurred,
@@ -1669,6 +1692,52 @@ def complete_wake(
         state["next_not_before"] = next_not_before
         state["last_wake_id"] = wake_id
         return state, return_state_result
+
+    authorization = state.get("successor_authorization")
+    if isinstance(authorization, Mapping):
+        authorization_matches = authorization.get("wake_id") == wake_id
+        expected_task_id = authorization.get("scheduled_task_id")
+        expected_created_at = authorization.get("scheduled_created_at")
+        expected_authorized_first_run = authorization.get("scheduled_first_run")
+        try:
+            authorization_matches = authorization_matches and (
+                expected_task_id == scheduled_task_id
+                and isinstance(expected_created_at, str)
+                and schedule_anchor_created_at is not None
+                and _truncate_to_scheduler_precision(_utc(expected_created_at))
+                == _truncate_to_scheduler_precision(_utc(schedule_anchor_created_at))
+                and isinstance(expected_authorized_first_run, str)
+                and isinstance(raw_observed_first_run, str)
+                and _truncate_to_scheduler_precision(_utc(expected_authorized_first_run))
+                == _truncate_to_scheduler_precision(_utc(raw_observed_first_run))
+            )
+        except (TypeError, ValueError):
+            authorization_matches = False
+        if not authorization_matches:
+            return_state_result = _pause(
+                state,
+                reason_code="successor_authorization_mismatch",
+                now=now,
+                evidence={
+                    "authorized": {
+                        "wake_id": authorization.get("wake_id"),
+                        "scheduled_task_id": expected_task_id,
+                        "scheduled_created_at": expected_created_at,
+                        "scheduled_first_run": expected_authorized_first_run,
+                    },
+                    "provided": {
+                        "wake_id": wake_id,
+                        "scheduled_task_id": scheduled_task_id,
+                        "scheduled_created_at": schedule_anchor_created_at,
+                        "scheduled_first_run": raw_observed_first_run,
+                    },
+                },
+                action="PAUSE_RECOVERY",
+                mutation_occurred=mutation_occurred,
+            )
+            state["next_not_before"] = next_not_before
+            state["last_wake_id"] = wake_id
+            return state, return_state_result
 
     if scheduled_task_id is None:
         return_state_result = _pause(

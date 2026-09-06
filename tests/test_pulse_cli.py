@@ -864,7 +864,7 @@ class PulseCliTests(unittest.TestCase):
             )
         )
         self.assertEqual(result["next_action"], "WAIT_REVIEW")
-        self.assertEqual(result["next_not_before"], "2026-08-26T00:36:02+00:00")
+        self.assertEqual(result["next_not_before"], "2026-08-26T00:36:00+00:00")
 
         incident = CliHarness(self)
         incident.begin_and_snapshot()

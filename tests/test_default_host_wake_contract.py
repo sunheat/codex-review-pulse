@@ -372,6 +372,11 @@ class DefaultHostWakeContractTests(unittest.TestCase):
                 {"state": {**waiting_checkpoint(), "failure_latch": {"reason_code": "old-failure"}}},
                 "failure_latched",
             ),
+            (
+                "malformed",
+                {"state": {**waiting_checkpoint(), "next_not_before": "not-a-timestamp"}},
+                "checkpoint_invalid",
+            ),
             ("early", {"state": waiting_checkpoint()}, "cadence_not_elapsed"),
         )
         for name, options, reason_code in cases:
@@ -390,6 +395,11 @@ class DefaultHostWakeContractTests(unittest.TestCase):
                     self.assertEqual(
                         host.state["failure_latch"]["reason_code"],
                         "cadence_not_elapsed",
+                    )
+                if name == "malformed":
+                    self.assertEqual(
+                        host.state["failure_latch"]["reason_code"],
+                        "checkpoint_invalid",
                     )
 
     def test_complete_wake_ends_successful_and_failed_reanchor_invocations(self) -> None:

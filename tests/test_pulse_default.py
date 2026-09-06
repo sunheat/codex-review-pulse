@@ -1062,13 +1062,57 @@ class DefaultLifecycleTests(unittest.TestCase):
         )
 
         self.assertEqual(result["next_action"], "WAIT_REVIEW")
-        self.assertEqual(result["next_not_before"], "2026-08-26T00:36:02+00:00")
+        self.assertEqual(result["next_not_before"], "2026-08-26T00:36:00+00:00")
         self.assertEqual(
             result["scheduled_task_created_at"],
             "2026-08-26T00:26:02.250000+00:00",
         )
-        self.assertEqual(state["next_not_before"], "2026-08-26T00:36:02+00:00")
+        self.assertEqual(state["next_not_before"], "2026-08-26T00:36:00+00:00")
         self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
+
+    def test_complete_wake_rejects_successor_authorization_mismatch(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
+        state, _ = pulse.authorize_successor(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:26:00+00:00",
+            scheduled_created_at="2026-08-26T00:26:00+00:00",
+            scheduled_first_run="2026-08-26T00:36:00+00:00",
+            scheduled_task_id="task-a",
+        )
+
+        state, result = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:26:00+00:00",
+            schedule_next_wake=lambda _: "2026-08-26T00:36:00+00:00",
+            schedule_anchor_created_at="2026-08-26T00:26:00+00:00",
+            scheduled_task_id="task-b",
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "successor_authorization_mismatch")
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+
+    def test_begin_wake_persists_malformed_next_not_before(self) -> None:
+        state = empty_checkpoint("Owner/Repo", 17)
+        state["scheduled_task_disposition"] = "ACTIVE"
+        state["scheduled_task_id"] = "task-1"
+        state["next_not_before"] = "not-a-timestamp"
+
+        state, result = pulse.begin_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:11:00+00:00",
+            pause_heartbeat=lambda: False,
+            delivered_task_id="task-1",
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "checkpoint_invalid")
+        self.assertEqual(state["failure_latch"]["reason_code"], "checkpoint_invalid")
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
 
     def test_reanchored_schedule_requires_a_persisted_creation_anchor(self) -> None:
         state, _ = started()
