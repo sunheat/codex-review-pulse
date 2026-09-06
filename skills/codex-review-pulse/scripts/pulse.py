@@ -76,6 +76,7 @@ PAUSE_ACTIONS = {
     "PAUSE_POLICY_CONFIRMATION",
 }
 TERMINAL_ACTIONS = {"STOP_TERMINAL", "STOP_CLOSED", "STOP_POLICY_LIMIT"}
+SCHEDULED_TASK_DISPOSITIONS = {"PAUSED", "AUTHORIZED", "ACTIVE"}
 
 
 class DefaultWakeError(RuntimeError):
@@ -398,7 +399,7 @@ def ensure_default_lifecycle(checkpoint: dict[str, Any]) -> dict[str, Any]:
     except PolicyError as error:
         raise ValueError(str(error)) from error
     result["automation_policy_digest"] = policy_digest(result["automation_policy"])
-    if result.get("scheduled_task_disposition") not in {"PAUSED", "ACTIVE"}:
+    if result.get("scheduled_task_disposition") not in SCHEDULED_TASK_DISPOSITIONS:
         raise ValueError("Scheduled task disposition is invalid")
     if result.get("scheduled_task_kind") != "standalone":
         raise ValueError("Scheduled task kind must be standalone")
@@ -661,7 +662,8 @@ def begin_wake(
         )
         return state, result
 
-    active_schedule = state.get("scheduled_task_disposition") == "ACTIVE"
+    scheduled_disposition = state.get("scheduled_task_disposition")
+    active_schedule = scheduled_disposition in {"ACTIVE", "AUTHORIZED"}
     if (active_schedule and delivered_task_id is None) or (
         delivered_task_id is not None
         and (
@@ -756,6 +758,7 @@ def begin_wake(
         and (state.get("active_batch") or {}).get("publication", {}).get("status") != "succeeded"
         and state.get("wake_phase") in {"retry_waiting", "confirmation_ready"}
     )
+    authorized_delivery = scheduled_disposition == "AUTHORIZED"
     state["active_wake_id"] = wake_id
     state["wake_phase"] = "started"
     state["wake_started_at"] = now
@@ -763,6 +766,8 @@ def begin_wake(
     state["wake_mutation_occurred"] = False
     state["next_not_before"] = None
     state["scheduled_task_disposition"] = "PAUSED"
+    if authorized_delivery:
+        state["successor_authorization"] = None
     state["last_decision"] = None
     state["last_wake_result"] = None
     state["resume_pending_batch"] = pending_batch
@@ -1831,7 +1836,7 @@ def authorize_successor(
     state["active_wake_id"] = None
     state["wake_completed_at"] = completed_at.isoformat()
     state["next_not_before"] = next_not_before
-    state["scheduled_task_disposition"] = "ACTIVE"
+    state["scheduled_task_disposition"] = "AUTHORIZED"
     state["wake_phase"] = "successor_authorized"
     state["last_wake_id"] = wake_id
     result = {

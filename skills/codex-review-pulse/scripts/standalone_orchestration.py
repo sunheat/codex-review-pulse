@@ -188,7 +188,7 @@ def scheduled_preflight(
             "reason_code": "failure_latched",
         }
     if (
-        checkpoint.get("scheduled_task_disposition") != "ACTIVE"
+        checkpoint.get("scheduled_task_disposition") not in {"ACTIVE", "AUTHORIZED"}
         or checkpoint.get("scheduled_task_id") != task_id
         or not isinstance(task_id, str)
         or not task_id.strip()

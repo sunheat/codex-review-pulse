@@ -278,11 +278,12 @@ class PulseCliTests(unittest.TestCase):
         state = load_checkpoint(path)
         self.assertIsNone(state["active_wake_id"])
         self.assertEqual(state["scheduled_task_id"], "verified-successor")
-        self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
+        self.assertEqual(state["scheduled_task_disposition"], "AUTHORIZED")
         self.assertEqual(state["wake_phase"], "successor_authorized")
         self.assertEqual(state["next_not_before"], "2026-08-26T00:36:00+00:00")
         final = h.json_output(h.run("complete-wake", *schedule, now="2026-08-26T00:26:00Z"))
         self.assertEqual(final["next_action"], "WAIT_REVIEW")
+        self.assertEqual(load_checkpoint(path)["scheduled_task_disposition"], "ACTIVE")
         self.assertEqual(load_checkpoint(path)["wake_count"], 1)
 
     def test_pending_patch_restore_is_required_and_checks_bytes(self) -> None:

@@ -1070,6 +1070,34 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertEqual(state["next_not_before"], "2026-08-26T00:36:00+00:00")
         self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
 
+    def test_authorized_successor_stays_intermediate_until_activation_or_delivery(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
+        state, result = pulse.authorize_successor(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:26:00+00:00",
+            scheduled_created_at="2026-08-26T00:26:00+00:00",
+            scheduled_first_run="2026-08-26T00:36:00+00:00",
+            scheduled_task_id="task-a",
+        )
+
+        self.assertEqual(result["next_action"], "SUCCESSOR_AUTHORIZED")
+        self.assertEqual(state["scheduled_task_disposition"], "AUTHORIZED")
+        self.assertIsNone(state["active_wake_id"])
+
+        state, delivered = pulse.begin_wake(
+            state,
+            wake_id="wake-2",
+            now="2026-08-26T00:36:00+00:00",
+            pause_heartbeat=lambda: True,
+            delivered_task_id="task-a",
+        )
+
+        self.assertEqual(delivered["next_action"], "WAKE_STARTED")
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+        self.assertIsNone(state["successor_authorization"])
+
     def test_complete_wake_rejects_successor_authorization_mismatch(self) -> None:
         state, _ = started()
         state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
