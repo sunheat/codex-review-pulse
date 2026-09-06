@@ -1113,13 +1113,9 @@ def record_retry(
         if isinstance(batch, Mapping)
         else []
     )
-    existing_pending_repair = (
-        batch.get("pending_repair") if isinstance(batch, Mapping) else None
-    )
     if (
         fix_now_threads
         and pending_repair is None
-        and not isinstance(existing_pending_repair, Mapping)
     ):
         result = _pause(
             state,
@@ -1206,9 +1202,7 @@ def record_retry(
 
 
 def _require_restored_repair(state: Mapping[str, Any], wake_id: str) -> None:
-    if state.get("resume_pending_batch") and (
-        state.get("active_batch") or {}
-    ).get("pending_repair") and (
+    if (state.get("active_batch") or {}).get("pending_repair") and (
         state.get("pending_repair_restored") or {}
     ).get("wake_id") != wake_id:
         raise DefaultWakeError("Restore and verify the pending repair before resolution or publication")
@@ -1700,6 +1694,58 @@ def complete_wake(
     state["wake_phase"] = "retry_waiting" if action == "WAIT_RETRY" else "completed"
     state["last_wake_id"] = wake_id
     _set_last_result(state, result)
+    return state, result
+
+
+def authorize_successor(
+    checkpoint: dict[str, Any],
+    *,
+    wake_id: str,
+    now: str,
+    scheduled_created_at: str,
+    scheduled_first_run: str,
+    scheduled_task_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Persist verified successor authority while the host task remains paused."""
+    state = ensure_default_lifecycle(checkpoint)
+    _require_active_wake(state, wake_id)
+    if not isinstance(scheduled_task_id, str) or not scheduled_task_id.strip():
+        raise ValueError("Scheduled task ID must be a non-empty string")
+    completed_at = _utc(now)
+    created_at = _utc(scheduled_created_at)
+    if _truncate_to_scheduler_precision(created_at) < _truncate_to_scheduler_precision(
+        completed_at
+    ):
+        raise DefaultWakeError("Successor creation predates wake completion")
+    expected_first_run = _truncate_to_scheduler_precision(
+        created_at
+        + timedelta(seconds=state["automation_policy"]["cadence_seconds"])
+    ).isoformat()
+    if not _schedule_times_match(
+        expected_first_run,
+        scheduled_first_run,
+        ordered=True,
+        scheduler_precision=True,
+    ):
+        raise DefaultWakeError("Successor first run does not match its creation anchor")
+    state["successor_authorization"] = {
+        "wake_id": wake_id,
+        "scheduled_task_id": scheduled_task_id,
+        "scheduled_created_at": created_at.isoformat(),
+        "scheduled_first_run": _iso(scheduled_first_run),
+    }
+    state["scheduled_task_id"] = scheduled_task_id
+    state["scheduled_task_kind"] = "standalone"
+    state["scheduled_task_disposition"] = "PAUSED"
+    result = {
+        "next_action": "SUCCESSOR_AUTHORIZED",
+        "reason_code": "successor_authorized",
+        "scheduled_task_id": scheduled_task_id,
+        "scheduled_created_at": created_at.isoformat(),
+        "scheduled_first_run": _iso(scheduled_first_run),
+        "mutation_occurred": False,
+    }
+    state["last_wake_result"] = deepcopy(result)
     return state, result
 
 
@@ -2343,12 +2389,27 @@ def main() -> None:
         )
         _write(path, state, result)
         return
-    if args.command in {"complete-wake", "authorize-successor"}:
-        if args.command == "authorize-successor" and (
-            not args.schedule_reanchored or not args.scheduled_task_id
-            or not args.scheduled_created_at or not args.scheduled_first_run
+    if args.command == "authorize-successor":
+        if (
+            not args.schedule_reanchored
+            or not args.scheduled_task_id
+            or not args.scheduled_created_at
+            or not args.scheduled_first_run
         ):
-            raise DefaultWakeError("Successor authorization requires verified task and schedule")
+            raise DefaultWakeError(
+                "Successor authorization requires verified task and schedule"
+            )
+        state, result = authorize_successor(
+            state,
+            wake_id=args.wake_id,
+            now=now,
+            scheduled_created_at=args.scheduled_created_at,
+            scheduled_first_run=args.scheduled_first_run,
+            scheduled_task_id=args.scheduled_task_id,
+        )
+        _write(path, state, result)
+        return
+    if args.command == "complete-wake":
         completion_failure = None
         if args.completion_failure is not None:
             try:
@@ -2365,7 +2426,10 @@ def main() -> None:
                 raise RuntimeError(
                     "--completion-failure cannot be combined with --schedule-reanchored"
                 )
-        if completion_failure and state.get("successor_authorization_wake_id") == args.wake_id:
+        if completion_failure and (
+            (state.get("successor_authorization") or {}).get("wake_id")
+            == args.wake_id
+        ):
             result = _pause(
                 state, reason_code=completion_failure["reason_code"], now=now,
                 evidence=completion_failure.get("evidence"), action="PAUSE_RECOVERY",
@@ -2387,9 +2451,6 @@ def main() -> None:
             completion_failure=completion_failure,
             require_schedule_anchor=args.schedule_reanchored,
         )
-        if args.command == "authorize-successor" and result.get("next_action") in REARM_ACTIONS:
-            state["successor_authorization_wake_id"] = args.wake_id
-            result = {**result, "next_action": "SUCCESSOR_AUTHORIZED"}
         _write(path, state, result)
         return
     raise RuntimeError(f"Unsupported command: {args.command}")

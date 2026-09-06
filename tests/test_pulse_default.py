@@ -373,6 +373,43 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "pending_repair_unpersisted")
         self.assertEqual(state["failure_latch"]["reason_code"], "pending_repair_unpersisted")
 
+    def test_retry_requires_updated_pending_repair_when_one_already_exists(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(
+            state, snapshot(targeted=["T1"]), wake_id="wake-1", now=NOW
+        )
+        state, _ = pulse.freeze_default_batch(state, wake_id="wake-1")
+        state, _ = pulse.record_default_outcome(
+            state, wake_id="wake-1", thread_id="T1",
+            classification="fix-now", now=NOW,
+        )
+        state["active_batch"]["pending_repair"] = PENDING_REPAIR.copy()
+
+        state, result = pulse.record_retry(
+            state, wake_id="wake-1",
+            reason_code="transient_validation_failure",
+            now=NOW, signature="test-failure",
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "pending_repair_unpersisted")
+
+    def test_repair_restore_guard_survives_snapshot_state_reset(self) -> None:
+        state, _ = started()
+        state["active_batch"] = {
+            "frozen_head_oid": "HEAD1",
+            "targeted_thread_ids": ["T1"],
+            "thread_outcomes": {"T1": {"classification": "fix-now"}},
+            "pending_repair": PENDING_REPAIR.copy(),
+        }
+        state["active_wake_id"] = "wake-1"
+        state["wake_phase"] = "processing"
+        state["resume_pending_batch"] = False
+        with self.assertRaisesRegex(pulse.DefaultWakeError, "Restore"):
+            pulse.resolve_default_thread(
+                state, wake_id="wake-1", thread_id="T1", graphql_call=lambda *_: {}
+            )
+
     def test_freeze_pauses_when_worktree_head_differs_from_snapshot(self) -> None:
         state, _ = started()
         state, _ = pulse.record_snapshot(

@@ -259,7 +259,14 @@ class CliHarness:
 
 class PulseCliTests(unittest.TestCase):
     def test_successor_authorization_persists_before_activation(self) -> None:
-        h = CliHarness(self)
+        fixture = CliHarness.default_fixture()
+        fixture["eyes"] = [{
+            "id": "EYES1",
+            "content": "EYES",
+            "createdAt": "2026-08-26T00:00:00+00:00",
+            "user": {"login": "chatgpt-codex-connector"},
+        }]
+        h = CliHarness(self, fixture=fixture)
         path = h.begin_and_snapshot()
         schedule = (
             "--schedule-reanchored", "--scheduled-created-at", "2026-08-26T00:26:00Z",
@@ -269,9 +276,9 @@ class PulseCliTests(unittest.TestCase):
         result = h.json_output(h.run("authorize-successor", *schedule, now="2026-08-26T00:26:00Z"))
         self.assertEqual(result["next_action"], "SUCCESSOR_AUTHORIZED")
         state = load_checkpoint(path)
-        self.assertIsNone(state["active_wake_id"])
+        self.assertEqual(state["active_wake_id"], "wake-1")
         self.assertEqual(state["scheduled_task_id"], "verified-successor")
-        self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
         final = h.json_output(h.run("complete-wake", *schedule, now="2026-08-26T00:26:00Z"))
         self.assertEqual(final["next_action"], "WAIT_REVIEW")
         self.assertEqual(load_checkpoint(path)["wake_count"], 1)

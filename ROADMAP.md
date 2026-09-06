@@ -125,6 +125,13 @@ persisted task update that changes only status. This prevents the local host
 from rejecting pause or activation attempts that omit required cron fields and
 leaving a live task paired with a fail-closed checkpoint.
 
+## 0.8.9 durable wake and repair handoffs
+
+The default lifecycle now persists a wake before fallible worktree setup,
+authorizes a verified successor before activation, and restores and verifies
+pending repair bytes before resolution or publication. This keeps scheduler
+delivery, successor identity, and retry recovery durable across process exits.
+
 ## Deferred milestones
 
 - public-API connector and automatic-review detection bound to a head OID;
