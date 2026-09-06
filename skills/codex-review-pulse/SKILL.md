@@ -332,6 +332,20 @@ if snapshot.decision.next_action is PAUSE_* or STOP_*:
     report the final result
     END_INVOCATION
 
+# A scheduled invocation is a fresh process: none of the initial-wake
+# handoff variables survive from an earlier task. Before creating a successor,
+# reload the handoff from the persisted policy without policy overrides, then
+# bind its canonical prompt to the task that delivered this wake. A policy
+# change may intentionally update the successor's model or reasoning settings,
+# but a prompt or prompt-digest mismatch is unverified and must pause.
+if this is a scheduler-delivered invocation:
+    PERSISTED_HANDOFF = PULSE TARGET standalone-task-prompt
+    require PERSISTED_HANDOFF.prompt == DELIVERED_TASK.prompt
+    require PERSISTED_HANDOFF.prompt_sha256 == sha256(DELIVERED_TASK.prompt)
+    STANDALONE_HANDOFF = PERSISTED_HANDOFF
+    TASK_MODEL = STANDALONE_HANDOFF.model
+    TASK_REASONING_EFFORT = STANDALONE_HANDOFF.reasoning_effort
+
 # WAIT_REVIEW, WAIT_RETRY, or a successfully recorded same-head REQUEST_REVIEW
 # may re-anchor. WAIT_RETRY resumes the same frozen batch on the next wake.
 # Choose COMPLETION_NOW immediately before creating the successor. The Codex
@@ -645,11 +659,16 @@ invocation:
 9. For `WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head `REQUEST_REVIEW`, choose one
    completion timestamp immediately before successor creation without calling
    `complete-wake` yet.
-10. Create one new standalone successor task in `PAUSED` state with the
-   unchanged prompt, persisted model/reasoning configuration, and a
-   cadence-only recurring schedule. Do not submit `DTSTART` or hand-write a raw
-   scheduling directive. Extract its ID inside the cleanup boundary, then read
-   back the successor's persisted ID,
+10. On a scheduled delivery, reload the target-bound handoff with
+   `standalone-task-prompt` from the persisted policy and without
+   `--policy-json`. Require its prompt and SHA-256 to match the delivered
+   task's persisted canonical prompt, then use that handoff's model and
+   reasoning settings for the successor. Do not carry `POLICY_JSON`,
+   `STANDALONE_HANDOFF`, or task-setting variables from an earlier invocation.
+   Create one new standalone successor task in `PAUSED` state with the
+   verified handoff and a cadence-only recurring schedule. Do not submit
+   `DTSTART` or hand-write a raw scheduling directive. Extract its ID inside
+   the cleanup boundary, then read back the successor's persisted ID,
    prompt and SHA-256, scheduler kind (`cron`), conversation mode
    (`standalone`), absent `target_thread_id`, model, reasoning settings,
    cadence, paused disposition, and creation timestamp. Require every field to
