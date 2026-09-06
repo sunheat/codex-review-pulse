@@ -1823,7 +1823,7 @@ def authorize_successor(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Persist verified successor authority while the host task remains paused."""
     state = ensure_default_lifecycle(checkpoint)
-    _require_active_wake(state, wake_id)
+    _require_active_wake(state, wake_id, allow_retry_completion=True)
     if not isinstance(scheduled_task_id, str) or not scheduled_task_id.strip():
         raise ValueError("Scheduled task ID must be a non-empty string")
     completed_at = _utc(now)

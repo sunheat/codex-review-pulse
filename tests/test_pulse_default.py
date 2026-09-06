@@ -285,6 +285,43 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertTrue(result["resume_pending_batch"])
         self.assertEqual(state["last_decision"]["reason_code"], "resume_pending_batch")
 
+    def test_retry_waiting_can_authorize_a_successor(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(
+            state, snapshot(targeted=["T1"]), wake_id="wake-1", now=NOW
+        )
+        state, _ = pulse.freeze_default_batch(state, wake_id="wake-1")
+        state, _ = pulse.record_default_outcome(
+            state,
+            wake_id="wake-1",
+            thread_id="T1",
+            classification="fix-now",
+            now=NOW,
+        )
+        state, result = pulse.record_retry(
+            state,
+            wake_id="wake-1",
+            reason_code="transient_validation_failure",
+            now=NOW,
+            signature="test-failure",
+            pending_repair=PENDING_REPAIR,
+        )
+        self.assertEqual(result["next_action"], "WAIT_RETRY")
+
+        state, result = pulse.authorize_successor(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:01:00+00:00",
+            scheduled_created_at="2026-08-26T00:01:00+00:00",
+            scheduled_first_run="2026-08-26T00:11:00+00:00",
+            scheduled_task_id="task-1",
+        )
+
+        self.assertEqual(result["next_action"], "SUCCESSOR_AUTHORIZED")
+        self.assertEqual(state["scheduled_task_disposition"], "AUTHORIZED")
+        self.assertEqual(state["wake_phase"], "successor_authorized")
+        self.assertIsNone(state["active_wake_id"])
+
     def test_retry_waiting_is_a_mutation_boundary_but_can_complete(self) -> None:
         state, _ = started()
         state, _ = pulse.record_snapshot(
