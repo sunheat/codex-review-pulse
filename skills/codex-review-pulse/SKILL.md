@@ -47,7 +47,8 @@ Its small subcommands are `standalone-task-prompt`, `heartbeat-prompt` (legacy
 alias), `begin-wake`, `snapshot`,
 `freeze`, `record`, `resolve`, `retry`, `trigger-result`, `confirm-policy`,
 `prepare-publication`, `publication-result`, `configure-policy`, and
-`restore-repair`, `authorize-successor`, and `complete-wake`.
+`restore-repair`, `authorize-successor`, `complete-wake`, and
+`reconcile-successor`.
 `snapshot` returns an agent-facing normalized object with top-level
 `head_oid`, PR state, targeted and non-target threads, Codex review activity,
 approval evidence, review-epoch state, and head-bracketing server evidence.
@@ -659,6 +660,12 @@ invocation:
    authorize-successor with those verified values while the task is paused. Activate only
    that verified successor before `complete-wake`; missing-ID creation evidence
    can therefore leave only a paused task.
+   If a host restart occurs after authorization but before activation, do not
+   treat `AUTHORIZED` as `ACTIVE`: read back the exact authorized task and
+   either activate it with the full metadata-preserving update followed by
+   `reconcile-successor --action activate --confirmed`, or keep it paused and
+   call `reconcile-successor --action pause --confirmed` to persist a
+   fail-closed recovery latch.
 11. After successor creation and readback succeed, call `complete-wake` exactly
     once with the same completion timestamp, `--schedule-reanchored`,
     `--scheduled-created-at`, the derived `--scheduled-first-run`, and

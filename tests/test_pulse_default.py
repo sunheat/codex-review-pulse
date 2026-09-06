@@ -112,6 +112,8 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertIn("do not submit DTSTART", handoff["prompt"])
         self.assertIn("full cron update payload", handoff["prompt"])
         self.assertIn("Never send a status-only update", handoff["prompt"])
+        self.assertIn("do not treat it as ACTIVE", handoff["prompt"])
+        self.assertIn("reconcile-successor --action activate --confirmed", handoff["prompt"])
         self.assertIn("persisted created_at plus cadence", handoff["prompt"])
         self.assertNotIn("same heartbeat", handoff["prompt"].lower())
         self.assertEqual(
@@ -1097,6 +1099,60 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertEqual(delivered["next_action"], "WAKE_STARTED")
         self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
         self.assertIsNone(state["successor_authorization"])
+
+    def test_authorized_successor_can_be_reconciled_after_host_restart(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
+        state, _ = pulse.authorize_successor(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:26:00+00:00",
+            scheduled_created_at="2026-08-26T00:26:00+00:00",
+            scheduled_first_run="2026-08-26T00:36:00+00:00",
+            scheduled_task_id="task-a",
+        )
+
+        state, result = pulse.reconcile_authorized_successor(
+            state,
+            now="2026-08-26T00:27:00+00:00",
+            scheduled_task_id="task-a",
+            action="activate",
+            confirmed=True,
+            evidence={"host_activation": "confirmed"},
+        )
+
+        self.assertEqual(result["next_action"], "SUCCESSOR_RECONCILED")
+        self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
+        self.assertEqual(state["wake_phase"], "completed")
+        self.assertIsNone(state["successor_authorization"])
+
+    def test_authorized_successor_reconciliation_can_fail_closed_paused(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
+        state, _ = pulse.authorize_successor(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:26:00+00:00",
+            scheduled_created_at="2026-08-26T00:26:00+00:00",
+            scheduled_first_run="2026-08-26T00:36:00+00:00",
+            scheduled_task_id="task-a",
+        )
+
+        state, result = pulse.reconcile_authorized_successor(
+            state,
+            now="2026-08-26T00:27:00+00:00",
+            scheduled_task_id="task-a",
+            action="pause",
+            confirmed=True,
+            evidence={"host_pause": "confirmed"},
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+        self.assertEqual(
+            state["failure_latch"]["reason_code"],
+            "successor_activation_recovery_required",
+        )
 
     def test_complete_wake_rejects_successor_authorization_mismatch(self) -> None:
         state, _ = started()

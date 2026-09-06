@@ -144,6 +144,14 @@ def build_standalone_task_handoff(
         "it. Run authorize-successor with its verified ID and schedule before activation, "
         "then activate only that verified successor before complete-wake; malformed "
         "creation evidence therefore cannot leave an unknown task running. "
+        "If a host restart occurs after authorize-successor persists an AUTHORIZED "
+        "successor but before activation, do not treat it as ACTIVE or wait for "
+        "the paused task to deliver itself. Read back that exact authorized task "
+        "and either activate it with the full metadata-preserving update followed "
+        "by pulse reconcile-successor --action activate --confirmed, or keep it "
+        "paused and call reconcile-successor --action pause --confirmed to persist "
+        "a fail-closed recovery latch. Natural-language activation claims are not "
+        "evidence. "
         "Derive the first run from persisted created_at plus cadence, then pass both "
         "timestamps to complete-wake. The creation timestamp must be at or after this "
         "wake's completion, so the successor cannot run early. For every scheduled "
@@ -1222,11 +1230,26 @@ def record_retry(
     return state, result
 
 
-def _require_restored_repair(state: Mapping[str, Any], wake_id: str) -> None:
-    if (state.get("active_batch") or {}).get("pending_repair") and (
-        state.get("pending_repair_restored") or {}
-    ).get("wake_id") != wake_id:
-        raise DefaultWakeError("Restore and verify the pending repair before resolution or publication")
+def _require_restored_repair(
+    state: Mapping[str, Any],
+    wake_id: str,
+    *,
+    repository_path: str | Path | None = None,
+) -> None:
+    if not (state.get("active_batch") or {}).get("pending_repair"):
+        return
+    restored = state.get("pending_repair_restored") or {}
+    if restored.get("wake_id") != wake_id:
+        raise DefaultWakeError(
+            "Restore and verify the pending repair before resolution or publication"
+        )
+    if repository_path is None:
+        raise DefaultWakeError(
+            "The current worktree is required to verify the restored pending repair"
+        )
+    checkout = str(Path(repository_path).resolve())
+    if restored.get("checkout") != checkout:
+        raise DefaultWakeError("Pending repair was not restored in this worktree")
 
 
 def resolve_default_thread(
@@ -1235,6 +1258,7 @@ def resolve_default_thread(
     wake_id: str,
     thread_id: str,
     graphql_call: Callable[[str, dict[str, object]], dict[str, Any]],
+    repository_path: str | Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Resolve through the existing exact resolver after a local outcome."""
     from resolve_thread import resolve_exact_thread
@@ -1251,7 +1275,7 @@ def resolve_default_thread(
         raise DefaultWakeError("Thread is not in the active frozen batch")
     if thread_id not in batch.get("thread_outcomes", {}):
         raise DefaultWakeError("Record the thread outcome before exact resolution")
-    _require_restored_repair(state, wake_id)
+    _require_restored_repair(state, wake_id, repository_path=repository_path)
     if thread_id in batch.get("resolved_thread_ids", []):
         _consume_thread_resolution_confirmation(state)
         return state, {"id": thread_id, "isResolved": True, "alreadyResolved": True}
@@ -1292,11 +1316,12 @@ def prepare_default_publication(
     wake_id: str,
     now: str,
     actual_head_oid: str,
+    repository_path: str | Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Authorize commit/push only after exact resolution on the frozen head."""
     state = ensure_default_lifecycle(checkpoint)
     _require_active_wake(state, wake_id)
-    _require_restored_repair(state, wake_id)
+    _require_restored_repair(state, wake_id, repository_path=repository_path)
     if (
         state["automation_policy"]["publication"] != "auto"
         and not _policy_confirmation_allows(state, "aggregate_publication")
@@ -1852,6 +1877,76 @@ def authorize_successor(
     return state, result
 
 
+def reconcile_authorized_successor(
+    checkpoint: dict[str, Any],
+    *,
+    now: str,
+    scheduled_task_id: str,
+    action: str,
+    confirmed: bool,
+    evidence: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Recover an authorized successor after a host restart before activation."""
+    if action not in {"activate", "pause"}:
+        raise ValueError("Successor reconciliation action must be activate or pause")
+    if not confirmed:
+        raise DefaultWakeError("Successor reconciliation requires host confirmation")
+    if not isinstance(scheduled_task_id, str) or not scheduled_task_id.strip():
+        raise ValueError("Scheduled task ID must be a non-empty string")
+    state = ensure_default_lifecycle(checkpoint)
+    authorization = state.get("successor_authorization")
+    if state.get("wake_phase") != "successor_authorized":
+        raise DefaultWakeError(
+            "Successor reconciliation requires an authorized successor checkpoint"
+        )
+    if state.get("scheduled_task_disposition") != "AUTHORIZED":
+        raise DefaultWakeError(
+            "Successor reconciliation requires AUTHORIZED task disposition"
+        )
+    if not isinstance(authorization, Mapping):
+        raise DefaultWakeError("Successor authorization evidence is missing")
+    if (
+        authorization.get("scheduled_task_id") != scheduled_task_id
+        or state.get("scheduled_task_id") != scheduled_task_id
+    ):
+        raise DefaultWakeError("Successor reconciliation task ID does not match")
+
+    if action == "activate":
+        prior_action = (state.get("last_decision") or {}).get("next_action")
+        state["scheduled_task_disposition"] = "ACTIVE"
+        state["wake_phase"] = "retry_waiting" if prior_action == "WAIT_RETRY" else "completed"
+        state["successor_authorization"] = None
+        result = {
+            "next_action": "SUCCESSOR_RECONCILED",
+            "reason_code": "successor_activation_reconciled",
+            "scheduled_task_id": scheduled_task_id,
+            "next_not_before": state.get("next_not_before"),
+            "evidence": deepcopy(dict(evidence or {})),
+            "mutation_occurred": False,
+        }
+        _set_last_result(state, result)
+        return state, result
+
+    state["scheduled_task_disposition"] = "PAUSED"
+    state["wake_phase"] = "paused"
+    state["wake_completed_at"] = _iso(now)
+    state["next_not_before"] = None
+    state["failure_latch"] = {
+        "reason_code": "successor_activation_recovery_required",
+        "latched_at": _iso(now),
+        "evidence": deepcopy(dict(evidence or {})),
+    }
+    result = {
+        "next_action": "PAUSE_RECOVERY",
+        "reason_code": "successor_activation_recovery_required",
+        "scheduled_task_id": scheduled_task_id,
+        "evidence": deepcopy(dict(evidence or {})),
+        "mutation_occurred": False,
+    }
+    _set_last_result(state, result)
+    return state, result
+
+
 def normalize_snapshot(
     raw: dict[str, Any], evaluation: dict[str, Any], *, observed_at: str
 ) -> dict[str, Any]:
@@ -2238,6 +2333,21 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     complete.add_argument("--cadence-seconds", type=int)
+
+    reconcile_successor = commands.add_parser(
+        "reconcile-successor",
+        help="Recover an AUTHORIZED successor after a host restart",
+    )
+    reconcile_successor.add_argument("--scheduled-task-id", required=True)
+    reconcile_successor.add_argument(
+        "--action", required=True, choices=["activate", "pause"]
+    )
+    reconcile_successor.add_argument(
+        "--confirmed",
+        action="store_true",
+        help="Confirm that the host performed the requested exact task operation",
+    )
+    reconcile_successor.add_argument("--evidence", type=Path)
     parser.add_argument(
         "--policy-json",
         dest="root_policy_json",
@@ -2414,10 +2524,6 @@ def main() -> None:
         )
         _write(path, state, result)
         return
-    if args.command in {"resolve", "prepare-publication"} and state.get("resume_pending_batch") and (state.get("active_batch") or {}).get("pending_repair"):
-        restored = state.get("pending_repair_restored") or {}
-        if restored.get("checkout") != str(Path(args.repository_path).resolve()):
-            raise DefaultWakeError("Pending repair was not restored in this worktree")
     if args.command == "resolve":
         from resolve_thread import graphql
 
@@ -2426,6 +2532,7 @@ def main() -> None:
             wake_id=args.wake_id,
             thread_id=args.thread_id,
             graphql_call=graphql,
+            repository_path=args.repository_path,
         )
         _write(path, state, result)
         return
@@ -2445,6 +2552,7 @@ def main() -> None:
             wake_id=args.wake_id,
             now=now,
             actual_head_oid=raw["pull_request"]["headRefOid"],
+            repository_path=args.repository_path,
         )
         _write(path, state, result)
         return
@@ -2509,6 +2617,27 @@ def main() -> None:
             scheduled_created_at=args.scheduled_created_at,
             scheduled_first_run=args.scheduled_first_run,
             scheduled_task_id=args.scheduled_task_id,
+        )
+        _write(path, state, result)
+        return
+    if args.command == "reconcile-successor":
+        evidence = None
+        if args.evidence is not None:
+            try:
+                evidence = json.loads(args.evidence.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise RuntimeError(
+                    f"Cannot read successor reconciliation evidence JSON: {args.evidence}"
+                ) from error
+            if not isinstance(evidence, dict):
+                raise RuntimeError("Successor reconciliation evidence must be an object")
+        state, result = reconcile_authorized_successor(
+            state,
+            now=now,
+            scheduled_task_id=args.scheduled_task_id,
+            action=args.action,
+            confirmed=args.confirmed,
+            evidence=evidence,
         )
         _write(path, state, result)
         return

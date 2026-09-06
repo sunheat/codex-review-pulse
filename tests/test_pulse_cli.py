@@ -317,9 +317,18 @@ class PulseCliTests(unittest.TestCase):
         patch.write_bytes(content)
         pulse.restore_pending_repair(state, wake_id="wake-1", repository_path=h.checkout)
         self.assertEqual((h.checkout / "repair.txt").read_text(), "restored\n")
-        pulse._require_restored_repair(state, "wake-1")
+        pulse._require_restored_repair(state, "wake-1", repository_path=h.checkout)
+        state["resume_pending_batch"] = False
+        with self.assertRaisesRegex(pulse.DefaultWakeError, "this worktree"):
+            pulse._require_restored_repair(
+                state,
+                "wake-1",
+                repository_path=h.checkout.parent / "other-worktree",
+            )
         with self.assertRaises(pulse.DefaultWakeError):
-            pulse._require_restored_repair(state, "wake-2")
+            pulse._require_restored_repair(
+                state, "wake-2", repository_path=h.checkout
+            )
 
     def test_host_confirmation_flags_are_public_in_help(self) -> None:
         root_help = subprocess.run(
@@ -355,6 +364,7 @@ class PulseCliTests(unittest.TestCase):
         self.assertIn("configure-policy", root_help)
         self.assertIn("heartbeat-prompt", root_help)
         self.assertIn("standalone-task-prompt", root_help)
+        self.assertIn("reconcile-successor", root_help)
         self.assertIn("prepare-publication", root_help)
         self.assertIn("--pause-confirmed", begin_help)
         self.assertIn("--delivered-task-id", begin_help)
