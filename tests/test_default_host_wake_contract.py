@@ -105,6 +105,7 @@ class InMemoryHost:
         self.readback_model = readback_model
         self.readback_reasoning_effort = readback_reasoning_effort
         self.cleanup_succeeds = cleanup_succeeds
+        self.cleanup_pending_repairs: list[dict[str, object] | None] = []
         self.next_creation_time: str | None = None
         self.pause_succeeds = pause_succeeds
         self.pause_results = pause_results
@@ -202,8 +203,13 @@ class InMemoryHost:
             else task["reasoning_effort"],
         }
 
-    def cleanup_worktree(self) -> bool:
+    def cleanup_worktree(
+        self, *, pending_repair: dict[str, object] | None = None
+    ) -> bool:
         self.operations.append(("cleanup-worktree", "task-owned"))
+        self.cleanup_pending_repairs.append(
+            deepcopy(pending_repair) if pending_repair is not None else None
+        )
         return self.cleanup_succeeds
 
     def authorize_successor(
@@ -797,6 +803,39 @@ class DefaultHostWakeContractTests(unittest.TestCase):
         )
         self.assertEqual(host.created_tasks["task-2"]["status"], "PAUSED")
         self.assertNotIn(("activate-task", "task-2"), host.operations)
+
+    def test_retry_pending_repair_uses_manifest_aware_cleanup(self) -> None:
+        pending_repair = {
+            "patch_path": ".git/codex-review-pulse/pending.patch",
+            "patch_sha256": "a" * 64,
+            "frozen_head_oid": "HEAD1",
+        }
+        state = waiting_checkpoint()
+        host = InMemoryHost(
+            state=state,
+            wake_ids=("fresh-wake-2",),
+        )
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+        invocation.begin()
+        host.state["last_decision"] = {
+            "next_action": "WAIT_RETRY",
+            "mutation_occurred": False,
+        }
+        host.state["active_batch"] = {
+            "frozen_head_oid": "HEAD1",
+            "pending_repair": pending_repair,
+            "publication": {"status": "not_started"},
+        }
+
+        result = invocation.complete(reanchor_succeeds=True, action="WAIT_RETRY")
+
+        self.assertEqual(result["next_action"], "WAIT_RETRY")
+        self.assertEqual(host.cleanup_pending_repairs, [pending_repair])
+        operation_names = [operation[0] for operation in host.operations]
+        self.assertLess(
+            operation_names.index("cleanup-worktree"),
+            operation_names.index("activate-task"),
+        )
 
     def test_incomplete_batch_publication_cannot_schedule_a_successor(self) -> None:
         host = InMemoryHost(

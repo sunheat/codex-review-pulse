@@ -393,8 +393,20 @@ if successor_result is success:
         require result.next_action == SUCCESSOR_AUTHORIZED
         # Finalize the task-owned worktree while the successor is still paused.
         # The configured checkout remains available for checkpoint writes after
-        # the worktree is removed and pruned.
-        WORKTREE_CLEANUP_CONFIRMED = host.cleanup_worktree() is confirmed
+        # the worktree is removed and pruned. A WAIT_RETRY batch with a
+        # persisted pending-repair manifest may still contain intentional
+        # uncommitted changes: pass that manifest so the host verifies its
+        # immutable patch bytes and digest before removing the dirty worktree.
+        PENDING_REPAIR = (
+            checkpoint.active_batch.pending_repair
+            if COMPLETION_ACTION == WAIT_RETRY
+            else absent
+        )
+        WORKTREE_CLEANUP_CONFIRMED = (
+            host.cleanup_worktree(pending_repair=PENDING_REPAIR)
+            if PENDING_REPAIR is present
+            else host.cleanup_worktree()
+        ) is confirmed
         if not WORKTREE_CLEANUP_CONFIRMED:
             PAUSE_CONFIRMED = host.pause_task(SUCCESSOR_ID) is confirmed
             FAILURE_FILE = write_json(

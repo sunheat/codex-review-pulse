@@ -62,8 +62,16 @@ class StandaloneTaskHost(Protocol):
     def read_task(self, task_id: str) -> Mapping[str, Any]:
         """Read normalized task metadata and the persisted first-run timestamp."""
 
-    def cleanup_worktree(self) -> object:
-        """Verify, remove, and prune this wake's task-owned worktree."""
+    def cleanup_worktree(
+        self, *, pending_repair: Mapping[str, Any] | None = None
+    ) -> object:
+        """Verify, remove, and prune this wake's task-owned worktree.
+
+        A retry with a persisted pending-repair manifest may still have
+        intentional uncommitted changes. The host must verify that manifest
+        (including its immutable patch bytes and digest) before removing that
+        dirty worktree; ordinary cleanup remains strict when it is absent.
+        """
 
     def authorize_successor(
         self,
@@ -282,9 +290,17 @@ class StandaloneInvocation:
         except Exception:
             return False
 
-    def _cleanup_worktree(self) -> bool:
+    def _cleanup_worktree(
+        self, *, pending_repair: Mapping[str, Any] | None = None
+    ) -> bool:
         try:
-            return _confirmed(self.host.cleanup_worktree())
+            if pending_repair is None:
+                result = self.host.cleanup_worktree()
+            else:
+                result = self.host.cleanup_worktree(
+                    pending_repair=deepcopy(dict(pending_repair))
+                )
+            return _confirmed(result)
         except Exception:
             return False
 
@@ -599,6 +615,16 @@ class StandaloneInvocation:
             authorization_attempted = False
             authorization_confirmed = False
             completion_failure: Mapping[str, Any] | None = None
+            pending_repair = None
+            if action == "WAIT_RETRY":
+                active_batch = checkpoint.get("active_batch")
+                candidate = (
+                    active_batch.get("pending_repair")
+                    if isinstance(active_batch, Mapping)
+                    else None
+                )
+                if isinstance(candidate, Mapping):
+                    pending_repair = deepcopy(dict(candidate))
             try:
                 response = self.host.schedule_standalone_task(
                     prompt=self.prompt,
@@ -668,7 +694,7 @@ class StandaloneInvocation:
                         "Standalone successor authorization was not confirmed"
                     )
                 authorization_confirmed = True
-                if not self._cleanup_worktree():
+                if not self._cleanup_worktree(pending_repair=pending_repair):
                     pause_confirmed = self._pause_successor(successor_id)
                     return self._finish_completion(
                         now=now,
