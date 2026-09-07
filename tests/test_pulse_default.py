@@ -120,6 +120,14 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertIn("do not treat it as ACTIVE", handoff["prompt"])
         self.assertIn("reconcile-successor --action activate --confirmed", handoff["prompt"])
         self.assertIn("persisted created_at plus cadence", handoff["prompt"])
+        self.assertIn("Desktop-native update_plan tool", handoff["prompt"])
+        self.assertIn("before the first PR/review operation", handoff["prompt"])
+        self.assertIn("small outcome-oriented plan", handoff["prompt"])
+        self.assertIn("exactly one step in_progress", handoff["prompt"])
+        self.assertIn("Do not track setup or wait for delivery", handoff["prompt"])
+        self.assertIn("reuse a plan across standalone wakes", handoff["prompt"])
+        self.assertIn("never simulate it or persist plan state", handoff["prompt"])
+        self.assertIn("CLI-specific behavior", handoff["prompt"])
         self.assertNotIn("same heartbeat", handoff["prompt"].lower())
         self.assertEqual(
             handoff["prompt_sha256"],

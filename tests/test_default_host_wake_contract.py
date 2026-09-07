@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timedelta
+import hashlib
 from pathlib import Path
 import sys
 import unittest
@@ -229,12 +230,13 @@ class HostInvocation:
         scheduled: bool,
         now: str,
         task_id: str = "task-1",
+        prompt: str = "standalone prompt",
     ) -> None:
         self.host = host
         self.invocation = StandaloneInvocation(
             host,
             task_id=task_id,
-            prompt="standalone prompt",
+            prompt=prompt,
             scheduled=scheduled,
             now=now,
             begin_wake=self._begin_wake,
@@ -459,6 +461,31 @@ class DefaultHostWakeContractTests(unittest.TestCase):
             ("begin-wake", "fresh-wake-2"),
             ("snapshot", "fresh-wake-2"),
         ])
+
+    def test_successor_reuses_full_canonical_prompt_and_digest(self) -> None:
+        handoff = pulse.build_standalone_task_handoff("owner/repo", 17)
+        host = InMemoryHost(
+            state=waiting_checkpoint(),
+            wake_ids=("fresh-wake-2",),
+        )
+        invocation = HostInvocation(
+            host,
+            scheduled=True,
+            now=NEXT_WAKE,
+            prompt=handoff["prompt"],
+        )
+        invocation.begin()
+        invocation.snapshot()
+
+        invocation.complete(reanchor_succeeds=True)
+
+        successor = host.created_tasks["task-2"]
+        expected_digest = hashlib.sha256(
+            handoff["prompt"].encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(successor["prompt"], handoff["prompt"])
+        self.assertEqual(successor["prompt_sha256"], expected_digest)
+        self.assertEqual(successor["prompt_sha256"], handoff["prompt_sha256"])
 
     def test_successor_reuses_the_persisted_model_configuration(self) -> None:
         host = InMemoryHost(

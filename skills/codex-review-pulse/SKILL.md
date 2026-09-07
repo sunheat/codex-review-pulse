@@ -457,6 +457,49 @@ execution plan, it is ephemeral user-facing telemetry rather than durable
 workflow authority; this skill does not claim native plan support in the
 current implementation.
 
+## Native execution plan contract
+
+Native execution plans are user-visible execution telemetry, not durable
+workflow state. The supported and validated scope for this capability is the
+Codex Desktop scheduled-task workflow only. Do not detect Desktop versus CLI,
+add frontend-specific branches, or add CLI compatibility, fallback, prompt,
+or display behavior.
+
+The setup conversation must create its Desktop-native execution plan before
+the first scheduler mutation and update it as setup proceeds, including task
+creation and metadata readback. It may finish the plan only after task
+creation and successful metadata readback. If either operation fails, report
+the actual blocker, do not claim completion, and do not wait, poll, or track
+the first scheduled delivery. The setup conversation does not own that
+delivery or the worker's PR/review work.
+
+Each scheduled delivery, including the first one, starts a new standalone
+worker. After startup and before its first PR/review operation, that worker
+must create and maintain its own native execution plan. Do not inherit or
+reuse the setup plan or a plan from another standalone wake. A worker plan
+should contain only a few outcome-oriented steps, for example:
+
+1. Inspect current PR and review state.
+2. Classify actionable findings.
+3. Implement the required repair.
+4. Run focused and aggregate verification.
+5. Publish/rearm or record the final blocked/terminal result.
+
+While a plan is executing, exactly one step must be `in_progress`. After all
+steps complete, or after a terminal or blocked outcome, the plan may have no
+`in_progress` step. Update it promptly after the snapshot, classification,
+repair, focused or aggregate verification, publication, rearm, and final
+result; update it immediately when the approach changes. When pausing or
+blocking, report the concrete blocker and do not fabricate completion.
+
+Use the native `update_plan` tool when it is available in the supported
+Desktop harness. If it is unavailable, continue the workflow normally and
+report that native plan telemetry was unavailable; do not simulate it with a
+Python API, MCP API, text/database Todo, checkpoint field, custom plan ID, or
+another task-state subsystem. Do not persist or reuse a native plan across
+wakes. GitHub, Git, the checkpoint, and existing lifecycle state remain the
+only workflow facts.
+
 ## One standalone delivery, one wake, one plan
 
 Treat the initial user turn as wake 1. Create its standalone scheduler task in
