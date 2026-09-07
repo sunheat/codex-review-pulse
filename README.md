@@ -157,19 +157,28 @@ later target mismatch instead of drifting to another PR. An ambiguous checkout
 must be stopped and supplied an explicit `--repo OWNER/REPO --pr NUMBER`.
 
 Each scheduler delivery runs in a new standalone task/conversation. The host
-pauses the delivered task, then creates one paused successor with the unchanged
+pauses the delivered task, completes worktree cleanup, reads a final UTC
+completion anchor, then creates one paused successor with the unchanged
 canonical prompt only after a rearmable result. The host-supported path creates
 a cadence-only recurring task without `DTSTART`, reads back its persisted ID,
 prompt and digest, scheduler/conversation metadata, absent target attachment,
 model, reasoning settings, cadence, paused status, and creation timestamp, and
-derives its first run from `created_at + cadence_seconds`. It activates only
-the verified task after authorize-successor persists its delivery authority. The host-supported scheduler
+derives its first run from `created_at + cadence_seconds`. It records
+authorize-successor while the wake remains active, calls `complete-wake` to
+durably finalize the wake, and activates only the verified task as the final
+host mutation. The checkpoint remains `AUTHORIZED` so the delivered task is
+consumed by `begin-wake` instead of reactivated. The host-supported scheduler
 represents these
 timestamps by truncating fractional seconds; the controller uses the same
 whole-second quantization for the creation anchor and first-run comparison,
 while still rejecting a first run in an earlier represented second. The
-creation anchor must not predate `wake_completed_at` at scheduler precision; the
-invocation ends immediately after `complete-wake`.
+creation anchor must not predate the final completion boundary at scheduler
+precision; the invocation ends immediately after the final activation/report.
+Ordinary recurring cron cannot prove a pre-model pause: a usage-limit failure
+before the first tool call can create another invocation even when checkpoint
+guards prevent duplicate PR mutation. Unattended safety therefore requires a
+host one-shot or pre-model delivery gate; otherwise the protocol fails closed
+and reports the host limitation.
 The default policy has no wake/deadline/retry budget;
 prompt-supplied limits are persisted and stop with `STOP_POLICY_LIMIT`. All
 other stop, pause, recovery, closed, expired, and unknown results remain

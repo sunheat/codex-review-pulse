@@ -356,10 +356,16 @@ if this is a scheduler-delivered invocation:
 
 # WAIT_REVIEW, WAIT_RETRY, or a successfully recorded same-head REQUEST_REVIEW
 # may re-anchor. WAIT_RETRY resumes the same frozen batch on the next wake.
-# Choose COMPLETION_NOW immediately before creating the successor. The Codex
-# automation host accepts a cadence-only recurring schedule for immediate
-# create; do not inject DTSTART or hand-write raw scheduling directives.
-COMPLETION_NOW = current UTC time
+# Cleanup is part of the completion boundary. It must finish before taking the
+# host clock anchor and before creating the next task. The host accepts a
+# cadence-only recurring schedule; do not inject DTSTART or raw directives.
+PENDING_REPAIR = (
+    checkpoint.active_batch.pending_repair
+    if COMPLETION_ACTION == WAIT_RETRY
+    else absent
+)
+require host.cleanup_worktree(pending_repair=PENDING_REPAIR) is confirmed
+COMPLETION_NOW = host.now_utc()
 successor_result = host.create_standalone_task(
     kind=cron, conversation=standalone, target_thread_id=absent,
     prompt=STANDALONE_HANDOFF.prompt, cadence_seconds=cadence_seconds,
@@ -386,50 +392,22 @@ if successor_result is success:
         )
         require SUCCESSOR.first_run is present
         require SUCCESSOR.first_run matches EXPECTED_FIRST_RUN at scheduler precision
-        # Establish durable delivery authority while the host task is paused.
+        # Authorization is setup evidence only. The wake remains active and
+        # the task remains paused until complete-wake durably finalizes it.
         PULSE TARGET --wake-id WAKE_ID --now COMPLETION_NOW authorize-successor \
           --schedule-reanchored --scheduled-created-at SUCCESSOR.created_at \
           --scheduled-first-run SUCCESSOR.first_run --scheduled-task-id SUCCESSOR_ID
         require result.next_action == SUCCESSOR_AUTHORIZED
-        # Finalize the task-owned worktree while the successor is still paused.
-        # The configured checkout remains available for checkpoint writes after
-        # the worktree is removed and pruned. A WAIT_RETRY batch with a
-        # persisted pending-repair manifest may still contain intentional
-        # uncommitted changes: pass that manifest so the host verifies its
-        # immutable patch bytes and digest before removing the dirty worktree.
-        PENDING_REPAIR = (
-            checkpoint.active_batch.pending_repair
-            if COMPLETION_ACTION == WAIT_RETRY
-            else absent
-        )
-        WORKTREE_CLEANUP_CONFIRMED = (
-            host.cleanup_worktree(pending_repair=PENDING_REPAIR)
-            if PENDING_REPAIR is present
-            else host.cleanup_worktree()
-        ) is confirmed
-        if not WORKTREE_CLEANUP_CONFIRMED:
-            PAUSE_CONFIRMED = host.pause_task(SUCCESSOR_ID) is confirmed
-            FAILURE_FILE = write_json(
-                {
-                    "reason_code": (
-                        "worktree_cleanup_unconfirmed"
-                        if PAUSE_CONFIRMED
-                        else "successor_cleanup_unconfirmed"
-                    ),
-                    "evidence": {
-                        "successor_task_id": SUCCESSOR_ID,
-                        "worktree_cleanup_confirmed": false,
-                        "pause_confirmed": PAUSE_CONFIRMED,
-                    },
-                }
-            )
-            completion = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
-              --completion-failure FAILURE_FILE
-            report completion
-            END_INVOCATION
-        # Activation is another complete metadata-preserving task update.
+        completion = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
+          --schedule-reanchored --scheduled-created-at SUCCESSOR.created_at \
+          --scheduled-first-run SUCCESSOR.first_run \
+          --scheduled-task-id SUCCESSOR_ID
+        require completion.next_action in {WAIT_REVIEW, WAIT_RETRY, REQUEST_REVIEW}
+        # Activation is the final host mutation. Do not call pulse, cleanup,
+        # validation, or ordinary work after this operation.
         require host.activate_task(SUCCESSOR_ID) is confirmed
-        ACTUAL_FIRST_RUN = SUCCESSOR.first_run
+        report completion
+        END_INVOCATION
     except Exception:
         # Creation is atomic in PAUSED state. If ID extraction failed, the
         # unknown task cannot run. If the ID is known, explicitly re-pause it
@@ -456,20 +434,10 @@ if successor_result is success:
                 },
             }
         )
-        # Do not pass --schedule-reanchored or --scheduled-task-id: this
-        # successor was not verified as the active next task.
         completion = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
           --completion-failure FAILURE_FILE
         report completion
         END_INVOCATION
-    # Worktree cleanup has completed, so use the configured checkpoint-capable
-    # locator for the final lifecycle write.
-    completion = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
-      --schedule-reanchored --scheduled-created-at SUCCESSOR.created_at \
-      --scheduled-first-run ACTUAL_FIRST_RUN \
-      --scheduled-task-id SUCCESSOR_ID
-    report completion
-    END_INVOCATION
 else:
     # Do not pass --schedule-reanchored. This persists PAUSE_BLOCKED /
     # scheduled_task_reanchor_unavailable.
@@ -482,10 +450,11 @@ The host must inspect the actual tool response before passing either
 confirmation flag. A boolean, model statement, or successful-looking command
 line is not a host-tool result. For the initial user turn, create the
 standalone task in `PAUSED` state first, then follow the same `begin-wake`
-confirmation sequence. After either form of `complete-wake`, report the final
-wake state and end the invocation immediately. Do not call scheduler list,
-re-read the checkpoint, roll another successor, verify that a successor was
-consumed, or call `begin-wake` again in that invocation. The CLI options are
+confirmation sequence. After durable `complete-wake` and the final activation
+(or a fail-closed failure path), report the final wake state and end the
+invocation immediately. Do not call scheduler list, reread the checkpoint, roll
+another successor, verify that a successor was consumed, or call `begin-wake`
+again in that invocation. The CLI options are
 also visible in `pulse.py standalone-task-prompt --help`, `pulse.py begin-wake
 --help`, and `pulse.py complete-wake --help`.
 
@@ -759,9 +728,10 @@ invocation:
    immutable Git-common-dir patch and manifest, pass it to `pulse.py retry
    --pending-repair`, and run restore-repair in the next clean worktree before
    focused validation. Stop immediately on any `PAUSE_*` or `STOP_*`.
-9. For `WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head `REQUEST_REVIEW`, choose one
-   completion timestamp immediately before successor creation without calling
-   `complete-wake` yet.
+ 9. For `WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head `REQUEST_REVIEW`, finish
+    all publication, remote-head, validation, and task-owned worktree cleanup first.
+    Only then read the host's current UTC time as the completion anchor. Do not use a
+    timestamp captured before cleanup or before the final durable close.
 10. On a scheduled delivery, reload the target-bound handoff with
    `standalone-task-prompt` from the persisted policy and without
    `--policy-json`. Require its prompt and SHA-256 to match the delivered
@@ -774,46 +744,47 @@ invocation:
    the cleanup boundary, then read back the successor's persisted ID,
    prompt and SHA-256, scheduler kind (`cron`), conversation mode
    (`standalone`), absent `target_thread_id`, model, reasoning settings,
-   cadence, paused disposition, and creation timestamp. Require every field to
-   match the
-   canonical handoff, require its creation timestamp to be at or after the
-   chosen completion timestamp at scheduler precision, and derive its first
-   run as the whole-second-truncated creation time plus cadence. Persist
-   authorize-successor with those verified values while the task is paused. Before
-   activation, verify the task-owned worktree is clean, remove it, and prune its
-   administrative entry while the configured checkout remains available for the
-   checkpoint write. If cleanup is not confirmed, pause the successor and call
-   `complete-wake --completion-failure` from that checkpoint-capable checkout to
-   persist the cleanup blocker; do not activate the successor. After cleanup is
-   confirmed, activate only that verified successor, then call `complete-wake`
-   from the configured checkout; missing-ID creation evidence can therefore leave
-   only a paused task.
-   If a host restart occurs after authorization but before activation, do not
-   treat `AUTHORIZED` as `ACTIVE`: read back the exact authorized task and
-   either activate it with the full metadata-preserving update followed by
-   `reconcile-successor --action activate --confirmed`, or keep it paused and
-   call `reconcile-successor --action pause --confirmed` to persist a
-   fail-closed recovery latch.
-11. After successor creation, readback, authorization, and confirmed worktree
-     cleanup succeed, call `complete-wake` exactly once from the configured
-     checkpoint-capable checkout with the same completion timestamp,
-     `--schedule-reanchored`, `--scheduled-created-at`, the derived
-     `--scheduled-first-run`, and `--scheduled-task-id` for the successor. A stale
-     or mismatched readback, or an unconfirmed cleanup, persists a blocker and
-     must not activate another wake.
-12. If successor creation or readback fails, call `complete-wake` exactly once
-    without `--schedule-reanchored`; this persists the re-anchor blocker and
-    keeps the delivered task paused.
-13. If `complete-wake` raises or returns malformed data after a successor was
-    activated, pause that exact successor and confirm cleanup before
-    propagating the failure.
-14. Immediately report the result of either `complete-wake` call and end this
-    host invocation. Do not list scheduler tasks, reread the checkpoint, roll
-    or verify a successor, or call `begin-wake` again. On any other tool
-    failure, `PAUSE_*`, terminal result, or unproven success, leave the task
-    `PAUSED` and end the invocation. Never treat a model assertion, boolean
-    argument, or natural-language claim as proof that pause or re-scheduling
-    succeeded.
+    cadence, paused disposition, and creation timestamp. Require every field to
+    match the canonical handoff, require its creation timestamp to be at or after
+    the completion anchor at scheduler precision, and derive its first run as the
+    whole-second-truncated creation time plus cadence. Persist `authorize-successor`
+    with those verified values while the task is paused; authorization is setup
+    evidence and does not close the wake. Then call `complete-wake` exactly once
+    from the configured checkpoint-capable checkout with the same anchor,
+    `--schedule-reanchored`, `--scheduled-created-at`, the derived
+    `--scheduled-first-run`, and `--scheduled-task-id`. Require a successful
+    rearmable result before activation. The checkpoint remains `AUTHORIZED` after
+    durable finalization so a delivered task consumes the handoff.
+ 11. After durable finalization succeeds, activate only that verified successor
+     with the full metadata-preserving update. Activation is the final host
+     mutation in this invocation: do not call pulse, cleanup, validation, or
+     ordinary work afterward. If activation fails, pause the exact successor and
+     persist a recovery latch before ending.
+ 12. If successor creation, readback, authorization, cleanup, clock anchoring, or
+     finalization fails, keep the successor paused and call `complete-wake` once
+     without reanchor confirmation (or with `--completion-failure`) to persist the
+     blocker. Never activate an unverified or non-finalized successor.
+ 13. If a host restart occurs while `active_wake_id` is still present, do not
+     activate from authorization alone; keep the exact task paused and preserve
+     the active-wake guard. After durable finalization, reconciliation requires
+     exact task-status readback and explicit host evidence that no delivery was
+     observed. A delivered task must go directly through `begin-wake` with its
+     exact ID and must never be reactivated.
+ 14. Immediately report the result after the final host mutation and end this host
+     invocation. Do not list scheduler tasks, reread the checkpoint, roll or verify
+     a successor, or call `begin-wake` again. On any other tool failure, `PAUSE_*`,
+     terminal result, or unproven success, leave the task `PAUSED` and end the
+     invocation. Never treat a model assertion, boolean argument, or natural-
+     language claim as proof that pause, delivery gating, or re-scheduling succeeded.
+
+    A recurring cron task cannot guarantee that its first invocation is paused
+    before a model starts. A `usage_limit_exceeded` or equivalent failure before
+    the first tool call can therefore create another invocation even though the
+    checkpoint active-wake guard prevents duplicate PR mutation. The host adapter
+    must provide a one-shot/pre-model delivery gate for unattended safety; if it
+    exposes only ordinary recurring cron with no such gate, fail closed and report
+    that host limitation rather than claiming that self-pause prevents duplicate
+    task creation.
 
 ## Review termination
 

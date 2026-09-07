@@ -161,20 +161,21 @@ def build_standalone_task_handoff(
         "the cleanup boundary, then read back the persisted task ID, status, "
         "creation timestamp, prompt and prompt digest, cron/standalone metadata, "
         "absent target thread, model, reasoning settings, and cadence before accepting "
-        "it. Run authorize-successor with its verified ID and schedule before activation, "
-        "then activate only that verified successor before complete-wake; malformed "
-        "creation evidence therefore cannot leave an unknown task running. "
-        "If a host restart occurs after authorize-successor persists an AUTHORIZED "
-        "successor but before activation, do not treat it as ACTIVE or wait for "
-        "the paused task to deliver itself. Read back that exact authorized task "
-        "and either activate it with the full metadata-preserving update followed "
-        "by pulse reconcile-successor --action activate --confirmed, or keep it "
-        "paused and call reconcile-successor --action pause --confirmed to persist "
-        "a fail-closed recovery latch. Natural-language activation claims are not "
-        "evidence. "
+        "it. Cleanup must finish before taking the host's current UTC completion "
+        "anchor and before creating the successor. Run authorize-successor with its "
+        "verified ID and schedule while the successor remains PAUSED and the current "
+        "wake remains active. Then call complete-wake to durably finalize the wake; its "
+        "checkpoint must remain AUTHORIZED until delivery. Only after that finalization "
+        "succeeds, activate exactly that successor as the final host mutation. Do not "
+        "run pulse, cleanup, validation, or ordinary work after activation. "
+        "If a host restart occurs before durable finalization, never activate from "
+        "authorization alone: keep the exact task paused and preserve the active-wake "
+        "guard. After finalization, reconcile only from exact task-status readback and "
+        "explicit host evidence that no delivery was observed; a delivered task must "
+        "go directly through begin-wake and must never be reactivated. "
         "Derive the first run from persisted created_at plus cadence, then pass both "
         "timestamps to complete-wake. The creation timestamp must be at or after this "
-        "wake's completion, so the successor cannot run early. For every scheduled "
+        "wake's final completion anchor, so the successor cannot run early. For every scheduled "
         "delivery, pass its exact task ID to begin-wake as --delivered-task-id "
         "so pulse.py authenticates the persisted successor. Preserve non-target "
         "threads; never merge, enable auto-merge, change the base, force-push, or "
@@ -786,7 +787,7 @@ def begin_wake(
         return state, result
 
     retry_successor_delivery = (
-        state.get("wake_phase") == "successor_authorized"
+        state.get("wake_phase") in {"successor_authorized", "successor_finalized"}
         and (state.get("last_decision") or {}).get("next_action") == "WAIT_RETRY"
     )
     pending_batch = (
@@ -1618,20 +1619,33 @@ def complete_wake(
     if schedule_anchor_created_at is not None and schedule_next_wake is None:
         raise ValueError("A schedule creation anchor requires re-anchor confirmation")
     authorization = state.get("successor_authorization")
-    authorized_handoff = (
-        state.get("active_wake_id") is None
-        and isinstance(authorization, Mapping)
+    authorization_for_wake = (
+        isinstance(authorization, Mapping)
         and authorization.get("wake_id") == wake_id
+    )
+    authorized_handoff = (
+        authorization_for_wake
+        and state.get("wake_phase") in {"successor_authorized", "successor_finalized"}
+        and (
+            state.get("active_wake_id") == wake_id
+            or (
+                state.get("active_wake_id") is None
+                and state.get("wake_phase") == "successor_finalized"
+            )
+        )
     )
     if (
         state.get("last_wake_id") == wake_id
         and state.get("active_wake_id") is None
         and state.get("last_wake_result")
-        and not authorized_handoff
+        and (not authorized_handoff or completion_failure is None)
     ):
         return state, deepcopy(state["last_wake_result"])
     if authorized_handoff:
-        if state.get("wake_phase") != "successor_authorized":
+        if state.get("wake_phase") not in {
+            "successor_authorized",
+            "successor_finalized",
+        }:
             raise DefaultWakeError("Successor authorization is not ready for completion")
     else:
         _require_active_wake(state, wake_id, allow_retry_completion=True)
@@ -1672,6 +1686,8 @@ def complete_wake(
             action="PAUSE_RECOVERY",
             mutation_occurred=mutation_occurred,
         )
+        if authorized_handoff:
+            state["successor_authorization"] = None
         state["last_wake_id"] = wake_id
         return state, result
     if action == "RUN_BATCH":
@@ -1887,13 +1903,17 @@ def complete_wake(
         state["last_wake_id"] = wake_id
         return state, return_state_result
 
-    state["scheduled_task_disposition"] = "ACTIVE"
+    state["scheduled_task_disposition"] = (
+        "AUTHORIZED" if authorized_handoff else "ACTIVE"
+    )
     state["scheduled_task_kind"] = "standalone"
     if scheduled_task_id is not None:
         state["scheduled_task_id"] = scheduled_task_id
-    if authorized_handoff:
-        state["successor_authorization"] = None
-    state["wake_phase"] = "retry_waiting" if action == "WAIT_RETRY" else "completed"
+    state["wake_phase"] = (
+        "successor_finalized"
+        if authorized_handoff
+        else ("retry_waiting" if action == "WAIT_RETRY" else "completed")
+    )
     state["last_wake_id"] = wake_id
     _set_last_result(state, result)
     return state, result
@@ -1944,13 +1964,11 @@ def authorize_successor(
     }
     state["scheduled_task_id"] = scheduled_task_id
     state["scheduled_task_kind"] = "standalone"
-    # The host task is still paused, but this exact verified successor is now
-    # the durable delivery authority.  Clear the finished wake before host
-    # activation so an immediate delivery cannot be rejected as incomplete.
-    state["active_wake_id"] = None
-    state["wake_completed_at"] = completed_at.isoformat()
-    state["next_not_before"] = next_not_before
-    state["scheduled_task_disposition"] = "AUTHORIZED"
+    # Authorization is only a verified setup handoff.  Keep the wake active and
+    # the task paused until complete_wake durably closes the wake; activation is
+    # then the final host mutation.  This prevents a partial authorization from
+    # looking like a completed recurring delivery.
+    state["scheduled_task_disposition"] = "PAUSED"
     state["wake_phase"] = "successor_authorized"
     state["last_wake_id"] = wake_id
     result = {
@@ -1959,7 +1977,6 @@ def authorize_successor(
         "scheduled_task_id": scheduled_task_id,
         "scheduled_created_at": created_at.isoformat(),
         "scheduled_first_run": _iso(scheduled_first_run),
-        "next_not_before": next_not_before,
         "mutation_occurred": False,
     }
     state["last_wake_result"] = deepcopy(result)
@@ -1984,13 +2001,12 @@ def reconcile_authorized_successor(
         raise ValueError("Scheduled task ID must be a non-empty string")
     state = ensure_default_lifecycle(checkpoint)
     authorization = state.get("successor_authorization")
-    if state.get("wake_phase") != "successor_authorized":
+    if state.get("wake_phase") not in {
+        "successor_authorized",
+        "successor_finalized",
+    }:
         raise DefaultWakeError(
             "Successor reconciliation requires an authorized successor checkpoint"
-        )
-    if state.get("scheduled_task_disposition") != "AUTHORIZED":
-        raise DefaultWakeError(
-            "Successor reconciliation requires AUTHORIZED task disposition"
         )
     if not isinstance(authorization, Mapping):
         raise DefaultWakeError("Successor authorization evidence is missing")
@@ -1999,6 +2015,50 @@ def reconcile_authorized_successor(
         or state.get("scheduled_task_id") != scheduled_task_id
     ):
         raise DefaultWakeError("Successor reconciliation task ID does not match")
+
+    # A restart cannot safely activate a successor while the original wake is
+    # still active: authorization alone is only setup evidence.  Keep the
+    # exact task paused and preserve the active-wake guard for explicit
+    # recovery instead of clearing it and allowing ordinary work to continue.
+    if state.get("active_wake_id"):
+        if action == "activate":
+            raise DefaultWakeError(
+                "Cannot activate a successor before the wake is durably finalized"
+            )
+        state["scheduled_task_disposition"] = "PAUSED"
+        state["failure_latch"] = {
+            "reason_code": "successor_finalization_interrupted",
+            "latched_at": _iso(now),
+            "evidence": deepcopy(dict(evidence or {})),
+        }
+        result = {
+            "next_action": "PAUSE_RECOVERY",
+            "reason_code": "successor_finalization_interrupted",
+            "scheduled_task_id": scheduled_task_id,
+            "evidence": deepcopy(dict(evidence or {})),
+            "mutation_occurred": False,
+        }
+        _set_last_result(state, result)
+        return state, result
+
+    if state.get("scheduled_task_disposition") != "AUTHORIZED":
+        raise DefaultWakeError(
+            "Successor reconciliation requires AUTHORIZED task disposition"
+        )
+
+    observed = evidence if isinstance(evidence, Mapping) else {}
+    if observed.get("delivery_observed") is not False:
+        raise DefaultWakeError(
+            "Successor reconciliation requires host evidence that no delivery was observed"
+        )
+    if observed.get("task_status") not in {"PAUSED", "ACTIVE"}:
+        raise DefaultWakeError(
+            "Successor reconciliation requires the exact task status readback"
+        )
+    if observed.get("delivered_task_id") == scheduled_task_id:
+        raise DefaultWakeError(
+            "A delivered successor must be consumed by begin-wake, not reactivated"
+        )
 
     if action == "activate":
         prior_action = (state.get("last_decision") or {}).get("next_action")

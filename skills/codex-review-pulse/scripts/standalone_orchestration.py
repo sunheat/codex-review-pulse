@@ -73,6 +73,9 @@ class StandaloneTaskHost(Protocol):
         dirty worktree; ordinary cleanup remains strict when it is absent.
         """
 
+    def now_utc(self) -> str:
+        """Return the host's current UTC time after final cleanup."""
+
     def authorize_successor(
         self,
         *,
@@ -83,13 +86,7 @@ class StandaloneTaskHost(Protocol):
         first_run: str,
         cadence_seconds: int,
     ) -> object:
-        """Durably authorize a verified successor before activation.
-
-        A confirmed result must make an immediate delivery safe by recording
-        the successor identity and active disposition in the checkpoint while
-        the scheduler task is still paused.  The later ``complete-wake`` call
-        finalizes the handoff after activation.
-        """
+        """Persist a verified successor while the host task remains paused."""
 
     def activate_task(self, task_id: str) -> object:
         """Activate with the host's full persisted task metadata and confirm it."""
@@ -120,6 +117,10 @@ def _utc(value: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError("Timestamp must include a timezone")
     return parsed.astimezone(UTC)
+
+
+def _iso(value: str | datetime) -> str:
+    return _utc(value if isinstance(value, str) else value.isoformat()).isoformat()
 
 
 def _truncate_to_scheduler_precision(value: datetime) -> datetime:
@@ -420,6 +421,7 @@ class StandaloneInvocation:
         successor_id: str | None,
         scheduled_created_at: str | None = None,
         completion_failure: Mapping[str, Any] | None = None,
+        end: bool = True,
     ) -> dict[str, Any]:
         if self.wake_id is None:
             raise StandaloneInvocationError("complete-wake requires an active wake")
@@ -453,10 +455,10 @@ class StandaloneInvocation:
                     "was not confirmed"
                 )
             raise StandaloneInvocationError("complete-wake returned an invalid result")
-        return self._end(result)
+        return self._end(result) if end else deepcopy(dict(result))
 
     def complete(self, *, action: str, now: str, cadence_seconds: int) -> dict[str, Any]:
-        """Create/read back one successor, complete once, and end immediately."""
+        """Finalize one successor handoff, activate last, and end immediately."""
         with self._serialized_operation():
             if not self.started or self.wake_id is None:
                 raise StandaloneInvocationError("complete-wake requires an active wake")
@@ -625,6 +627,37 @@ class StandaloneInvocation:
                 )
                 if isinstance(candidate, Mapping):
                     pending_repair = deepcopy(dict(candidate))
+            # Worktree cleanup is part of the completion boundary.  Complete
+            # it before taking the host clock anchor and before creating a
+            # recurring successor, so a long cleanup cannot make the first
+            # run relative to a fictitious pre-cleanup completion time.
+            if not self._cleanup_worktree(pending_repair=pending_repair):
+                return self._finish_completion(
+                    now=now,
+                    actual_first_run=None,
+                    successor_id=None,
+                    completion_failure={
+                        "reason_code": "worktree_cleanup_unconfirmed",
+                        "evidence": {
+                            "worktree_cleanup_confirmed": False,
+                            "pause_confirmed": False,
+                        },
+                    },
+                )
+            try:
+                completion_now = _iso(self.host.now_utc())
+            except Exception as error:
+                return self._finish_completion(
+                    now=now,
+                    actual_first_run=None,
+                    successor_id=None,
+                    completion_failure={
+                        "reason_code": "completion_anchor_unavailable",
+                        "evidence": {"error": str(error)},
+                    },
+                )
+            completion = _utc(completion_now)
+
             try:
                 response = self.host.schedule_standalone_task(
                     prompt=self.prompt,
@@ -683,7 +716,7 @@ class StandaloneInvocation:
                 if not _confirmed(
                     self.host.authorize_successor(
                         wake_id=self.wake_id,
-                        completed_at=now,
+                        completed_at=completion_now,
                         task_id=successor_id,
                         created_at=scheduled_created_at,
                         first_run=observed_first_run,
@@ -694,30 +727,6 @@ class StandaloneInvocation:
                         "Standalone successor authorization was not confirmed"
                     )
                 authorization_confirmed = True
-                if not self._cleanup_worktree(pending_repair=pending_repair):
-                    pause_confirmed = self._pause_successor(successor_id)
-                    return self._finish_completion(
-                        now=now,
-                        actual_first_run=observed_first_run,
-                        successor_id=successor_id,
-                        scheduled_created_at=scheduled_created_at,
-                        completion_failure={
-                            "reason_code": (
-                                "worktree_cleanup_unconfirmed"
-                                if pause_confirmed
-                                else "successor_cleanup_unconfirmed"
-                            ),
-                            "evidence": {
-                                "successor_task_id": successor_id,
-                                "worktree_cleanup_confirmed": False,
-                                "pause_confirmed": pause_confirmed,
-                            },
-                        },
-                    )
-                if not _confirmed(self.host.activate_task(successor_id)):
-                    raise StandaloneInvocationError(
-                        "Standalone successor activation was not confirmed"
-                    )
                 actual_first_run = observed_first_run
                 readback_failed = False
             except Exception:
@@ -758,10 +767,52 @@ class StandaloneInvocation:
                 else:
                     actual_first_run = None
 
-            return self._finish_completion(
-                now=now,
+            if not authorization_confirmed:
+                return self._finish_completion(
+                    now=now,
+                    actual_first_run=actual_first_run,
+                    successor_id=successor_id,
+                    scheduled_created_at=scheduled_created_at,
+                    completion_failure=completion_failure,
+                )
+
+            finalized = self._finish_completion(
+                now=completion_now if authorization_confirmed else now,
                 actual_first_run=actual_first_run,
                 successor_id=successor_id,
                 scheduled_created_at=scheduled_created_at,
                 completion_failure=completion_failure,
+                end=False,
+            )
+            if finalized.get("next_action") not in REARM_ACTIONS:
+                return self._end(finalized)
+            try:
+                activation_confirmed = _confirmed(self.host.activate_task(successor_id))
+            except Exception:
+                activation_confirmed = False
+            if activation_confirmed:
+                # No pulse, cleanup, validation, or other host work follows
+                # this final host mutation.  The durable checkpoint remains
+                # AUTHORIZED so a delivered task consumes the handoff instead
+                # of treating it as a restart that needs activation again.
+                return self._end(finalized)
+
+            pause_confirmed = self._pause_successor(successor_id)
+            return self._finish_completion(
+                now=completion_now,
+                actual_first_run=actual_first_run,
+                successor_id=successor_id,
+                scheduled_created_at=scheduled_created_at,
+                completion_failure={
+                    "reason_code": (
+                        "successor_activation_unconfirmed"
+                        if pause_confirmed
+                        else "successor_cleanup_unconfirmed"
+                    ),
+                    "evidence": {
+                        "successor_task_id": successor_id,
+                        "activation_confirmed": False,
+                        "pause_confirmed": pause_confirmed,
+                    },
+                },
             )

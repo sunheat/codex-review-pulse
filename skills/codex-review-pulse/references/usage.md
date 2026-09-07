@@ -36,12 +36,16 @@ drift is rejected.
 
 The host adapter's `--pause-confirmed` and `--schedule-reanchored` inputs are
 post-success confirmations only. They do not call or authorize a Codex
-automation operation. The supported local-host path creates a paused
-cadence-only standalone successor without `DTSTART`, then reads back its
-persisted ID, prompt and digest, scheduler/conversation metadata, absent target attachment,
-model, reasoning settings, cadence, paused status, and creation timestamp.
-Persist authorize-successor with the verified schedule while the task is paused.
-Activate only the authorized task, then pass
+automation operation. The supported local-host path completes worktree cleanup,
+reads the host UTC completion anchor, creates a paused cadence-only standalone
+successor without `DTSTART`, and reads back its persisted ID, prompt and digest,
+scheduler/conversation metadata, absent target attachment, model, reasoning
+settings, cadence, paused status, and creation timestamp. Persist
+`authorize-successor` with the verified schedule while the wake remains active
+and the task remains paused. Call `complete-wake` to durably finalize the wake,
+then activate only the authorized task as the final host mutation. The
+checkpoint remains `AUTHORIZED` so a delivered task is consumed by `begin-wake`
+instead of reactivated. Pass
 `--schedule-reanchored` with
 `--scheduled-created-at`, `--scheduled-first-run` derived from creation time
 plus cadence, and `--scheduled-task-id`. The host-supported scheduler exposes
@@ -50,6 +54,13 @@ the controller applies that same quantization to the creation anchor, expected
 first run, and read-back value. It still rejects a first run in an earlier
 represented second and requires the creation anchor not to predate wake
 completion at scheduler precision.
+
+Ordinary recurring cron cannot prove that a delivery is paused before a model
+starts. A usage-limit failure before the first tool call may therefore create
+another invocation even when the checkpoint prevents duplicate PR mutation.
+Unattended use requires a host one-shot or pre-model delivery gate; if the host
+offers only ordinary recurring cron, fail closed and report that task-creation
+limitation rather than claiming self-pause safety.
 
 For Codex cron task status changes, first read the persisted task definition.
 The pause or activation update must retain its kind, name, prompt, recurrence,

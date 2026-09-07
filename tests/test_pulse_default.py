@@ -117,8 +117,9 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertIn("do not submit DTSTART", handoff["prompt"])
         self.assertIn("full cron update payload", handoff["prompt"])
         self.assertIn("Never send a status-only update", handoff["prompt"])
-        self.assertIn("do not treat it as ACTIVE", handoff["prompt"])
-        self.assertIn("reconcile-successor --action activate --confirmed", handoff["prompt"])
+        self.assertIn("checkpoint must remain AUTHORIZED until delivery", handoff["prompt"])
+        self.assertIn("never activate from authorization alone", handoff["prompt"])
+        self.assertIn("must never be reactivated", handoff["prompt"])
         self.assertIn("retain the exact paused setup-task ID", handoff["prompt"])
         self.assertIn("delete that exact setup task", handoff["prompt"])
         self.assertIn("remove that worktree", handoff["prompt"])
@@ -334,8 +335,22 @@ class DefaultLifecycleTests(unittest.TestCase):
         )
 
         self.assertEqual(result["next_action"], "SUCCESSOR_AUTHORIZED")
-        self.assertEqual(state["scheduled_task_disposition"], "AUTHORIZED")
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
         self.assertEqual(state["wake_phase"], "successor_authorized")
+        self.assertEqual(state["active_wake_id"], "wake-1")
+        self.assertIsNone(state["wake_completed_at"])
+
+        state, completed = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:01:00+00:00",
+            schedule_next_wake=lambda expected: expected,
+            schedule_anchor_created_at="2026-08-26T00:01:00+00:00",
+            scheduled_task_id="task-1",
+        )
+        self.assertEqual(completed["next_action"], "WAIT_RETRY")
+        self.assertEqual(state["scheduled_task_disposition"], "AUTHORIZED")
+        self.assertEqual(state["wake_phase"], "successor_finalized")
         self.assertIsNone(state["active_wake_id"])
 
         state, delivered = pulse.begin_wake(
@@ -1206,17 +1221,41 @@ class DefaultLifecycleTests(unittest.TestCase):
         )
 
         self.assertEqual(result["next_action"], "SUCCESSOR_AUTHORIZED")
-        self.assertEqual(state["scheduled_task_disposition"], "AUTHORIZED")
-        self.assertIsNone(state["active_wake_id"])
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+        self.assertEqual(state["active_wake_id"], "wake-1")
+        self.assertIsNone(state["wake_completed_at"])
 
-        state, delivered = pulse.begin_wake(
-            state,
+        interrupted = deepcopy(state)
+        interrupted, delivered = pulse.begin_wake(
+            interrupted,
             wake_id="wake-2",
             now="2026-08-26T00:36:00+00:00",
             pause_heartbeat=lambda: True,
             delivered_task_id="task-a",
         )
+        self.assertEqual(delivered["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(delivered["reason_code"], "incomplete_wake")
+        self.assertEqual(state["active_wake_id"], "wake-1")
 
+        state, completed = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:26:00+00:00",
+            schedule_next_wake=lambda expected: expected,
+            schedule_anchor_created_at="2026-08-26T00:26:00+00:00",
+            scheduled_task_id="task-a",
+        )
+        self.assertEqual(completed["next_action"], "WAIT_REVIEW")
+        self.assertEqual(state["scheduled_task_disposition"], "AUTHORIZED")
+        self.assertEqual(state["wake_phase"], "successor_finalized")
+
+        state, delivered = pulse.begin_wake(
+            state,
+            wake_id="wake-3",
+            now="2026-08-26T00:36:00+00:00",
+            pause_heartbeat=lambda: True,
+            delivered_task_id="task-a",
+        )
         self.assertEqual(delivered["next_action"], "WAKE_STARTED")
         self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
         self.assertIsNone(state["successor_authorization"])
@@ -1232,6 +1271,14 @@ class DefaultLifecycleTests(unittest.TestCase):
             scheduled_first_run="2026-08-26T00:36:00+00:00",
             scheduled_task_id="task-a",
         )
+        state, _ = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:26:00+00:00",
+            schedule_next_wake=lambda expected: expected,
+            schedule_anchor_created_at="2026-08-26T00:26:00+00:00",
+            scheduled_task_id="task-a",
+        )
 
         state, result = pulse.reconcile_authorized_successor(
             state,
@@ -1239,7 +1286,11 @@ class DefaultLifecycleTests(unittest.TestCase):
             scheduled_task_id="task-a",
             action="activate",
             confirmed=True,
-            evidence={"host_activation": "confirmed"},
+            evidence={
+                "host_activation": "confirmed",
+                "task_status": "PAUSED",
+                "delivery_observed": False,
+            },
         )
 
         self.assertEqual(result["next_action"], "SUCCESSOR_RECONCILED")
@@ -1258,6 +1309,14 @@ class DefaultLifecycleTests(unittest.TestCase):
             scheduled_first_run="2026-08-26T00:36:00+00:00",
             scheduled_task_id="task-a",
         )
+        state, _ = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:26:00+00:00",
+            schedule_next_wake=lambda expected: expected,
+            schedule_anchor_created_at="2026-08-26T00:26:00+00:00",
+            scheduled_task_id="task-a",
+        )
 
         state, result = pulse.reconcile_authorized_successor(
             state,
@@ -1265,7 +1324,11 @@ class DefaultLifecycleTests(unittest.TestCase):
             scheduled_task_id="task-a",
             action="pause",
             confirmed=True,
-            evidence={"host_pause": "confirmed"},
+            evidence={
+                "host_pause": "confirmed",
+                "task_status": "PAUSED",
+                "delivery_observed": False,
+            },
         )
 
         self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
@@ -1274,6 +1337,75 @@ class DefaultLifecycleTests(unittest.TestCase):
             state["failure_latch"]["reason_code"],
             "successor_activation_recovery_required",
         )
+
+    def test_authorization_interruption_cannot_be_reconciled_as_active(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
+        state, _ = pulse.authorize_successor(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:26:00+00:00",
+            scheduled_created_at="2026-08-26T00:26:00+00:00",
+            scheduled_first_run="2026-08-26T00:36:00+00:00",
+            scheduled_task_id="task-a",
+        )
+
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+        self.assertEqual(state["active_wake_id"], "wake-1")
+        self.assertIsNone(state["wake_completed_at"])
+        with self.assertRaisesRegex(
+            pulse.DefaultWakeError, "before the wake is durably finalized"
+        ):
+            pulse.reconcile_authorized_successor(
+                state,
+                now="2026-08-26T00:27:00+00:00",
+                scheduled_task_id="task-a",
+                action="activate",
+                confirmed=True,
+                evidence={
+                    "task_status": "PAUSED",
+                    "delivery_observed": False,
+                },
+            )
+
+    def test_reconciliation_rejects_one_sided_or_delivered_evidence(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
+        state, _ = pulse.authorize_successor(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:26:00+00:00",
+            scheduled_created_at="2026-08-26T00:26:00+00:00",
+            scheduled_first_run="2026-08-26T00:36:00+00:00",
+            scheduled_task_id="task-a",
+        )
+        state, _ = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:26:00+00:00",
+            schedule_next_wake=lambda expected: expected,
+            schedule_anchor_created_at="2026-08-26T00:26:00+00:00",
+            scheduled_task_id="task-a",
+        )
+
+        for evidence in (
+            {"host_activation": "confirmed"},
+            {
+                "task_status": "ACTIVE",
+                "delivery_observed": True,
+                "delivered_task_id": "task-a",
+            },
+        ):
+            with self.subTest(evidence=evidence):
+                with self.assertRaises(pulse.DefaultWakeError):
+                    pulse.reconcile_authorized_successor(
+                        state,
+                        now="2026-08-26T00:27:00+00:00",
+                        scheduled_task_id="task-a",
+                        action="activate",
+                        confirmed=True,
+                        evidence=evidence,
+                    )
 
     def test_complete_wake_rejects_successor_authorization_mismatch(self) -> None:
         state, _ = started()
