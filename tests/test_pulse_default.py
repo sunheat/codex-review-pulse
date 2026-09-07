@@ -348,6 +348,64 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertEqual(delivered["next_action"], "WAKE_STARTED")
         self.assertTrue(delivered["resume_pending_batch"])
 
+    def test_authorize_successor_requires_a_rearmable_decision(self) -> None:
+        state, _ = started()
+
+        state, result = pulse.authorize_successor(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:01:00+00:00",
+            scheduled_created_at="2026-08-26T00:01:00+00:00",
+            scheduled_first_run="2026-08-26T00:11:00+00:00",
+            scheduled_task_id="task-1",
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "successor_not_rearmable")
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+        self.assertIsNone(state.get("successor_authorization"))
+
+    def test_authorize_successor_requires_completed_publication(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(
+            state, snapshot(targeted=["T1"]), wake_id="wake-1", now=NOW
+        )
+        state, _ = pulse.freeze_default_batch(state, wake_id="wake-1")
+
+        state, result = pulse.authorize_successor(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:01:00+00:00",
+            scheduled_created_at="2026-08-26T00:01:00+00:00",
+            scheduled_first_run="2026-08-26T00:11:00+00:00",
+            scheduled_task_id="task-1",
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "batch_publication_incomplete")
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+        self.assertIsNone(state.get("successor_authorization"))
+
+    def test_authorize_successor_requires_confirmed_review_trigger(self) -> None:
+        state, _ = started()
+        state["last_decision"] = {"next_action": "REQUEST_REVIEW"}
+        state["last_snapshot"] = {"head_oid": "HEAD1"}
+        state["trigger_events"] = {}
+
+        state, result = pulse.authorize_successor(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:01:00+00:00",
+            scheduled_created_at="2026-08-26T00:01:00+00:00",
+            scheduled_first_run="2026-08-26T00:11:00+00:00",
+            scheduled_task_id="task-1",
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "review_trigger_not_confirmed")
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+        self.assertIsNone(state.get("successor_authorization"))
+
     def test_retry_waiting_is_a_mutation_boundary_but_can_complete(self) -> None:
         state, _ = started()
         state, _ = pulse.record_snapshot(

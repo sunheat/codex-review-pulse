@@ -1545,6 +1545,44 @@ def record_publication_result(
     return state, result
 
 
+def _validate_successor_rearmability(
+    state: dict[str, Any], *, now: str
+) -> dict[str, Any] | None:
+    """Require the same durable completion evidence before authorizing a successor."""
+    decision = state.get("last_decision") or {}
+    action = decision.get("next_action")
+    if action == "RUN_BATCH":
+        publication = (state.get("active_batch") or {}).get("publication") or {}
+        if publication.get("status") != "succeeded":
+            return _pause(
+                state,
+                reason_code="batch_publication_incomplete",
+                now=now,
+                evidence=publication,
+                action="PAUSE_RECOVERY",
+            )
+    elif action == "REQUEST_REVIEW":
+        head_oid = state.get("last_snapshot", {}).get("head_oid")
+        event = state.get("trigger_events", {}).get(head_oid, {})
+        if event.get("status") != "emitted":
+            return _pause(
+                state,
+                reason_code="review_trigger_not_confirmed",
+                now=now,
+                evidence=event,
+                action="PAUSE_RECOVERY",
+            )
+    elif action not in {"WAIT_REVIEW", "WAIT_RETRY"}:
+        return _pause(
+            state,
+            reason_code="successor_not_rearmable",
+            now=now,
+            evidence={"last_decision": deepcopy(decision)},
+            action="PAUSE_RECOVERY",
+        )
+    return None
+
+
 def complete_wake(
     checkpoint: dict[str, Any],
     *,
@@ -1875,6 +1913,11 @@ def authorize_successor(
     _require_active_wake(state, wake_id, allow_retry_completion=True)
     if not isinstance(scheduled_task_id, str) or not scheduled_task_id.strip():
         raise ValueError("Scheduled task ID must be a non-empty string")
+    rearmability_result = _validate_successor_rearmability(
+        state, now=_iso(now)
+    )
+    if rearmability_result is not None:
+        return state, rearmability_result
     completed_at = _utc(now)
     created_at = _utc(scheduled_created_at)
     if _truncate_to_scheduler_precision(created_at) < _truncate_to_scheduler_precision(

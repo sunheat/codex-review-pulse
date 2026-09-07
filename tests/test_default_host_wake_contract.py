@@ -80,6 +80,7 @@ class InMemoryHost:
         activate_succeeds: bool = True,
         first_run: str | None = None,
         created_at: str | None = None,
+        readback_task_id: str | None = None,
         readback_model: str | None = None,
         readback_reasoning_effort: str | None = None,
         pause_succeeds: bool = True,
@@ -99,6 +100,7 @@ class InMemoryHost:
         self.activate_succeeds = activate_succeeds
         self.first_run = first_run
         self.created_at = created_at
+        self.readback_task_id = readback_task_id
         self.readback_model = readback_model
         self.readback_reasoning_effort = readback_reasoning_effort
         self.next_creation_time: str | None = None
@@ -168,6 +170,7 @@ class InMemoryHost:
             datetime.fromisoformat(created_at) + timedelta(seconds=cadence_seconds)
         ).replace(microsecond=0).isoformat()
         self.created_tasks[task_id] = {
+            "id": task_id,
             "prompt": prompt,
             "first_run": first_run,
             "created_at": created_at,
@@ -187,6 +190,7 @@ class InMemoryHost:
         task = self.created_tasks[task_id]
         return {
             **task,
+            "id": self.readback_task_id or task_id,
             "first_run": self.first_run or task["first_run"],
             "model": self.readback_model
             if self.readback_model is not None
@@ -689,6 +693,24 @@ class DefaultHostWakeContractTests(unittest.TestCase):
         self.assertIn("task-2", host.paused_task_ids)
         self.assertIn(("pause-task", "task-2"), host.operations)
         self.assertTrue(invocation.ended)
+
+    def test_successor_task_id_readback_mismatch_is_unverified(self) -> None:
+        host = InMemoryHost(
+            state=waiting_checkpoint(),
+            wake_ids=("fresh-wake-2",),
+            readback_task_id="stale-task",
+        )
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+        invocation.begin()
+        invocation.snapshot()
+
+        result = invocation.complete(reanchor_succeeds=True)
+
+        self.assertEqual(result["next_action"], "PAUSE_BLOCKED")
+        self.assertEqual(result["reason_code"], "scheduled_task_reanchor_mismatch")
+        self.assertEqual(host.state["scheduled_task_disposition"], "PAUSED")
+        self.assertIn("task-2", host.paused_task_ids)
+        self.assertNotIn(("authorize-successor", "task-2"), host.operations)
 
     def test_successor_cleanup_failure_latches_recovery_without_claiming_cleanup(self) -> None:
         host = InMemoryHost(

@@ -142,12 +142,20 @@ def _task_id(response: object) -> str:
 def _validate_task_readback(
     task: Mapping[str, Any],
     *,
+    task_id: str,
     prompt: str,
     prompt_sha256: str,
     cadence_seconds: int,
     model: str,
     reasoning_effort: str,
 ) -> None:
+    persisted_task_id = task.get("id")
+    if not isinstance(persisted_task_id, str) or not persisted_task_id.strip():
+        persisted_task_id = task.get("task_id")
+    if persisted_task_id != task_id:
+        raise StandaloneInvocationError(
+            "Standalone task readback does not match task ID"
+        )
     expected = {
         "scheduler_kind": "cron",
         "conversation_mode": "standalone",
@@ -599,6 +607,7 @@ class StandaloneInvocation:
                 task = self.host.read_task(successor_id)
                 _validate_task_readback(
                     task,
+                    task_id=successor_id,
                     prompt=self.prompt,
                     prompt_sha256=self.prompt_sha256,
                     cadence_seconds=cadence_seconds,
