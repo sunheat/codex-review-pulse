@@ -224,6 +224,10 @@ if this is the initial explicit user request:
         model=TASK_MODEL, reasoning_effort=TASK_REASONING_EFFORT,
         disposition=PAUSED
     ) -> success
+    retain the exact setup-task ID and verify its persisted definition. Before
+    creating a successor, delete that exact paused setup task and require
+    confirmed deletion; if deletion cannot be confirmed, keep it paused,
+    persist a cleanup blocker, and end without creating another task.
     # Wake 1 may initialize an absent checkpoint.
 else if this is a scheduler-delivered invocation:
     # This must be the first scheduler operation in this invocation. The
@@ -281,6 +285,10 @@ REMOTE_PR_HEAD = host.read_authoritative_pr_head()
 WAKE_WORKTREE = host.create_clean_linked_worktree(
     repository=CONFIGURED_CHECKOUT, commit=REMOTE_PR_HEAD, unique_per_wake=true
 )
+
+# Before END_INVOCATION, verify this fresh task-owned worktree is clean, remove
+# it, and prune its administrative entry. Never remove CONFIGURED_CHECKOUT. If
+# cleanup cannot be confirmed, keep the next task paused and report the blocker.
 
 # A resumed batch must restore the verified patch into this worktree.
 if begin_result.resume_pending_batch and checkpoint.active_batch.pending_repair:
@@ -617,6 +625,11 @@ the next wake. Set:
 ```text
 next_not_before = ceil_to_scheduler_precision(wake_completed_at + cadence_seconds)
 ```
+
+For a persisted-created-at successor, the scheduler's represented first run
+(`truncate_to_scheduler_precision(created_at + cadence_seconds)`) is also the
+checkpoint's `next_not_before`. This keeps delivery and the lifecycle deadline
+aligned when completion and task creation fall in different fractional seconds.
 
 Never rely on pausing and reactivating a fixed recurring task to reset its
 clock, and do not submit `DTSTART` during immediate automation creation. Create

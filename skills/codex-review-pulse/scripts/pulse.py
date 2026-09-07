@@ -103,6 +103,10 @@ def build_standalone_task_handoff(
         "This is a scheduler-delivered "
         "standalone invocation, not a continuation of another task and not a "
         "same-task heartbeat; never reuse a Codex conversation or targetThreadId. "
+        "On the initial user request, retain the exact paused setup-task ID. Before "
+        "creating a successor, delete that exact setup task and require confirmed "
+        "deletion; if deletion cannot be confirmed, keep it paused, persist a cleanup "
+        "blocker, and end without creating another task. "
         "Before every Codex automation status transition, read the task's persisted "
         "definition and submit the full cron update payload: preserve kind, name, "
         "prompt, recurrence, model, reasoning, project, environment, and destination, "
@@ -178,6 +182,10 @@ def build_standalone_task_handoff(
         "invocation immediately; do not start, schedule, or consume another wake. If "
         "complete-wake raises or returns malformed data after successor activation, "
         "pause that exact successor and confirm cleanup before propagating the failure. "
+        "Before END_INVOCATION, verify the fresh task-owned worktree is clean, remove "
+        "that worktree, and prune its administrative entry; never remove the configured "
+        "checkout. If cleanup cannot be confirmed, keep the next task paused and report "
+        "the cleanup blocker. "
         "Keep the delivered task paused on every PAUSE_* or STOP_* result."
     )
     prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
@@ -777,10 +785,17 @@ def begin_wake(
         state["last_wake_id"] = wake_id
         return state, result
 
+    retry_successor_delivery = (
+        state.get("wake_phase") == "successor_authorized"
+        and (state.get("last_decision") or {}).get("next_action") == "WAIT_RETRY"
+    )
     pending_batch = (
         isinstance(state.get("active_batch"), dict)
         and (state.get("active_batch") or {}).get("publication", {}).get("status") != "succeeded"
-        and state.get("wake_phase") in {"retry_waiting", "confirmation_ready"}
+        and (
+            state.get("wake_phase") in {"retry_waiting", "confirmation_ready"}
+            or retry_successor_delivery
+        )
     )
     authorized_delivery = scheduled_disposition == "AUTHORIZED"
     state["active_wake_id"] = wake_id
@@ -1582,6 +1597,26 @@ def complete_wake(
             raise DefaultWakeError("Successor authorization is not ready for completion")
     else:
         _require_active_wake(state, wake_id, allow_retry_completion=True)
+    if (
+        require_schedule_anchor
+        and schedule_anchor_created_at is not None
+        and scheduled_task_id is not None
+        and not authorized_handoff
+    ):
+        result = _pause(
+            state,
+            reason_code="successor_authorization_required",
+            now=now,
+            evidence={
+                "wake_id": wake_id,
+                "scheduled_task_id": scheduled_task_id,
+                "scheduled_task_created_at": schedule_anchor_created_at,
+                "successor_authorization": authorization,
+            },
+            action="PAUSE_RECOVERY",
+        )
+        state["last_wake_id"] = wake_id
+        return state, result
     decision = state.get("last_decision") or {}
     action = decision.get("next_action")
     mutation_occurred = bool(state.get("wake_mutation_occurred")) or bool(
@@ -1718,15 +1753,13 @@ def complete_wake(
             state["next_not_before"] = next_not_before
             state["last_wake_id"] = wake_id
             return state, return_state_result
-        # Keep the lifecycle deadline relative to the recorded completion.
-        # The task's own first run remains anchored to its persisted creation
-        # timestamp, which is validated separately below.
-        next_not_before = _truncate_to_scheduler_precision(
-            completed_at + timedelta(seconds=effective_cadence)
-        ).isoformat()
+        # The scheduler's persisted first run is the lifecycle deadline for an
+        # anchored successor.  Using ceil(completed_at + cadence) can be one
+        # represented second later than truncate(created_at + cadence).
         expected_first_run = _truncate_to_scheduler_precision(
             parsed_anchor + timedelta(seconds=effective_cadence)
         ).isoformat()
+        next_not_before = expected_first_run
         state["next_not_before"] = next_not_before
         result["next_not_before"] = next_not_before
         result["scheduled_task_created_at"] = parsed_anchor.isoformat()
@@ -1859,10 +1892,7 @@ def authorize_successor(
         scheduler_precision=True,
     ):
         raise DefaultWakeError("Successor first run does not match its creation anchor")
-    next_not_before = _ceil_to_second(
-        completed_at
-        + timedelta(seconds=state["automation_policy"]["cadence_seconds"])
-    ).isoformat()
+    next_not_before = expected_first_run
     state["successor_authorization"] = {
         "wake_id": wake_id,
         "scheduled_task_id": scheduled_task_id,
@@ -2396,12 +2426,21 @@ def main() -> None:
             args,
             checkpoint=supplied_checkpoint,
         )
+        handoff_policy = policy_overrides
+        if handoff_policy is None:
+            persisted_path = _state_path(args, checkpoint=supplied_checkpoint)
+            persisted_checkpoint = load_checkpoint(persisted_path)
+            if persisted_checkpoint is not None:
+                _assert_checkpoint_target(persisted_checkpoint, repository, pr_number)
+                handoff_policy = ensure_default_lifecycle(
+                    persisted_checkpoint
+                )["automation_policy"]
         print(
             json.dumps(
                 build_standalone_task_handoff(
                     repository,
                     pr_number,
-                    policy=policy_overrides,
+                    policy=handoff_policy,
                 ),
                 indent=2,
                 sort_keys=True,

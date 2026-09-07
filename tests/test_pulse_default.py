@@ -119,6 +119,9 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertIn("Never send a status-only update", handoff["prompt"])
         self.assertIn("do not treat it as ACTIVE", handoff["prompt"])
         self.assertIn("reconcile-successor --action activate --confirmed", handoff["prompt"])
+        self.assertIn("retain the exact paused setup-task ID", handoff["prompt"])
+        self.assertIn("delete that exact setup task", handoff["prompt"])
+        self.assertIn("remove that worktree", handoff["prompt"])
         self.assertIn("persisted created_at plus cadence", handoff["prompt"])
         self.assertIn("Desktop-native update_plan tool", handoff["prompt"])
         self.assertIn("before the first PR/review operation", handoff["prompt"])
@@ -334,6 +337,16 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertEqual(state["scheduled_task_disposition"], "AUTHORIZED")
         self.assertEqual(state["wake_phase"], "successor_authorized")
         self.assertIsNone(state["active_wake_id"])
+
+        state, delivered = pulse.begin_wake(
+            state,
+            wake_id="wake-2",
+            now="2026-08-26T00:11:00+00:00",
+            pause_heartbeat=lambda: True,
+            delivered_task_id="task-1",
+        )
+        self.assertEqual(delivered["next_action"], "WAKE_STARTED")
+        self.assertTrue(delivered["resume_pending_batch"])
 
     def test_retry_waiting_is_a_mutation_boundary_but_can_complete(self) -> None:
         state, _ = started()
@@ -1114,12 +1127,12 @@ class DefaultLifecycleTests(unittest.TestCase):
         )
 
         self.assertEqual(result["next_action"], "WAIT_REVIEW")
-        self.assertEqual(result["next_not_before"], "2026-08-26T00:36:00+00:00")
+        self.assertEqual(result["next_not_before"], "2026-08-26T00:36:02+00:00")
         self.assertEqual(
             result["scheduled_task_created_at"],
             "2026-08-26T00:26:02.250000+00:00",
         )
-        self.assertEqual(state["next_not_before"], "2026-08-26T00:36:00+00:00")
+        self.assertEqual(state["next_not_before"], "2026-08-26T00:36:02+00:00")
         self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
 
     def test_authorized_successor_stays_intermediate_until_activation_or_delivery(self) -> None:
@@ -1325,6 +1338,39 @@ class DefaultLifecycleTests(unittest.TestCase):
             "2026-09-02T08:46:13.793000+00:00",
         )
         self.assertEqual(state["scheduled_task_disposition"], "ACTIVE")
+
+    def test_creation_anchored_deadline_uses_persisted_first_run(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
+        state, result = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-09-02T08:46:13.999000+00:00",
+            schedule_next_wake=lambda _: "2026-09-02T08:56:13+00:00",
+            schedule_anchor_created_at="2026-09-02T08:46:13.100000+00:00",
+            scheduled_task_id="task-1",
+        )
+
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        self.assertEqual(result["next_not_before"], "2026-09-02T08:56:13+00:00")
+        self.assertEqual(state["next_not_before"], "2026-09-02T08:56:13+00:00")
+
+    def test_public_anchored_completion_requires_successor_authorization(self) -> None:
+        state, _ = started()
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-1", now=NOW)
+        state, result = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:26:00+00:00",
+            schedule_next_wake=lambda _: "2026-08-26T00:36:00+00:00",
+            schedule_anchor_created_at="2026-08-26T00:26:00+00:00",
+            scheduled_task_id="task-1",
+            require_schedule_anchor=True,
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "successor_authorization_required")
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
 
     def test_creation_anchored_schedule_rejects_genuinely_early_first_run(self) -> None:
         state, _ = started()

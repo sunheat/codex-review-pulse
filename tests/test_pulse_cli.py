@@ -419,6 +419,19 @@ class PulseCliTests(unittest.TestCase):
         harness.begin_and_snapshot()
         harness.json_output(
             harness.run(
+                "authorize-successor",
+                "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:01:00+00:00",
+                "--scheduled-first-run",
+                "2026-08-26T00:11:00+00:00",
+                "--scheduled-task-id",
+                "task-1",
+                now="2026-08-26T00:01:00+00:00",
+            )
+        )
+        harness.json_output(
+            harness.run(
                 "complete-wake",
                 "--schedule-reanchored",
                 "--scheduled-created-at",
@@ -556,6 +569,19 @@ class PulseCliTests(unittest.TestCase):
         harness.json_output(harness.run("snapshot"))
         harness.json_output(
             harness.run(
+                "authorize-successor",
+                "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:01:00+00:00",
+                "--scheduled-first-run",
+                "2026-08-26T00:11:00+00:00",
+                "--scheduled-task-id",
+                "task-1",
+                now="2026-08-26T00:01:00+00:00",
+            )
+        )
+        harness.json_output(
+            harness.run(
                 "complete-wake",
                 "--schedule-reanchored",
                 "--scheduled-created-at",
@@ -593,6 +619,22 @@ class PulseCliTests(unittest.TestCase):
         )
         self.assertEqual(state["automation_policy"]["model"], "gpt-5.6-terra")
         self.assertEqual(state["automation_policy"]["reasoning_effort"], "medium")
+
+    def test_scheduled_handoff_reloads_persisted_policy(self) -> None:
+        harness = CliHarness(self)
+        harness.json_output(
+            harness.run(
+                "--policy-json",
+                '{"model":"gpt-5.6-terra","reasoning_effort":"medium"}',
+                "begin-wake",
+                "--pause-confirmed",
+            )
+        )
+
+        handoff = harness.json_output(harness.run("standalone-task-prompt"))
+
+        self.assertEqual(handoff["model"], "gpt-5.6-terra")
+        self.assertEqual(handoff["reasoning_effort"], "medium")
 
     def test_confirm_policy_resumes_a_supervised_frozen_batch(self) -> None:
         harness = CliHarness(
@@ -726,6 +768,19 @@ class PulseCliTests(unittest.TestCase):
         )
         harness.json_output(
             harness.run(
+                "authorize-successor",
+                "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:01:00+00:00",
+                "--scheduled-first-run",
+                "2026-08-26T00:11:00+00:00",
+                "--scheduled-task-id",
+                "task-1",
+                now="2026-08-26T00:01:00+00:00",
+            )
+        )
+        harness.json_output(
+            harness.run(
                 "complete-wake",
                 "--schedule-reanchored",
                 "--scheduled-created-at",
@@ -842,6 +897,19 @@ class PulseCliTests(unittest.TestCase):
 
         reanchored = CliHarness(self)
         reanchored.begin_and_snapshot()
+        reanchored.json_output(
+            reanchored.run(
+                "authorize-successor",
+                "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:26:00+00:00",
+                "--scheduled-first-run",
+                "2026-08-26T00:36:00+00:00",
+                "--scheduled-task-id",
+                "task-2",
+                now="2026-08-26T00:26:00+00:00",
+            )
+        )
         result = reanchored.json_output(
             reanchored.run(
                 "complete-wake",
@@ -863,6 +931,19 @@ class PulseCliTests(unittest.TestCase):
 
         creation_anchored = CliHarness(self)
         creation_anchored.begin_and_snapshot()
+        creation_anchored.json_output(
+            creation_anchored.run(
+                "authorize-successor",
+                "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-08-26T00:26:02.250000+00:00",
+                "--scheduled-first-run",
+                "2026-08-26T00:36:03+00:00",
+                "--scheduled-task-id",
+                "task-3",
+                now="2026-08-26T00:26:00+00:00",
+            )
+        )
         result = creation_anchored.json_output(
             creation_anchored.run(
                 "complete-wake",
@@ -877,10 +958,23 @@ class PulseCliTests(unittest.TestCase):
             )
         )
         self.assertEqual(result["next_action"], "WAIT_REVIEW")
-        self.assertEqual(result["next_not_before"], "2026-08-26T00:36:00+00:00")
+        self.assertEqual(result["next_not_before"], "2026-08-26T00:36:02+00:00")
 
         incident = CliHarness(self)
         incident.begin_and_snapshot()
+        incident.json_output(
+            incident.run(
+                "authorize-successor",
+                "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-09-02T08:46:13.793000+00:00",
+                "--scheduled-first-run",
+                "2026-09-02T08:56:13+00:00",
+                "--scheduled-task-id",
+                "task-incident",
+                now="2026-09-02T08:46:13.761000+00:00",
+            )
+        )
         result = incident.json_output(
             incident.run(
                 "complete-wake",
@@ -899,6 +993,19 @@ class PulseCliTests(unittest.TestCase):
 
         early = CliHarness(self)
         early.begin_and_snapshot()
+        early.json_output(
+            early.run(
+                "authorize-successor",
+                "--schedule-reanchored",
+                "--scheduled-created-at",
+                "2026-09-02T08:46:13.793000+00:00",
+                "--scheduled-first-run",
+                "2026-09-02T08:56:13+00:00",
+                "--scheduled-task-id",
+                "task-early",
+                now="2026-09-02T08:46:13.761000+00:00",
+            )
+        )
         result = early.json_output(
             early.run(
                 "complete-wake",
