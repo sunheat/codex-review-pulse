@@ -93,6 +93,8 @@ def build_standalone_task_handoff(
     canonical = canonical_repository(repository)
     target = f"{canonical}#{pr_number}"
     effective_policy = normalize_policy(policy)
+    # Keep this handoff wording stable: delivered tasks compare the complete
+    # prompt and its SHA-256 before a successor can be re-armed.
     prompt = (
         "Use $codex-review-pulse from its loaded user-directory installation to "
         f"run exactly one automatic Codex review-remediation wake for {target} in "
@@ -152,7 +154,7 @@ def build_standalone_task_handoff(
         "immediately before push; explicitly stage intended paths; commit and push "
         "at most once; verify the published head; then record the publication result. "
         "If a fix-now repair leaves uncommitted changes and a recoverable retry is "
-        "needed, write an immutable patch plus manifest under the Git-common dir and "
+        "needed, write an immutable patch plus manifest under the Git common dir and "
         "pass that manifest to pulse retry --pending-repair; the next clean worktree "
         "must verify and apply it before focused validation. Leave push-created "
         "review artifacts for a later wake. When rearming, create one new standalone "

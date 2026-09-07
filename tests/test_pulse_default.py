@@ -117,6 +117,8 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertIn("do not submit DTSTART", handoff["prompt"])
         self.assertIn("full cron update payload", handoff["prompt"])
         self.assertIn("Never send a status-only update", handoff["prompt"])
+        self.assertIn("under the Git common dir and", handoff["prompt"])
+        self.assertNotIn("under the Git-common dir and", handoff["prompt"])
         self.assertIn("checkpoint must remain AUTHORIZED until delivery", handoff["prompt"])
         self.assertIn("never activate from authorization alone", handoff["prompt"])
         self.assertIn("must never be reactivated", handoff["prompt"])
