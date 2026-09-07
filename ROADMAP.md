@@ -91,11 +91,20 @@ recovery, so this release does not weaken the frozen-head publication gate.
 
 Version `0.8.0` changes the default host handoff from a same-task heartbeat to
 standalone scheduled tasks. Each scheduler delivery is a new task/conversation
-with the fixed, target-bound prompt, the installed skill, the target
-`AGENTS.md`, and the Git-common-dir checkpoint as its only cross-run workflow
-state. The injected host orchestration guard proves one fresh wake per
-invocation, pause-before-preflight ordering, one successor per rearmable wake,
-and immediate termination after `complete-wake`.
+using the canonical handoff produced by `pulse.py`. The installed skill and
+target repository instructions, including `AGENTS.md` when present, are runtime
+instruction/configuration inputs. The Git-common-dir checkpoint is the
+canonical default-path lifecycle and control authority. Checkpoint-referenced
+immutable repair patches/manifests and verified scheduler task metadata may
+persist as auxiliary recovery or evidence artifacts, but they are not
+independent workflow authorities.
+
+If a host exposes or uses a native execution plan, it is ephemeral user-facing
+telemetry rather than durable workflow authority. This roadmap does not claim
+that the current implementation has native plan support. The injected host
+orchestration guard proves one fresh wake per invocation,
+pause-before-preflight ordering, one successor per rearmable wake, and
+immediate termination after `complete-wake`.
 
 The network-free tests do not create real scheduler tasks, install skills, or
 mutate GitHub. Real Codex scheduled-task and live GitHub integration remains

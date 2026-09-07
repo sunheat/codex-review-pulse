@@ -21,8 +21,10 @@ a new standalone task/conversation. Only a completion-relative `WAIT_REVIEW`,
 `WAIT_RETRY`, or successful same-head `REQUEST_REVIEW` may create the next
 standalone task.
 The hardened commands below must not be used to reintroduce the old activation
-lifecycle. Repository-specific scope and trusted-input boundaries belong in
-the target repository's `AGENTS.md`.
+lifecycle. Target repository instructions, including `AGENTS.md` when present,
+may supply local scope, paths, validation, trust constraints, and compatible
+operational parameters. They may narrow or parameterize the portable contract,
+but may not replace it or broaden mutation authority.
 
 When using the default CLI directly from the target PR checkout, omit
 `--repo` and `--pr`; `pulse.py` resolves the current PR before deriving the
@@ -220,8 +222,8 @@ It is never approval; human `EYES` does not affect the loop.
 
 If a separately authorized hardened release is ever revalidated, commit that
 release and return the source repository to a clean state before updating the
-independent installation. This development phase does not authorize that
-operation. Then:
+independent installation. Perform this update only when the operator has
+separately authorized that hardened update operation. Then:
 
 ```powershell
 $newCommit = git rev-parse HEAD

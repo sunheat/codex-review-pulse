@@ -448,6 +448,15 @@ retrieval, atomic Git-common-directory checkpoint, frozen-batch transitions,
 and exact GraphQL resolver. It does not duplicate those implementations and
 does not import the hardened authority machinery.
 
+For the default clean-context path, the Git-common-dir checkpoint is the
+canonical durable lifecycle and control authority. Checkpoint-referenced
+immutable repair patches/manifests and verified scheduler task metadata may
+persist across wakes as auxiliary recovery or evidence artifacts, but they are
+not independent workflow authorities. If a host exposes or uses a native
+execution plan, it is ephemeral user-facing telemetry rather than durable
+workflow authority; this skill does not claim native plan support in the
+current implementation.
+
 ## One standalone delivery, one wake, one plan
 
 Treat the initial user turn as wake 1. Create its standalone scheduler task in
@@ -737,10 +746,6 @@ Host permissions are a separate boundary: unattended operation requires the
 host task/thread to have network access, full workspace access, and a
 non-interactive approval policy. The prompt can narrow behavior, but cannot
 grant capabilities that the host has not granted.
-
-This repository phase implements and tests the control logic only. Do not
-create a real scheduled task, mutate live GitHub, install the skill, commit,
-or push while developing or validating this change.
 
 ## Optional hardened mode
 

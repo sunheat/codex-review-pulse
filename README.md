@@ -200,19 +200,20 @@ python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pulse.py `
   standalone-task-prompt
 ```
 
-`standalone-task-prompt` returns these values for the host to map to its
-scheduled-task fields (`model` and `reasoningEffort`). The host must apply the
-same values when creating each standalone successor, and the program verifies
-them during successor readback. A policy update affects later successors; it
-does not mutate an already-created task. Model availability remains a host
-capability and is not hard-coded in the repository.
+`standalone-task-prompt` returns the model and reasoning settings alongside the
+canonical prompt for the host to map to its scheduled-task fields (`model` and
+`reasoningEffort`). The canonical prompt intentionally does not embed these
+mutable values; persisted policy and task metadata are authoritative. The host
+must apply the same values when creating each standalone successor, and the
+program verifies them during successor readback. A policy update affects later
+successors; it does not mutate an already-created task. Model availability
+remains a host capability and is not hard-coded in the repository.
 
 In the user's initial request, explicit wording such as “use model
 `gpt-5.6-terra` with `reasoning_effort=medium`” is converted by the host agent
 to the structured policy fields before it renders the handoff. The program
-does not perform fuzzy parsing of arbitrary prose. The generated canonical
-prompt records the selected settings, and every scheduled successor reuses
-the persisted values.
+does not perform fuzzy parsing of arbitrary prose. Every scheduled successor
+reuses the persisted policy and task metadata values.
 
 Each delivery also creates a new clean linked worktree at the independently
 verified remote PR head. The scheduler's configured project checkout is only a

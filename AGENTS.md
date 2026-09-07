@@ -10,6 +10,22 @@ When `notes/context.md` exists, read it before starting repository work. It is
 local working context only: promote durable decisions into tracked
 documentation, and never make public behavior depend solely on ignored notes.
 
+## Portable skill boundary
+
+This root `AGENTS.md` governs development of this repository only. It is not a
+product dependency of the installed skill and is not portable runtime
+authority. The normative portable runtime contract is
+[`skills/codex-review-pulse/SKILL.md`](skills/codex-review-pulse/SKILL.md) and
+the references it links; keep runtime behavior there instead of duplicating it
+in repository-development guidance.
+
+A target repository's `AGENTS.md`, when present, may provide local scope,
+paths, validation, trust constraints, and compatible operational parameters.
+It may narrow or parameterize the portable contract, but it cannot replace the
+portable contract or broaden its mutation authority, host capabilities, or hard
+invariants. If a conflict cannot be reconciled without broadening authority or
+violating a hard invariant, fail closed and report it.
+
 ## Plane work tracking
 
 Plane is the execution tracker for current and future actionable work. It was
@@ -40,86 +56,13 @@ request or a workflow contract that specifically authorizes that Plane
 operation. Access to Plane or a Work Item reference does not provide that
 authorization.
 
-## Stable invariants
+## Development mode boundary
 
-- Target only unresolved review threads whose root comment author matches a
-  configured Codex reviewer identity. Unknown authors fail closed. Report but
-  never automatically mutate non-target threads.
-- Normalize configured GitHub identities case-insensitively and treat a
-  trailing `[bot]` suffix as equivalent.
-- Treat terminal approval as a Codex-specific loop result, not a claim that a
-  pull request is globally merge-ready.
-- A qualifying approval must be proven for the current head OID. Existing
-  reactions on cold start or first observation of a new head are ambiguous.
-- Freeze the targeted thread IDs and head OID before a batch. Resolve each
-  exact frozen thread after its focused local outcome passes, then validate and
-  publish the aggregate batch at most once.
-- Bracket connection retrieval with head-OID reads and discard a snapshot if
-  the head changes. Freeze only the exact targeted set persisted by that stable
-  snapshot, and revalidate root-author identity before resolution.
-- In that same bracket, treat PR-level `EYES` from a configured Codex identity
-  as wait-only review activity. It may delay a batch but never proves approval;
-  malformed or conflicting reaction-node evidence fails closed.
-- Do not process review artifacts created by a batch push until the next cycle.
-- Persist each frozen thread's outcome before resolving it so recovery retains
-  both the exact resolved IDs and their classifications.
-- Keep runtime checkpoints outside tracked files, under the target
-  repository's Git common directory, and replace them atomically.
-- Use authoritative GitHub GraphQL review-thread state and exact node IDs. Do
-  not infer resolution from comment text or flat comment lists.
-
-These core rules apply to both product modes. The public Codex-first default
-does not require the hardened contract, installation, or lease ceremony.
-
-## Default and hardened modes
-
-The public default control surface is
-`skills/codex-review-pulse/scripts/pulse.py`. It uses a small PR-scoped
-checkpoint with a persisted in-progress marker stored through atomic checkpoint
-replacement. The marker is not a cross-process lock or compare-and-set
-mechanism; the default path assumes one host/task runner per PR. It must persist
-`wake_id`, `wake_phase`, `wake_started_at`, `wake_completed_at`,
-`next_not_before`, `scheduled_task_disposition`, and `wake_count`. One host wake
-may plan once; duplicate plan/snapshot calls return the prior result or reject
-without incrementing the count. A stale marker returns `PAUSE_RECOVERY` and
-never auto-takes over.
-
-The initial user turn is wake 1. Standalone task creation stays `PAUSED`.
-Each scheduled wake pauses the delivered standalone task before PR work and
-stops if that pause cannot be confirmed. Final `WAIT_REVIEW`, `WAIT_RETRY`, or
-successful same-head `REQUEST_REVIEW` may create one standalone successor at
-`wake_completed_at + cadence_seconds`; `STOP_*`, `PAUSE_*`, recovery, closed,
-expired, lease-loss, and unknown results remain paused. Pause is absorbing and
-the default path has no automatic recovery-latch clearing operation.
-
-The existing immutable installation, pilot preflight, canonical run-contract
-digest, renewable lease, doctor/plan/complete protocol, and detailed recovery
-operations are optional hardened mode only. If hardened code remains
-reachable, it must obey the same P0 lifecycle and fail closed on duplicate
-wakes, early fixed-cadence wakes, pause failure, lease loss, and unverified
-recovery. Version `0.4.0` has a real black-box pilot failure and is not a
-publishable final recurring release.
-
-The default automation policy is persisted in the checkpoint. Its default
-profile is autonomous/unattended with automatic PR-scoped edits, stale-test
-repair, exact resolution, aggregate publication, review triggering, and
-recoverable retries. `max_wakes`, `deadline_at`, and `retry_wake_limit` are
-unbounded (`null`) by default; prompt-derived limits are normalized, persisted,
-and enforced as `STOP_POLICY_LIMIT`. `validation_failure=repair`,
-`allow_test_changes=true`, and `no_progress_limit=3` make ordinary validation
-failures recoverable while preserving a pause boundary for repeated no-progress
-or explicit policy opt-outs. Prompt policy overrides take precedence over the
-default and can select `supervised` or `observe-only`.
-
-The prompt does not grant host capabilities. Unattended execution still
-requires the host to provide network access, full workspace access, and a
-non-interactive approval policy.
-
-`pulse.py` is the sole control surface for ongoing default-path development.
-Treat the hardened controller, including `heartbeat_tick.py`, as a frozen
-compatibility layer rather than a second product surface. Do not mirror new
-default features or lifecycle behavior into hardened mode. Hardened changes are
-limited to:
+The public default development surface is
+`skills/codex-review-pulse/scripts/pulse.py`. Treat the hardened controller,
+including `heartbeat_tick.py`, as a frozen compatibility layer rather than a
+second product surface. Do not mirror new default features or lifecycle
+behavior into hardened mode. Hardened changes are limited to:
 
 - shared-core defects that block the default path;
 - security, data-integrity, or compatibility fixes; and
@@ -128,35 +71,19 @@ limited to:
 When a shared module changes, validate both modes where relevant, but do not
 expand hardened behavior merely to preserve feature parity. Reopening hardened
 feature development requires an explicit tracked architecture decision or new
-pilot evidence that changes this phase boundary.
+pilot evidence that changes this phase boundary. Read the portable
+`SKILL.md` and its relevant references for the runtime contract of either mode.
 
-## Code Review Rules
+## Repository development safety
 
-- In hardened mode only, persist a canonical digest of the complete normalized
-  run contract before the first mutation. Every later wake must recompute and
-  match it; authority drift fails closed without rewriting state.
-- Accept review work only from a head-OID-bracketed stable GraphQL snapshot
-  whose unresolved thread root author is a configured Codex identity. Freeze
-  that head and those exact thread IDs, revalidate ownership, and resolve only
-  the corresponding exact GraphQL nodes.
-- Execute hardened pilot commands only from an independently copied,
-  commit-pinned installation whose manifest, inventory, hashes, and resolved
-  executing path all verify. The default path does not call the installer or
-  preflight.
+Code edits do not automatically authorize committing, pushing, creating or
+resolving issues, resolving review threads, posting review triggers, starting
+recurring execution, merging, enabling auto-merge, changing a PR base, or
+force-pushing. External mutations require current task-specific authorization.
+Stage only explicit intended paths and preserve unrelated work.
 
-## Authorization boundaries
-
-The standard autonomous default request authorizes PR-scoped implementation and
-test edits, repair of stale PR-scoped expectations, recoverable retries, commit
-and push per aggregate batch, exact target-thread resolution, one review
-trigger per head, and creation of one standalone successor task plus the
-required pause/reanchor handoff per rearmable wake until a Codex-specific stop
-or hard blocker. Prompt policy can narrow this scope. It never authorizes issue
-creation, merge, auto-merge, changing a PR base, force-push, non-target
-mutations, or unrelated work. Stage explicit paths.
-
-Tests must not perform live GitHub mutations. Use fixtures and injected GraphQL
-callables for mutation-path coverage.
+Tests must not perform live GitHub mutations. Use fixtures and injected
+GraphQL callables for mutation-path coverage.
 
 ## Validation
 

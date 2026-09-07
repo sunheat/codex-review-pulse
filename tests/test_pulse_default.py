@@ -101,6 +101,11 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertIn("AGENTS.md", handoff["prompt"])
         self.assertIn("new task-owned clean linked worktree", handoff["prompt"])
         self.assertIn(
+            "canonical durable lifecycle and control authority", handoff["prompt"]
+        )
+        self.assertIn("auxiliary recovery or evidence artifacts", handoff["prompt"])
+        self.assertNotIn("Use only the target repository's", handoff["prompt"])
+        self.assertIn(
             "authoritative in the persisted automation policy and task metadata",
             handoff["prompt"],
         )
