@@ -83,6 +83,7 @@ class InMemoryHost:
         readback_task_id: str | None = None,
         readback_model: str | None = None,
         readback_reasoning_effort: str | None = None,
+        cleanup_succeeds: bool = True,
         pause_succeeds: bool = True,
         pause_results: tuple[bool, ...] | None = None,
         complete_raises: bool = False,
@@ -103,6 +104,7 @@ class InMemoryHost:
         self.readback_task_id = readback_task_id
         self.readback_model = readback_model
         self.readback_reasoning_effort = readback_reasoning_effort
+        self.cleanup_succeeds = cleanup_succeeds
         self.next_creation_time: str | None = None
         self.pause_succeeds = pause_succeeds
         self.pause_results = pause_results
@@ -199,6 +201,10 @@ class InMemoryHost:
             if self.readback_reasoning_effort is not None
             else task["reasoning_effort"],
         }
+
+    def cleanup_worktree(self) -> bool:
+        self.operations.append(("cleanup-worktree", "task-owned"))
+        return self.cleanup_succeeds
 
     def authorize_successor(
         self,
@@ -427,9 +433,10 @@ class DefaultHostWakeContractTests(unittest.TestCase):
                 self.assertTrue(invocation.ended)
                 self.assertEqual(host.operations[-1][0], "complete-wake")
                 if reanchor_succeeds:
-                    self.assertEqual(host.operations[-5][0], "schedule-standalone")
-                    self.assertEqual(host.operations[-4][0], "read-standalone")
-                    self.assertEqual(host.operations[-3][0], "authorize-successor")
+                    self.assertEqual(host.operations[-6][0], "schedule-standalone")
+                    self.assertEqual(host.operations[-5][0], "read-standalone")
+                    self.assertEqual(host.operations[-4][0], "authorize-successor")
+                    self.assertEqual(host.operations[-3][0], "cleanup-worktree")
                     self.assertEqual(host.operations[-2][0], "activate-task")
                     self.assertEqual(result["scheduled_task_id"], "task-2")
                 with self.assertRaises(StandaloneInvocationError):
@@ -738,6 +745,58 @@ class DefaultHostWakeContractTests(unittest.TestCase):
         self.assertEqual(host.state["scheduled_task_disposition"], "PAUSED")
         self.assertIn(("pause-task", "task-2"), host.operations)
         self.assertTrue(invocation.ended)
+
+    def test_worktree_cleanup_precedes_successor_activation_and_completion(self) -> None:
+        host = InMemoryHost(
+            state=waiting_checkpoint(),
+            wake_ids=("fresh-wake-2",),
+        )
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+        invocation.begin()
+        invocation.snapshot()
+
+        result = invocation.complete(reanchor_succeeds=True)
+
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        operation_names = [operation[0] for operation in host.operations]
+        self.assertLess(
+            operation_names.index("cleanup-worktree"),
+            operation_names.index("activate-task"),
+        )
+        self.assertLess(
+            operation_names.index("cleanup-worktree"),
+            operation_names.index("complete-wake"),
+        )
+
+    def test_worktree_cleanup_failure_persists_blocker_before_activation(self) -> None:
+        host = InMemoryHost(
+            state=waiting_checkpoint(),
+            wake_ids=("fresh-wake-2",),
+            cleanup_succeeds=False,
+        )
+        invocation = HostInvocation(host, scheduled=True, now=NEXT_WAKE)
+        invocation.begin()
+        invocation.snapshot()
+
+        result = invocation.complete(reanchor_succeeds=True)
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "worktree_cleanup_unconfirmed")
+        self.assertEqual(
+            result["evidence"],
+            {
+                "successor_task_id": "task-2",
+                "worktree_cleanup_confirmed": False,
+                "pause_confirmed": True,
+            },
+        )
+        self.assertEqual(host.state["scheduled_task_disposition"], "PAUSED")
+        self.assertEqual(
+            host.state["failure_latch"]["reason_code"],
+            "worktree_cleanup_unconfirmed",
+        )
+        self.assertEqual(host.created_tasks["task-2"]["status"], "PAUSED")
+        self.assertNotIn(("activate-task", "task-2"), host.operations)
 
     def test_incomplete_batch_publication_cannot_schedule_a_successor(self) -> None:
         host = InMemoryHost(

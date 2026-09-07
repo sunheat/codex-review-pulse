@@ -391,6 +391,30 @@ if successor_result is success:
           --schedule-reanchored --scheduled-created-at SUCCESSOR.created_at \
           --scheduled-first-run SUCCESSOR.first_run --scheduled-task-id SUCCESSOR_ID
         require result.next_action == SUCCESSOR_AUTHORIZED
+        # Finalize the task-owned worktree while the successor is still paused.
+        # The configured checkout remains available for checkpoint writes after
+        # the worktree is removed and pruned.
+        WORKTREE_CLEANUP_CONFIRMED = host.cleanup_worktree() is confirmed
+        if not WORKTREE_CLEANUP_CONFIRMED:
+            PAUSE_CONFIRMED = host.pause_task(SUCCESSOR_ID) is confirmed
+            FAILURE_FILE = write_json(
+                {
+                    "reason_code": (
+                        "worktree_cleanup_unconfirmed"
+                        if PAUSE_CONFIRMED
+                        else "successor_cleanup_unconfirmed"
+                    ),
+                    "evidence": {
+                        "successor_task_id": SUCCESSOR_ID,
+                        "worktree_cleanup_confirmed": false,
+                        "pause_confirmed": PAUSE_CONFIRMED,
+                    },
+                }
+            )
+            completion = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
+              --completion-failure FAILURE_FILE
+            report completion
+            END_INVOCATION
         # Activation is another complete metadata-preserving task update.
         require host.activate_task(SUCCESSOR_ID) is confirmed
         ACTUAL_FIRST_RUN = SUCCESSOR.first_run
@@ -422,11 +446,13 @@ if successor_result is success:
         )
         # Do not pass --schedule-reanchored or --scheduled-task-id: this
         # successor was not verified as the active next task.
-        completion = PULSE TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
+        completion = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
           --completion-failure FAILURE_FILE
         report completion
         END_INVOCATION
-    completion = PULSE TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
+    # Worktree cleanup has completed, so use the configured checkpoint-capable
+    # locator for the final lifecycle write.
+    completion = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
       --schedule-reanchored --scheduled-created-at SUCCESSOR.created_at \
       --scheduled-first-run ACTUAL_FIRST_RUN \
       --scheduled-task-id SUCCESSOR_ID
@@ -435,7 +461,7 @@ if successor_result is success:
 else:
     # Do not pass --schedule-reanchored. This persists PAUSE_BLOCKED /
     # scheduled_task_reanchor_unavailable.
-    completion = PULSE TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake
+    completion = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake
     report completion
     END_INVOCATION
 ```
@@ -741,20 +767,28 @@ invocation:
    canonical handoff, require its creation timestamp to be at or after the
    chosen completion timestamp at scheduler precision, and derive its first
    run as the whole-second-truncated creation time plus cadence. Persist
-   authorize-successor with those verified values while the task is paused. Activate only
-   that verified successor before `complete-wake`; missing-ID creation evidence
-   can therefore leave only a paused task.
+   authorize-successor with those verified values while the task is paused. Before
+   activation, verify the task-owned worktree is clean, remove it, and prune its
+   administrative entry while the configured checkout remains available for the
+   checkpoint write. If cleanup is not confirmed, pause the successor and call
+   `complete-wake --completion-failure` from that checkpoint-capable checkout to
+   persist the cleanup blocker; do not activate the successor. After cleanup is
+   confirmed, activate only that verified successor, then call `complete-wake`
+   from the configured checkout; missing-ID creation evidence can therefore leave
+   only a paused task.
    If a host restart occurs after authorization but before activation, do not
    treat `AUTHORIZED` as `ACTIVE`: read back the exact authorized task and
    either activate it with the full metadata-preserving update followed by
    `reconcile-successor --action activate --confirmed`, or keep it paused and
    call `reconcile-successor --action pause --confirmed` to persist a
    fail-closed recovery latch.
-11. After successor creation and readback succeed, call `complete-wake` exactly
-    once with the same completion timestamp, `--schedule-reanchored`,
-    `--scheduled-created-at`, the derived `--scheduled-first-run`, and
-    `--scheduled-task-id` for the successor. A stale or mismatched readback
-    persists a blocker and must not authorize another wake.
+11. After successor creation, readback, authorization, and confirmed worktree
+     cleanup succeed, call `complete-wake` exactly once from the configured
+     checkpoint-capable checkout with the same completion timestamp,
+     `--schedule-reanchored`, `--scheduled-created-at`, the derived
+     `--scheduled-first-run`, and `--scheduled-task-id` for the successor. A stale
+     or mismatched readback, or an unconfirmed cleanup, persists a blocker and
+     must not activate another wake.
 12. If successor creation or readback fails, call `complete-wake` exactly once
     without `--schedule-reanchored`; this persists the re-anchor blocker and
     keeps the delivered task paused.

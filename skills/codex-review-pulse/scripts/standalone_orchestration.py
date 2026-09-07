@@ -62,6 +62,9 @@ class StandaloneTaskHost(Protocol):
     def read_task(self, task_id: str) -> Mapping[str, Any]:
         """Read normalized task metadata and the persisted first-run timestamp."""
 
+    def cleanup_worktree(self) -> object:
+        """Verify, remove, and prune this wake's task-owned worktree."""
+
     def authorize_successor(
         self,
         *,
@@ -276,6 +279,12 @@ class StandaloneInvocation:
     def _pause_successor(self, task_id: str) -> bool:
         try:
             return _confirmed(self.host.pause_task(task_id))
+        except Exception:
+            return False
+
+    def _cleanup_worktree(self) -> bool:
+        try:
+            return _confirmed(self.host.cleanup_worktree())
         except Exception:
             return False
 
@@ -659,6 +668,26 @@ class StandaloneInvocation:
                         "Standalone successor authorization was not confirmed"
                     )
                 authorization_confirmed = True
+                if not self._cleanup_worktree():
+                    pause_confirmed = self._pause_successor(successor_id)
+                    return self._finish_completion(
+                        now=now,
+                        actual_first_run=observed_first_run,
+                        successor_id=successor_id,
+                        scheduled_created_at=scheduled_created_at,
+                        completion_failure={
+                            "reason_code": (
+                                "worktree_cleanup_unconfirmed"
+                                if pause_confirmed
+                                else "successor_cleanup_unconfirmed"
+                            ),
+                            "evidence": {
+                                "successor_task_id": successor_id,
+                                "worktree_cleanup_confirmed": False,
+                                "pause_confirmed": pause_confirmed,
+                            },
+                        },
+                    )
                 if not _confirmed(self.host.activate_task(successor_id)):
                     raise StandaloneInvocationError(
                         "Standalone successor activation was not confirmed"
