@@ -409,7 +409,7 @@ if successor_result is success:
         require SUCCESSOR.first_run matches EXPECTED_FIRST_RUN at scheduler precision
         # Authorization is setup evidence only. The wake remains active and
         # the task remains paused until complete-wake durably finalizes it.
-        PULSE TARGET --wake-id WAKE_ID --now COMPLETION_NOW authorize-successor \
+        PULSE CHECKPOINT_TARGET --wake-id WAKE_ID --now COMPLETION_NOW authorize-successor \
           --schedule-reanchored --scheduled-created-at SUCCESSOR.created_at \
           --scheduled-first-run SUCCESSOR.first_run --scheduled-task-id SUCCESSOR_ID
         require result.next_action == SUCCESSOR_AUTHORIZED

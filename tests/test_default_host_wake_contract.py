@@ -286,6 +286,7 @@ class HostInvocation:
         retirement: bool = False,
     ) -> None:
         self.host = host
+        self.retirement = retirement
         self.invocation = StandaloneInvocation(
             host,
             task_id=task_id,
@@ -328,6 +329,11 @@ class HostInvocation:
             delivered_task_id=delivered_task_id,
             setup_task_provenance=setup_task_provenance,
         )
+        if not self.retirement and delivered_task_id is not None:
+            # This harness branch intentionally models the pre-retirement
+            # direct callback integration; the production path must retain the
+            # registered predecessor and use the exact retirement callbacks.
+            self.host.state["task_retirement"] = None
         return result
 
     def _complete_wake(

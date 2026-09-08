@@ -562,6 +562,52 @@ class PulseCliTests(unittest.TestCase):
         )
         self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
 
+    def test_complete_wake_persists_malformed_authorized_failure(self) -> None:
+        fixture = CliHarness.default_fixture()
+        fixture["eyes"] = [{
+            "id": "EYES1",
+            "content": "EYES",
+            "createdAt": "2026-08-26T00:00:00+00:00",
+            "user": {"login": "chatgpt-codex-connector"},
+        }]
+        harness = CliHarness(self, fixture=fixture)
+        harness.begin_and_snapshot()
+        schedule = (
+            "--schedule-reanchored",
+            "--scheduled-created-at",
+            "2026-08-26T00:01:00+00:00",
+            "--scheduled-first-run",
+            "2026-08-26T00:11:00+00:00",
+            "--scheduled-task-id",
+            "task-1",
+        )
+        harness.json_output(harness.run("authorize-successor", *schedule, now="2026-08-26T00:01:00+00:00"))
+        failure_path = Path(harness.directory.name) / "malformed-completion-failure.json"
+        failure_path.write_text(json.dumps({"evidence": {}}), encoding="utf-8")
+
+        result = harness.json_output(
+            harness.run(
+                "complete-wake",
+                "--completion-failure",
+                str(failure_path),
+                now="2026-08-26T00:01:00+00:00",
+            )
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "completion_failure_malformed")
+        state = load_checkpoint(
+            checkpoint_path("owner/repo", 17, repository_path=harness.checkout)
+        )
+        self.assertEqual(
+            state["failure_latch"]["reason_code"],
+            "completion_failure_malformed",
+        )
+        self.assertEqual(
+            state["failure_latch"]["evidence"]["completion_failure"],
+            {"evidence": {}},
+        )
+
     def test_prompt_policy_is_persisted_on_initial_wake_and_can_be_updated(self) -> None:
         harness = CliHarness(self)
         initial = harness.json_output(

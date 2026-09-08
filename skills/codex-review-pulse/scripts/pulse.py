@@ -2132,6 +2132,16 @@ def confirm_task_retirement(
     state["scheduled_task_id"] = None
     state["scheduled_task_disposition"] = "NONE"
     state["wake_phase"] = "retirement_recovery"
+    latch = state.get("failure_latch")
+    if (
+        isinstance(latch, Mapping)
+        and latch.get("reason_code") == "task_retirement_not_confirmed"
+    ):
+        # A prior non-deletion pause ended the active wake, but exact
+        # reconciliation has now restored the handoff's irreversible boundary.
+        # Keep the retirement-specific latch until successor recovery consumes
+        # it, while restoring ownership for that handoff-only recovery.
+        state["active_wake_id"] = wake_id
     result = _decision(
         "RETIREMENT_CONFIRMED",
         "task_retirement_confirmed",
@@ -2439,7 +2449,9 @@ def recover_retirement_successor(
     latch = state.get("failure_latch")
     if latch is not None:
         if not isinstance(latch, Mapping) or latch.get("reason_code") not in {
+            "task_retirement_not_confirmed",
             "task_retirement_unknown",
+            "completion_failure_malformed",
             "successor_creation_rejected",
             "successor_creation_unknown",
             "completion_anchor_unavailable",
@@ -2584,9 +2596,35 @@ def complete_wake(
         decision.get("mutation_occurred")
     )
     if completion_failure is not None:
-        reason_code = completion_failure.get("reason_code")
+        reason_code = (
+            completion_failure.get("reason_code")
+            if isinstance(completion_failure, Mapping)
+            else None
+        )
         if not isinstance(reason_code, str) or not reason_code.strip():
-            raise ValueError("Completion failure reason code is required")
+            malformed_evidence = {
+                "completion_failure": (
+                    deepcopy(dict(completion_failure))
+                    if isinstance(completion_failure, Mapping)
+                    else None
+                ),
+                "validation_error": "completion_failure_reason_code_missing_or_invalid",
+            }
+            result = _pause(
+                state,
+                reason_code="completion_failure_malformed",
+                now=now,
+                evidence=malformed_evidence,
+                action="PAUSE_RECOVERY",
+                mutation_occurred=mutation_occurred,
+            )
+            if authorized_handoff and not (
+                isinstance(state.get("task_retirement"), Mapping)
+                and state["task_retirement"].get("phase") == "confirmed"
+            ):
+                state["successor_authorization"] = None
+            state["last_wake_id"] = wake_id
+            return state, result
         result = _pause(
             state,
             reason_code=reason_code,
@@ -2905,11 +2943,10 @@ def authorize_successor(
             scheduler_precision=True,
         ):
             raise DefaultWakeError("Recovered successor authorization first run does not match")
-    elif isinstance(retirement, Mapping) and retirement.get("phase") == "registered":
-        # Direct callback integrations from before retirement support never
-        # supplied outer provenance or a delete controller.  They are kept as
-        # a compatibility input only and cannot claim exact-task retirement.
-        state["task_retirement"] = None
+    elif isinstance(retirement, Mapping):
+        raise DefaultWakeError(
+            "Successor authorization requires confirmed predecessor retirement"
+        )
     next_not_before = expected_first_run
     state["successor_authorization"] = {
         "wake_id": wake_id,
@@ -3984,16 +4021,6 @@ def main() -> None:
                 raise RuntimeError(
                     "--completion-failure cannot be combined with --schedule-reanchored"
                 )
-        if completion_failure and (
-            (state.get("successor_authorization") or {}).get("wake_id")
-            == args.wake_id
-        ):
-            result = _pause(
-                state, reason_code=completion_failure["reason_code"], now=now,
-                evidence=completion_failure.get("evidence"), action="PAUSE_RECOVERY",
-            )
-            _write(path, state, result)
-            return
         state, result = complete_wake(
             state,
             wake_id=args.wake_id,
