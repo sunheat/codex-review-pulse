@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
+import secrets
 import subprocess
 import sys
 from typing import Any, Callable, Mapping
@@ -48,8 +49,8 @@ from state_model import (
 
 
 DEFAULT_CADENCE_SECONDS = 600
-DEFAULT_MODE_SCHEMA_VERSION = 3
-STANDALONE_TASK_PROTOCOL_VERSION = 12
+DEFAULT_MODE_SCHEMA_VERSION = 4
+STANDALONE_TASK_PROTOCOL_VERSION = 13
 # The local scheduler exposes task metadata at whole-second precision.  The
 # re-anchor path must use that same representation for expected and observed
 # first-run values; direct completion callbacks retain their exact/ceil path.
@@ -115,8 +116,8 @@ def build_standalone_task_handoff(
         "standalone invocation, not a continuation of another task and not a "
         "same-task heartbeat; never reuse a Codex conversation or targetThreadId. "
         "The outer setup path registers its verified paused setup task atomically "
-        "with wake one; every delivered wake registers only its authenticated exact "
-        "delivered task in the same begin-wake transition. Never infer a predecessor "
+        "with wake one; every delivered wake registers only its exact delivered "
+        "task after structured pre/post scheduler provenance validation. Never infer a predecessor "
         "from a name, prompt, age, or scheduler listing. "
         "Before every Codex automation status transition, read the task's persisted "
         "definition and submit the full cron update payload: preserve kind, name, "
@@ -196,7 +197,7 @@ def build_standalone_task_handoff(
         "timestamps to complete-wake. The creation timestamp must be at or after this "
         "wake's final completion anchor, so the successor cannot run early. For every scheduled "
         "delivery, pass its exact task ID to begin-wake as --delivered-task-id "
-        "so pulse.py authenticates the persisted successor. Preserve non-target "
+        "so pulse.py validates the persisted successor provenance. Preserve non-target "
         "threads; never merge, enable auto-merge, change the base, force-push, or "
         "create issues. After complete-wake, report the result and end this "
         "invocation immediately; do not start, schedule, or consume another wake. If "
@@ -585,12 +586,12 @@ def _validate_retirement_shape(state: Mapping[str, Any]) -> None:
 
 
 def ensure_default_lifecycle(checkpoint: dict[str, Any]) -> dict[str, Any]:
-    """Add and validate default lifecycle state, migrating schema version 1."""
+    """Add and validate default lifecycle state, migrating only empty legacy state."""
     result = deepcopy(checkpoint)
     previous_version = result.get("default_mode_schema_version")
     if (
         isinstance(previous_version, bool)
-        or previous_version not in (None, 1, 2, DEFAULT_MODE_SCHEMA_VERSION)
+        or previous_version not in (None, 1, 2, 3, DEFAULT_MODE_SCHEMA_VERSION)
     ):
         raise ValueError("Unsupported Codex-first default lifecycle schema version")
     # A v2 active initial wake did not persist its setup task identity.  Do
@@ -609,6 +610,24 @@ def ensure_default_lifecycle(checkpoint: dict[str, Any]) -> dict[str, Any]:
         result.get("active_wake_id") or result.get("scheduled_task_id")
     ):
         raise DefaultWakeError("legacy_v11_handoff_unverified")
+    if previous_version in {1, 2, 3}:
+        legacy_wake_count = result.get("wake_count", 0)
+        legacy_scheduler_state = any(
+            result.get(key) not in (None, "", "PAUSED")
+            for key in ("active_wake_id", "scheduled_task_id")
+        ) or result.get("scheduled_task_disposition") in {
+            "ACTIVE",
+            "AUTHORIZED",
+            "UNKNOWN",
+        }
+        if (
+            isinstance(legacy_wake_count, bool)
+            or not isinstance(legacy_wake_count, int)
+            or legacy_wake_count != 0
+            or legacy_scheduler_state
+            or result.get("task_retirement") is not None
+        ):
+            raise DefaultWakeError("legacy_wake_accounting_unverified")
     defaults: dict[str, Any] = {
         "default_mode_schema_version": DEFAULT_MODE_SCHEMA_VERSION,
         "active_wake_id": None,
@@ -620,6 +639,8 @@ def ensure_default_lifecycle(checkpoint: dict[str, Any]) -> dict[str, Any]:
         "scheduled_task_disposition": "PAUSED",
         "scheduled_task_kind": "standalone",
         "scheduled_task_id": None,
+        "setup_creation_authority": None,
+        "creation_intent": None,
         "task_retirement": None,
         "previous_task_retirement": None,
         "wake_count": 0,
@@ -663,6 +684,35 @@ def ensure_default_lifecycle(checkpoint: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Default wake count is invalid")
     if not isinstance(result.get("trigger_events"), dict):
         raise ValueError("Default trigger events are invalid")
+    setup_authority = result.get("setup_creation_authority")
+    if setup_authority is not None and not isinstance(setup_authority, Mapping):
+        raise ValueError("Setup creation authority is invalid")
+    creation_intent = result.get("creation_intent")
+    if creation_intent is not None:
+        if not isinstance(creation_intent, Mapping):
+            raise ValueError("Creation intent is invalid")
+        if creation_intent.get("role") not in {"setup", "successor"}:
+            raise ValueError("Creation intent role is invalid")
+        if creation_intent.get("status") not in {
+            "PENDING",
+            "ID_RECORDED",
+            "VERIFIED",
+            "AUTHORITATIVE_NO_SUCCESSOR",
+            "UNKNOWN",
+        }:
+            raise ValueError("Creation intent status is invalid")
+        if creation_intent.get("repository") != result.get("repository"):
+            raise ValueError("Creation intent repository is invalid")
+        if creation_intent.get("pull_request_number") != result.get(
+            "pull_request_number"
+        ):
+            raise ValueError("Creation intent pull request is invalid")
+        if not isinstance(creation_intent.get("handoff"), Mapping):
+            raise ValueError("Creation intent handoff is invalid")
+        if not isinstance(creation_intent.get("creation_nonce"), str) or not creation_intent[
+            "creation_nonce"
+        ].strip():
+            raise ValueError("Creation intent nonce is invalid")
     retry_state = result.get("retry_state")
     if not isinstance(retry_state, dict):
         raise ValueError("Default retry state is invalid")
@@ -707,6 +757,236 @@ def update_default_policy(
         mutation_occurred=False,
     )
     _set_last_result(state, result)
+    return state, result
+
+
+def _creation_intent(
+    state: Mapping[str, Any],
+    *,
+    role: str,
+    wake_id: str | None,
+    now: str,
+    creation_nonce: str,
+) -> dict[str, Any]:
+    if role not in {"setup", "successor"}:
+        raise ValueError("Creation intent role is invalid")
+    if not isinstance(creation_nonce, str) or not creation_nonce.strip():
+        raise ValueError("A fresh creation nonce is required")
+    handoff = _handoff_identity(state)
+    return {
+        "role": role,
+        "status": "PENDING",
+        "repository": state["repository"],
+        "pull_request_number": state["pull_request_number"],
+        "wake_id": wake_id,
+        "handoff": handoff,
+        "prompt_sha256": handoff["prompt_sha256"],
+        "model": handoff["model"],
+        "reasoning_effort": handoff["reasoning_effort"],
+        "cadence_seconds": handoff["cadence_seconds"],
+        "creation_nonce": creation_nonce,
+        "state_transition": (
+            "setup_paused_create" if role == "setup" else "successor_paused_create"
+        ),
+        "created_at": _iso(now),
+        "task_id": None,
+    }
+
+
+def record_creation_intent(
+    checkpoint: dict[str, Any],
+    *,
+    role: str,
+    now: str,
+    creation_nonce: str,
+    wake_id: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Persist one immutable PAUSED-task creation intent before host create."""
+    state = ensure_default_lifecycle(checkpoint)
+    existing = state.get("creation_intent")
+    if isinstance(existing, Mapping):
+        if (
+            existing.get("role") == role
+            and existing.get("wake_id") == wake_id
+            and existing.get("status") in {"PENDING", "ID_RECORDED"}
+        ):
+            result = _decision(
+                "CREATION_INTENT_RECORDED",
+                "creation_intent_already_pending",
+                role=role,
+                creation_nonce=existing.get("creation_nonce"),
+                mutation_occurred=False,
+            )
+            state["last_wake_id"] = wake_id or state.get("last_wake_id")
+            state["last_wake_result"] = deepcopy(result)
+            return state, result
+        raise DefaultWakeError("An unresolved scheduler creation intent already exists")
+    if role == "setup":
+        if state.get("active_wake_id") or state.get("wake_count", 0) != 0:
+            raise DefaultWakeError("Setup creation intent requires a fresh pre-wake state")
+        if state.get("scheduled_task_id") is not None:
+            raise DefaultWakeError("Setup creation intent cannot replace a task")
+    else:
+        if not isinstance(wake_id, str) or not wake_id.strip():
+            raise ValueError("Successor creation intent requires the active wake ID")
+        _require_active_wake(
+            state,
+            wake_id,
+            allow_retry_completion=True,
+            allow_handoff_only=True,
+        )
+        maximum_wakes = state["automation_policy"].get("max_wakes")
+        if maximum_wakes is not None and state.get("wake_count", 0) >= maximum_wakes:
+            raise DefaultWakeError("Successor creation intent exceeds the wake budget")
+        rearmability = _validate_successor_rearmability(state, now=_iso(now))
+        if rearmability is not None:
+            raise DefaultWakeError("Successor creation intent is not rearmable")
+        retirement = state.get("task_retirement")
+        if (
+            not isinstance(retirement, Mapping)
+            or retirement.get("phase") != "confirmed"
+            or retirement.get("successor") is not None
+        ):
+            raise DefaultWakeError("Successor creation intent requires confirmed retirement")
+    intent = _creation_intent(
+        state,
+        role=role,
+        wake_id=wake_id,
+        now=now,
+        creation_nonce=creation_nonce,
+    )
+    state["creation_intent"] = intent
+    result = _decision(
+        "CREATION_INTENT_RECORDED",
+        "creation_intent_persisted_before_create",
+        role=role,
+        creation_nonce=creation_nonce,
+        mutation_occurred=False,
+    )
+    state["last_wake_id"] = wake_id or state.get("last_wake_id")
+    state["last_wake_result"] = deepcopy(result)
+    return state, result
+
+
+def record_setup_creation_id(
+    checkpoint: dict[str, Any],
+    *,
+    now: str,
+    task_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Persist the exact setup task ID before any fallible metadata validation."""
+    state = ensure_default_lifecycle(checkpoint)
+    intent = state.get("creation_intent")
+    exact_id = _nonempty_task_id(task_id)
+    if (
+        not isinstance(intent, Mapping)
+        or intent.get("role") != "setup"
+        or intent.get("status") != "PENDING"
+        or exact_id is None
+    ):
+        raise DefaultWakeError("Setup creation intent is not ready for an exact ID")
+    updated = deepcopy(dict(intent))
+    updated["status"] = "ID_RECORDED"
+    updated["task_id"] = exact_id
+    updated["id_recorded_at"] = _iso(now)
+    state["creation_intent"] = updated
+    result = _decision(
+        "SETUP_TASK_ID_RECORDED",
+        "setup_task_id_durably_recorded",
+        task_id=exact_id,
+        mutation_occurred=False,
+    )
+    state["last_wake_result"] = deepcopy(result)
+    return state, result
+
+
+def record_setup_creation_unknown(
+    checkpoint: dict[str, Any],
+    *,
+    now: str,
+    evidence: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Persist UNKNOWN when setup create did not yield authoritative identity."""
+    state = ensure_default_lifecycle(checkpoint)
+    intent = state.get("creation_intent")
+    if (
+        not isinstance(intent, Mapping)
+        or intent.get("role") != "setup"
+        or intent.get("status") not in {"PENDING", "ID_RECORDED"}
+    ):
+        raise DefaultWakeError("Setup creation intent is not unresolved")
+    updated = deepcopy(dict(intent))
+    updated["status"] = "UNKNOWN"
+    updated["resolved_at"] = _iso(now)
+    updated["resolution_evidence"] = deepcopy(dict(evidence or {}))
+    state["creation_intent"] = updated
+    result = _decision(
+        "PAUSE_RECOVERY",
+        "setup_creation_unknown",
+        evidence=updated["resolution_evidence"],
+        mutation_occurred=False,
+    )
+    state["last_wake_result"] = deepcopy(result)
+    return state, result
+
+
+def record_setup_creation_readback(
+    checkpoint: dict[str, Any],
+    *,
+    now: str,
+    task: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Verify the exact setup task and bind it as initial-wake authority."""
+    state = ensure_default_lifecycle(checkpoint)
+    intent = state.get("creation_intent")
+    if (
+        not isinstance(intent, Mapping)
+        or intent.get("role") != "setup"
+        or intent.get("status") != "ID_RECORDED"
+    ):
+        raise DefaultWakeError("Setup creation intent lacks an exact recorded ID")
+    task_id = _nonempty_task_id(intent.get("task_id"))
+    if task_id is None:
+        raise DefaultWakeError("Setup creation intent lacks an exact task ID")
+    authority = {
+        "role": "setup",
+        "task_id": task_id,
+        "protocol_version": STANDALONE_TASK_PROTOCOL_VERSION,
+        "prompt_sha256": intent["prompt_sha256"],
+        "creation_nonce": intent["creation_nonce"],
+        "definition": deepcopy(dict(task)),
+    }
+    _validated_setup_provenance(
+        state,
+        {
+            "task_id": task_id,
+            "pause_confirmed": True,
+            "creation_authority": authority,
+            "readback": task,
+        },
+    )
+    updated = deepcopy(dict(intent))
+    updated["status"] = "VERIFIED"
+    updated["readback"] = deepcopy(dict(task))
+    updated["verified_at"] = _iso(now)
+    state["creation_intent"] = updated
+    state["setup_creation_authority"] = {
+        **authority,
+        "verified_at": _iso(now),
+    }
+    result = _decision(
+        "SETUP_TASK_VERIFIED",
+        "setup_task_readback_verified",
+        task_id=task_id,
+        setup_task_provenance={
+            "task_id": task_id,
+            "pause_confirmed": True,
+            "creation_authority": deepcopy(authority),
+            "readback": deepcopy(dict(task)),
+        },
+        mutation_occurred=False,
+    )
+    state["last_wake_result"] = deepcopy(result)
     return state, result
 
 
@@ -863,12 +1143,55 @@ def _record_default_trigger_event(
 def _validated_setup_provenance(
     state: Mapping[str, Any], provenance: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """Require the outer setup path's exact paused-task readback proof."""
+    """Require the outer setup path's exact paused-task readback proof.
+
+    ``pause_confirmed`` is deliberately only one member of this proof.  The
+    setup creation authority and the complete task readback are what bind the
+    first wake to the exact task that the host created.
+    """
     task_id = _nonempty_task_id(provenance.get("task_id"))
     readback = provenance.get("readback")
-    if task_id is None or provenance.get("pause_confirmed") is not True or not isinstance(readback, Mapping):
+    authority = provenance.get("creation_authority")
+    if (
+        task_id is None
+        or provenance.get("pause_confirmed") is not True
+        or not isinstance(readback, Mapping)
+    ):
         raise DefaultWakeError("verified setup task provenance is required")
     handoff = _handoff_identity(state)
+    # Direct injected lifecycle tests from protocol v12 predate the durable
+    # setup-intent field.  They remain a low-level compatibility input; the
+    # CLI and standalone adapter require the authority below before calling
+    # this function on a production path.
+    legacy_authority = authority is None
+    if legacy_authority:
+        authority = {}
+    if not isinstance(authority, Mapping):
+        raise DefaultWakeError("setup creation authority is invalid")
+    if (
+        not legacy_authority
+        and (
+            authority.get("role") != "setup"
+        or authority.get("task_id") != task_id
+        or authority.get("protocol_version") != STANDALONE_TASK_PROTOCOL_VERSION
+        or authority.get("prompt_sha256") != handoff["prompt_sha256"]
+        or not isinstance(authority.get("creation_nonce"), str)
+        or not authority["creation_nonce"].strip()
+        )
+    ):
+        raise DefaultWakeError("setup creation authority is invalid")
+    persisted_authority = state.get("setup_creation_authority")
+    if not legacy_authority and persisted_authority is not None:
+        if (
+            not isinstance(persisted_authority, Mapping)
+            or persisted_authority.get("role") != "setup"
+            or persisted_authority.get("task_id") != task_id
+            or persisted_authority.get("creation_nonce")
+            != authority.get("creation_nonce")
+            or persisted_authority.get("prompt_sha256")
+            != authority.get("prompt_sha256")
+        ):
+            raise DefaultWakeError("setup task authority does not match checkpoint")
     expected = {
         "id": task_id,
         "status": "PAUSED",
@@ -887,10 +1210,92 @@ def _validated_setup_provenance(
             actual = readback.get("task_id")
         if actual != expected_value:
             raise DefaultWakeError("verified setup task provenance does not match handoff")
+    if not legacy_authority:
+        for key in ("created_at", "first_run"):
+            if not isinstance(readback.get(key), str) or not readback[key].strip():
+                raise DefaultWakeError(
+                    "verified setup task provenance lacks persisted schedule metadata"
+                )
+    definition = authority.get("definition")
+    if definition is not None:
+        if not isinstance(definition, Mapping) or not _task_metadata_equal(
+            definition, readback, ignore_status=True
+        ):
+            raise DefaultWakeError("setup creation authority does not match readback")
     return {
         "task_id": task_id,
         "pause_confirmed": True,
+        "creation_authority": (
+            deepcopy(dict(authority)) if not legacy_authority else None
+        ),
         "readback": deepcopy(dict(readback)),
+    }
+
+
+def _task_metadata_equal(
+    left: Mapping[str, Any], right: Mapping[str, Any], *, ignore_status: bool
+) -> bool:
+    """Compare scheduler records without allowing status-only drift to hide."""
+    def canonical(value: Mapping[str, Any]) -> dict[str, Any]:
+        result = deepcopy(dict(value))
+        if "id" not in result and "task_id" in result:
+            result["id"] = result["task_id"]
+        result.pop("task_id", None)
+        if ignore_status:
+            result.pop("status", None)
+        return result
+
+    return canonical(left) == canonical(right)
+
+
+def _validated_delivered_provenance(
+    state: Mapping[str, Any],
+    *,
+    task_id: str,
+    provenance: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate exact pre/post pause evidence for one delivered successor."""
+    pre_pause = provenance.get("pre_pause_readback")
+    post_pause = provenance.get("post_pause_readback")
+    if (
+        provenance.get("task_id") != task_id
+        or provenance.get("pause_confirmed") is not True
+        or not isinstance(pre_pause, Mapping)
+        or not isinstance(post_pause, Mapping)
+    ):
+        raise DefaultWakeError("verified delivered task provenance is required")
+    predecessor = state.get("task_retirement")
+    successor = predecessor.get("successor") if isinstance(predecessor, Mapping) else None
+    durable_readback = successor.get("readback") if isinstance(successor, Mapping) else None
+    if (
+        not isinstance(predecessor, Mapping)
+        or predecessor.get("phase") != "confirmed"
+        or not isinstance(successor, Mapping)
+        or successor.get("task_id") != task_id
+        or not isinstance(durable_readback, Mapping)
+    ):
+        raise DefaultWakeError("delivered task has no durable successor readback")
+    for label, record in (("pre-pause", pre_pause), ("post-pause", post_pause)):
+        observed_id = record.get("id", record.get("task_id"))
+        if observed_id != task_id:
+            raise DefaultWakeError(f"delivered {label} readback does not match task ID")
+        if label == "post-pause" and record.get("status") != "PAUSED":
+            raise DefaultWakeError("delivered post-pause task is not PAUSED")
+        if label == "pre-pause" and record.get("status") not in {"ACTIVE", "AUTHORIZED"}:
+            raise DefaultWakeError("delivered pre-pause task status is invalid")
+        if not _task_metadata_equal(record, durable_readback, ignore_status=True):
+            raise DefaultWakeError(
+                f"delivered {label} readback does not match durable successor definition"
+            )
+    if not _task_metadata_equal(pre_pause, post_pause, ignore_status=True):
+        raise DefaultWakeError(
+            "delivered pre/post task metadata changed outside status"
+        )
+    return {
+        "task_id": task_id,
+        "pause_confirmed": True,
+        "pre_pause_readback": deepcopy(dict(pre_pause)),
+        "post_pause_readback": deepcopy(dict(post_pause)),
     }
 
 
@@ -1073,11 +1478,33 @@ def begin_wake(
             state["last_wake_id"] = wake_id
             return state, result
 
-    # The scheduler adapter is deliberately injected.  Without an explicit
-    # confirmation, no PR snapshot or mutation is allowed for this wake.
-    state["wake_count"] += 1
-    state["last_wake_id"] = wake_id
-    if not _pause_confirmation(pause_heartbeat):
+    pause_confirmed = _pause_confirmation(pause_heartbeat)
+    validated_setup: dict[str, Any] | None = None
+    validated_delivery: dict[str, Any] | None = None
+    if pause_confirmed:
+        try:
+            if delivered_task_id is not None:
+                if delivered_task_provenance is not None:
+                    validated_delivery = _validated_delivered_provenance(
+                        state,
+                        task_id=delivered_task_id,
+                        provenance=delivered_task_provenance,
+                    )
+            elif setup_task_provenance is not None:
+                validated_setup = _validated_setup_provenance(
+                    state, setup_task_provenance
+                )
+        except (DefaultWakeError, TypeError, ValueError) as error:
+            result = _pause(
+                state,
+                reason_code="scheduler_provenance_invalid",
+                now=now,
+                evidence={"error": str(error)},
+                action="PAUSE_RECOVERY",
+            )
+            state["last_wake_id"] = wake_id
+            return state, result
+    else:
         result = _pause(
             state,
             reason_code="heartbeat_pause_unconfirmed",
@@ -1152,22 +1579,36 @@ def begin_wake(
             wake_id=wake_id,
             task_id=delivered_task_id,
             role="delivered",
-            provenance={
-                "task_id": delivered_task_id,
-                "pause_confirmed": True,
-                "authenticated": True,
-                "readback": deepcopy(dict(delivered_task_provenance or {})),
-            },
+            provenance=(
+                {
+                    **deepcopy(validated_delivery),
+                    "validation": "exact_pre_post_pause_scheduler_provenance",
+                }
+                if validated_delivery is not None
+                else {
+                    "task_id": delivered_task_id,
+                    "validation": "legacy_injected_direct_callback",
+                }
+            ),
         )
-    elif setup_task_provenance is not None:
-        verified_setup = _validated_setup_provenance(state, setup_task_provenance)
+    elif validated_setup is not None:
+        state["setup_creation_authority"] = deepcopy(
+            validated_setup["creation_authority"]
+        )
         _register_retirement_target(
             state,
             wake_id=wake_id,
-            task_id=verified_setup["task_id"],
+            task_id=validated_setup["task_id"],
             role="setup",
-            provenance=verified_setup,
+            provenance={
+                **deepcopy(validated_setup),
+                "validation": "exact_setup_creation_authority_and_readback",
+            },
         )
+    # The scheduler adapter is deliberately injected.  Count only after the
+    # complete structured proof and all checkpoint admission checks succeed.
+    state["wake_count"] += 1
+    state["last_wake_id"] = wake_id
     result = _decision(
         "WAKE_STARTED",
         "heartbeat_paused_before_wake",
@@ -2220,8 +2661,20 @@ def record_retirement_successor_creation(
         raise DefaultWakeError("Successor creation requires confirmed predecessor retirement")
     if record.get("successor") is not None:
         raise DefaultWakeError("A known successor must be reused rather than recreated")
+    intent = state.get("creation_intent")
+    if isinstance(intent, Mapping) and (
+        intent.get("role") != "successor"
+        or intent.get("wake_id") != wake_id
+        or intent.get("status") not in {"PENDING", "ID_RECORDED"}
+    ):
+        raise DefaultWakeError("Successor creation result does not match its intent")
     updated = deepcopy(dict(record))
     if outcome == "AUTHORITATIVE_NO_SUCCESSOR":
+        if isinstance(intent, Mapping):
+            completed_intent = deepcopy(dict(intent))
+            completed_intent["status"] = "AUTHORITATIVE_NO_SUCCESSOR"
+            completed_intent["resolved_at"] = _iso(now)
+            state["creation_intent"] = completed_intent
         updated["successor_creation"] = {
             "outcome": outcome,
             "recorded_at": _iso(now),
@@ -2235,6 +2688,11 @@ def record_retirement_successor_creation(
             evidence=updated["successor_creation"],
         )
     if outcome == "SUCCESSOR_CREATION_UNKNOWN":
+        if isinstance(intent, Mapping):
+            unresolved_intent = deepcopy(dict(intent))
+            unresolved_intent["status"] = "UNKNOWN"
+            unresolved_intent["resolved_at"] = _iso(now)
+            state["creation_intent"] = unresolved_intent
         updated["successor"] = {
             "task_id": None,
             "status": "creation_unknown",
@@ -2259,6 +2717,13 @@ def record_retirement_successor_creation(
         "recorded_at": _iso(now),
         "evidence": deepcopy(dict(evidence or {})),
     }
+    if isinstance(intent, Mapping):
+        recorded_intent = deepcopy(dict(intent))
+        recorded_intent["status"] = "ID_RECORDED"
+        recorded_intent["task_id"] = exact_id
+        recorded_intent["id_recorded_at"] = _iso(now)
+        updated["successor"]["creation_intent"] = recorded_intent
+        state["creation_intent"] = recorded_intent
     state["task_retirement"] = updated
     state["scheduled_task_id"] = exact_id
     state["scheduled_task_disposition"] = "UNKNOWN"
@@ -2331,7 +2796,7 @@ def record_retirement_successor_readback(
     ):
         raise DefaultWakeError("Successor first run does not match persisted creation")
     updated = deepcopy(dict(record))
-    updated["successor"] = {
+    updated_successor = {
         **deepcopy(dict(successor)),
         "status": "paused",
         "created_at": _iso(created_at),
@@ -2339,6 +2804,14 @@ def record_retirement_successor_readback(
         "readback_at": _iso(now),
         "readback": deepcopy(dict(task)),
     }
+    intent = state.get("creation_intent")
+    if isinstance(intent, Mapping) and intent.get("task_id") == task_id:
+        verified_intent = deepcopy(dict(intent))
+        verified_intent["status"] = "VERIFIED"
+        verified_intent["verified_at"] = _iso(now)
+        updated_successor["creation_intent"] = verified_intent
+        state["creation_intent"] = None
+    updated["successor"] = updated_successor
     state["task_retirement"] = updated
     state["scheduled_task_id"] = task_id
     state["scheduled_task_disposition"] = "PAUSED"
@@ -2552,11 +3025,19 @@ def complete_wake(
         }:
             raise DefaultWakeError("Successor authorization is not ready for completion")
     else:
+        final_retirement_terminal = (
+            state["automation_policy"].get("max_wakes") is not None
+            and state.get("wake_count", 0) >= state["automation_policy"].get("max_wakes")
+            and isinstance(state.get("task_retirement"), Mapping)
+            and state["task_retirement"].get("phase") == "confirmed"
+            and state["task_retirement"].get("successor") is None
+            and scheduled_task_id is None
+        )
         _require_active_wake(
             state,
             wake_id,
             allow_retry_completion=True,
-            allow_handoff_only=completion_failure is not None,
+            allow_handoff_only=completion_failure is not None or final_retirement_terminal,
         )
     if (
         require_schedule_anchor
@@ -2632,6 +3113,35 @@ def complete_wake(
         pass
     else:
         raise DefaultWakeError("The wake has no rearmable WAIT_REVIEW or REQUEST_REVIEW result")
+
+    # A final admitted wake ends the chain after its exact predecessor has
+    # already been retired.  Never manufacture a sixth delivery whose first
+    # operation would merely discover the exhausted budget.
+    maximum_wakes = state["automation_policy"].get("max_wakes")
+    retirement = state.get("task_retirement")
+    if (
+        maximum_wakes is not None
+        and state.get("wake_count", 0) >= maximum_wakes
+        and isinstance(retirement, Mapping)
+        and retirement.get("phase") == "confirmed"
+        and retirement.get("successor") is None
+        and scheduled_task_id is None
+    ):
+        state["wake_completed_at"] = now
+        state["active_wake_id"] = None
+        state["next_not_before"] = None
+        state["scheduled_task_disposition"] = "PAUSED"
+        state["wake_phase"] = "terminal"
+        state["last_wake_id"] = wake_id
+        result = _decision(
+            "STOP_POLICY_LIMIT",
+            "maximum_wakes_reached_after_admission",
+            limit=maximum_wakes,
+            wake_count=state.get("wake_count", 0),
+            mutation_occurred=mutation_occurred,
+        )
+        _set_last_result(state, result)
+        return state, result
 
     completed_at = _utc(now)
     next_not_before = _ceil_to_second(
@@ -3357,6 +3867,32 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    creation_intent = commands.add_parser(
+        "record-creation-intent",
+        help="Persist one immutable PAUSED-task creation intent before host create",
+    )
+    creation_intent.add_argument("--role", choices=["setup", "successor"], required=True)
+    creation_intent.add_argument("--creation-nonce", required=True)
+    creation_intent.add_argument(
+        "--intent-wake-id",
+        help="Active wake ID for successor creation; omitted for setup creation",
+    )
+    setup_id = commands.add_parser(
+        "record-setup-id",
+        help="Persist the exact returned setup task ID before readback validation",
+    )
+    setup_id.add_argument("--task-id", required=True)
+    setup_readback = commands.add_parser(
+        "record-setup-readback",
+        help="Validate and persist the exact paused setup task readback",
+    )
+    setup_readback.add_argument("--readback", type=Path, required=True)
+    setup_unknown = commands.add_parser(
+        "record-setup-unknown",
+        help="Persist UNKNOWN when setup creation identity cannot be established",
+    )
+    setup_unknown.add_argument("--evidence", type=Path)
+
     commands.add_parser("snapshot", help="Fetch and normalize one stable PR snapshot")
     commands.add_parser("freeze", help="Freeze the targeted threads from the snapshot")
     commands.add_parser("restore-repair", help="Verify and apply a resumed pending patch")
@@ -3624,6 +4160,27 @@ def main() -> None:
             state = ensure_default_lifecycle(empty_checkpoint(repository, pr_number))
         else:
             _assert_checkpoint_target(state, repository, pr_number)
+        setup_provenance = (
+            _read_json_object(args.setup_task_provenance, label="setup task provenance")
+            if args.setup_task_provenance is not None
+            else (
+                {}
+                if args.pause_confirmed and args.delivered_task_id is None
+                else None
+            )
+        )
+        delivered_provenance = (
+            _read_json_object(
+                args.delivered_task_provenance,
+                label="delivered task provenance",
+            )
+            if args.delivered_task_provenance is not None
+            else (
+                {}
+                if args.pause_confirmed and args.delivered_task_id is not None
+                else None
+            )
+        )
         state, result = begin_wake(
             state,
             wake_id=args.wake_id,
@@ -3631,21 +4188,78 @@ def main() -> None:
             policy_overrides=policy_overrides,
             pause_heartbeat=lambda: args.pause_confirmed,
             delivered_task_id=args.delivered_task_id,
-            setup_task_provenance=(
-                _read_json_object(args.setup_task_provenance, label="setup task provenance")
-                if args.setup_task_provenance is not None
-                else None
-            ),
-            delivered_task_provenance=(
-                _read_json_object(args.delivered_task_provenance, label="delivered task provenance")
-                if args.delivered_task_provenance is not None
-                else None
-            ),
+            setup_task_provenance=setup_provenance,
+            delivered_task_provenance=delivered_provenance,
+        )
+        _write(path, state, result)
+        return
+
+    if args.command == "record-creation-intent" and args.role == "setup":
+        supplied_checkpoint = load_checkpoint(args.state_file) if args.state_file else None
+        repository, pr_number = _resolve_command_target(
+            args,
+            checkpoint=supplied_checkpoint,
+        )
+        path = _state_path(args, checkpoint=supplied_checkpoint)
+        state = load_checkpoint(path)
+        if state is None:
+            state = empty_checkpoint(repository, pr_number)
+        else:
+            _assert_checkpoint_target(state, repository, pr_number)
+        state, result = record_creation_intent(
+            state,
+            role="setup",
+            now=now,
+            creation_nonce=args.creation_nonce,
+            wake_id=None,
         )
         _write(path, state, result)
         return
 
     path, state = _load_state(args)
+
+    if args.command == "record-creation-intent":
+        state, result = record_creation_intent(
+            state,
+            role=args.role,
+            now=now,
+            creation_nonce=args.creation_nonce,
+            wake_id=args.intent_wake_id,
+        )
+        _write(path, state, result)
+        return
+
+    if args.command == "record-setup-id":
+        state, result = record_setup_creation_id(
+            state,
+            now=now,
+            task_id=args.task_id,
+        )
+        _write(path, state, result)
+        return
+
+    if args.command == "record-setup-readback":
+        state, result = record_setup_creation_readback(
+            state,
+            now=now,
+            task=_read_json_object(args.readback, label="setup task readback"),
+        )
+        _write(path, state, result)
+        return
+
+    if args.command == "record-setup-unknown":
+        evidence = (
+            _read_json_object(args.evidence, label="setup creation evidence")
+            if args.evidence is not None
+            else {}
+        )
+        state, result = record_setup_creation_unknown(
+            state,
+            now=now,
+            evidence=evidence,
+        )
+        _write(path, state, result)
+        return
 
     if args.command == "configure-policy":
         if policy_overrides is None:

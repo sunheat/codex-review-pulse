@@ -30,9 +30,12 @@ wake, and continued after `PAUSE_BLOCKED` by clearing a latch with a generated
 recovery authorization. The old scheduled-task semantics must not be used as
 the default or described as production-ready.
 
-Version `0.8.10` is the current Codex-first default clean-context scheduling candidate.
-Its real scheduled-task and live GitHub integration remains unverified until an
-independent forward test completes.
+Version `0.8.11` is the current Codex-first default clean-context lifecycle
+hardening contract (checkpoint schema v4, standalone protocol v13). Its real
+scheduled-task and live GitHub integration remains unverified until an
+independent forward test completes. `wake_count` counts admitted wakes only;
+raw `--pause-confirmed` is not admission authority, and portable Python cannot
+guarantee a Desktop pre-model scheduler gate or unattended liveness.
 
 Default checkpoint writes use atomic file replacement under the target
 repository's Git common directory. The checkpoint includes `wake_id`, wake
@@ -45,9 +48,10 @@ results remain `PAUSED`.
 The optional hardened files remain for compatibility testing and future
 supervised revalidation. They are documented in
 [`hardened.md`](skills/codex-review-pulse/references/hardened.md) and are not
-default prerequisites. The default policy is designed to make unattended
-operation possible, but live scheduled-task integration remains a pilot item
-until independently forward-tested.
+default prerequisites. The default path is fail-closed for malformed or
+incomplete scheduler evidence, but unattended liveness still depends on a
+Desktop host pre-model delivery gate and remains a pilot item until
+independently forward-tested.
 
 The project checks executed by CI are network-free and cover the full test suite
 and publication validation on Windows and Ubuntu with Python 3.11 and 3.12.
@@ -86,7 +90,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py update \
   --source-repository . \
   --source-commit "$commit"
 python "$HOME/.agents/skills/codex-review-pulse/scripts/manage_pilot_install.py" verify \
-  --expected-version 0.8.10 \
+  --expected-version 0.8.11 \
   --expected-source-commit "$commit"
 ```
 
@@ -104,7 +108,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
   --source-repository . `
   --source-commit $commit
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
-  --expected-version 0.8.10 `
+  --expected-version 0.8.11 `
   --expected-source-commit $commit
 ```
 
@@ -115,7 +119,7 @@ no other runner targets the PR:
 ```powershell
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_preflight.py `
   --repo OWNER/REPO --pr NUMBER `
-  --expected-skill-version 0.8.10 `
+  --expected-skill-version 0.8.11 `
   --expected-source-commit $commit `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector `

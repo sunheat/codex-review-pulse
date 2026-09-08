@@ -149,8 +149,34 @@ registered to pending to confirmed retirement before successor creation. The
 checkpoint distinguishes no current task (`NONE`) from externally unprovable
 state (`UNKNOWN`), retains only bounded predecessor evidence, and permits only
 handoff recovery after retirement. It never discovers tasks heuristically or
-adds scheduler-wide cleanup. Existing v11 active chains without immutable
-handoff evidence fail closed and require an explicit fresh setup.
+adds scheduler-wide cleanup.
+
+## 0.8.11 lifecycle hardening
+
+Version `0.8.11` publishes default checkpoint schema v4 and standalone
+protocol v13. A wake is counted only after successful admission: `wake_count`
+does not include attempted invocations, scheduler delivery, pause failures,
+rejected or ambiguous provenance, duplicate calls, or completion. The raw
+`--pause-confirmed` input is only a host observation and is not admission
+authority.
+
+Scheduler mutations require strict pre/post provenance for the exact task ID
+and persisted metadata. Every task-creation attempt first records a durable
+creation intent, then reconciles that intent with the exact task ID and
+post-creation readback. Ambiguous results remain paused; task names, prompts,
+ages, and scheduler-wide listings cannot substitute for exact evidence.
+
+Legacy schema-v3 state with a non-zero `wake_count` or an active task chain
+fails closed rather than being silently migrated or replayed; explicit fresh
+setup is required. The exact-ID retirement contract remains unchanged:
+`NONE` is confirmed retirement with no current task, while `UNKNOWN` is
+unavailable exact scheduler truth and is not absence.
+
+The portable Python controller documents and enforces safety boundaries once
+invoked, but it cannot guarantee a Desktop pre-model scheduler gate. Public
+claims are therefore limited to safety and fail-closed behavior, not
+unattended liveness or proven continuous unattended Desktop operation. Real
+scheduled-task and live GitHub integration remain unverified.
 
 ## Deferred milestones
 

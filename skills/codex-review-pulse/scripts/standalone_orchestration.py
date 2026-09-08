@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 import hashlib
+import secrets
 from threading import RLock
 from typing import Any, Callable, Mapping, Protocol
 
@@ -117,8 +118,13 @@ ConfirmRetirement = Callable[[str, str, str, str, str, Mapping[str, Any] | None]
 RecordSuccessorCreation = Callable[
     [str, str, str, str | None, str | None, Mapping[str, Any] | None], Mapping[str, Any]
 ]
+RecordSuccessorIntent = Callable[[str, str, str], Mapping[str, Any]]
 RecordSuccessorReadback = Callable[[str, str, Mapping[str, Any]], Mapping[str, Any]]
 RecordSuccessorPause = Callable[[str, str, str, bool, Mapping[str, Any] | None], Mapping[str, Any]]
+RecordSetupIntent = Callable[[str, str], Mapping[str, Any]]
+RecordSetupID = Callable[[str, str], Mapping[str, Any]]
+RecordSetupReadback = Callable[[str, Mapping[str, Any]], Mapping[str, Any]]
+RecordSetupUnknown = Callable[[str, Mapping[str, Any]], Mapping[str, Any]]
 
 
 def _confirmed(value: object) -> bool:
@@ -251,8 +257,77 @@ def _validate_task_readback(
             )
 
 
+def _task_metadata_equal(
+    left: Mapping[str, Any], right: Mapping[str, Any], *, ignore_status: bool
+) -> bool:
+    """Compare all host-round-trippable task fields, except status when allowed."""
+    def canonical(value: Mapping[str, Any]) -> dict[str, Any]:
+        result = deepcopy(dict(value))
+        if "id" not in result and "task_id" in result:
+            result["id"] = result["task_id"]
+        result.pop("task_id", None)
+        if ignore_status:
+            result.pop("status", None)
+        return result
+
+    return canonical(left) == canonical(right)
+
+
+def _validate_delivered_provenance(
+    checkpoint: Mapping[str, Any],
+    *,
+    task_id: str,
+    pre_pause: Mapping[str, Any],
+    post_pause: Mapping[str, Any],
+) -> None:
+    """Validate the exact task definition before and after the pause update."""
+    retirement = checkpoint.get("task_retirement")
+    successor = retirement.get("successor") if isinstance(retirement, Mapping) else None
+    durable = successor.get("readback") if isinstance(successor, Mapping) else None
+    if (
+        not isinstance(retirement, Mapping)
+        or retirement.get("phase") != "confirmed"
+        or not isinstance(successor, Mapping)
+        or successor.get("task_id") != task_id
+        or not isinstance(durable, Mapping)
+    ):
+        raise StandaloneInvocationError(
+            "delivered task has no durable successor readback"
+        )
+    for label, task in (("pre-pause", pre_pause), ("post-pause", post_pause)):
+        observed_id = task.get("id", task.get("task_id"))
+        if observed_id != task_id:
+            raise StandaloneInvocationError(
+                f"delivered {label} readback does not match task ID"
+            )
+        if label == "pre-pause" and task.get("status") not in {
+            "ACTIVE",
+            "AUTHORIZED",
+        }:
+            raise StandaloneInvocationError(
+                "delivered pre-pause task status is invalid"
+            )
+        if label == "post-pause" and task.get("status") != "PAUSED":
+            raise StandaloneInvocationError(
+                "delivered post-pause task is not PAUSED"
+            )
+        if not _task_metadata_equal(task, durable, ignore_status=True):
+            raise StandaloneInvocationError(
+                f"delivered {label} readback does not match durable successor definition"
+            )
+    if not _task_metadata_equal(pre_pause, post_pause, ignore_status=True):
+        raise StandaloneInvocationError(
+            "delivered pre/post task metadata changed outside status"
+        )
+
+
 def scheduled_preflight(
-    checkpoint: Mapping[str, Any], *, now: str, task_id: str | None = None
+    checkpoint: Mapping[str, Any],
+    *,
+    now: str,
+    task_id: str | None = None,
+    pre_pause_readback: Mapping[str, Any] | None = None,
+    post_pause_readback: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Return a fail-closed result before ``begin-wake`` or ``None`` if ready."""
     try:
@@ -289,6 +364,27 @@ def scheduled_preflight(
                 ),
             },
         }
+    if pre_pause_readback is not None or post_pause_readback is not None:
+        if not isinstance(pre_pause_readback, Mapping) or not isinstance(
+            post_pause_readback, Mapping
+        ):
+            return {
+                "next_action": "PAUSE_RECOVERY",
+                "reason_code": "scheduler_provenance_invalid",
+            }
+        try:
+            _validate_delivered_provenance(
+                checkpoint,
+                task_id=task_id,
+                pre_pause=pre_pause_readback,
+                post_pause=post_pause_readback,
+            )
+        except StandaloneInvocationError as error:
+            return {
+                "next_action": "PAUSE_RECOVERY",
+                "reason_code": "scheduler_provenance_invalid",
+                "evidence": {"error": str(error)},
+            }
     next_not_before = checkpoint.get("next_not_before")
     if next_not_before:
         try:
@@ -307,6 +403,77 @@ def scheduled_preflight(
     return None
 
 
+def create_initial_setup_task(
+    host: StandaloneTaskHost,
+    *,
+    prompt: str,
+    cadence_seconds: int,
+    model: str,
+    reasoning_effort: str,
+    record_setup_intent: RecordSetupIntent,
+    record_setup_id: RecordSetupID,
+    record_setup_readback: RecordSetupReadback,
+    record_setup_unknown: RecordSetupUnknown,
+    creation_nonce: str | None = None,
+) -> dict[str, Any]:
+    """Journal, create, identify, and verify exactly one paused setup task.
+
+    This helper deliberately stops at setup verification.  It does not admit
+    a wake; the caller must pass the returned structured provenance to
+    ``begin-wake`` in a later lifecycle transition.
+    """
+    nonce = creation_nonce or secrets.token_urlsafe(18)
+    now = _iso(host.now_utc())
+    intent = record_setup_intent(now, nonce)
+    if intent.get("next_action") != "CREATION_INTENT_RECORDED":
+        raise StandaloneInvocationError("Setup creation intent was not persisted")
+    response = host.schedule_standalone_task(
+        prompt=prompt,
+        cadence_seconds=cadence_seconds,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        scheduler_kind="cron",
+        conversation_mode="standalone",
+        target_thread_id=None,
+        prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        status="PAUSED",
+    )
+    try:
+        task_id = _task_id(response)
+    except StandaloneInvocationError:
+        record_setup_unknown(
+            now,
+            {"creation_response": deepcopy(response)},
+        )
+        raise
+    recorded_id = record_setup_id(now, task_id)
+    if recorded_id.get("next_action") != "SETUP_TASK_ID_RECORDED":
+        raise StandaloneInvocationError("Setup task ID was not durably recorded")
+    task = host.read_task(task_id)
+    _validate_task_readback(
+        task,
+        task_id=task_id,
+        prompt=prompt,
+        prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        cadence_seconds=cadence_seconds,
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
+    verified = record_setup_readback(now, task)
+    if verified.get("next_action") != "SETUP_TASK_VERIFIED":
+        raise StandaloneInvocationError("Setup task readback was not verified")
+    provenance = verified.get("setup_task_provenance")
+    if not isinstance(provenance, Mapping):
+        raise StandaloneInvocationError(
+            "Setup readback callback did not return structured provenance"
+        )
+    return {
+        "task_id": task_id,
+        "readback": deepcopy(dict(task)),
+        "provenance": deepcopy(dict(provenance)),
+    }
+
+
 class StandaloneInvocation:
     """Serialize host operations for exactly one standalone task delivery."""
 
@@ -323,6 +490,7 @@ class StandaloneInvocation:
         setup_task_provenance: Mapping[str, Any] | None = None,
         prepare_retirement: PrepareRetirement | None = None,
         confirm_retirement: ConfirmRetirement | None = None,
+        record_successor_intent: RecordSuccessorIntent | None = None,
         record_successor_creation: RecordSuccessorCreation | None = None,
         record_successor_readback: RecordSuccessorReadback | None = None,
         record_successor_pause: RecordSuccessorPause | None = None,
@@ -346,10 +514,12 @@ class StandaloneInvocation:
         )
         self.prepare_retirement = prepare_retirement
         self.confirm_retirement = confirm_retirement
+        self.record_successor_intent = record_successor_intent
         self.record_successor_creation = record_successor_creation
         self.record_successor_readback = record_successor_readback
         self.record_successor_pause = record_successor_pause
         self.allow_legacy_direct_callbacks = allow_legacy_direct_callbacks
+        self.strict_scheduler_evidence = not allow_legacy_direct_callbacks
         self.prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         self.wake_id: str | None = None
         self.started = False
@@ -415,8 +585,14 @@ class StandaloneInvocation:
                 raise StandaloneInvocationError("Host returned an invalid wake ID")
 
             if self.scheduled:
+                pre_pause_readback: Mapping[str, Any] | None = None
+                post_pause_readback: Mapping[str, Any] | None = None
                 try:
+                    if self.strict_scheduler_evidence:
+                        pre_pause_readback = self.host.read_task(self.task_id)
                     pause_confirmed = _confirmed(self.host.pause_task(self.task_id))
+                    if pause_confirmed and self.strict_scheduler_evidence:
+                        post_pause_readback = self.host.read_task(self.task_id)
                 except Exception:
                     pause_confirmed = False
                 if not pause_confirmed:
@@ -427,6 +603,7 @@ class StandaloneInvocation:
                             False,
                             self.task_id if self.scheduled else None,
                             None,
+                            {} if self.strict_scheduler_evidence else None,
                         )
                     except Exception:
                         return self._end(
@@ -454,7 +631,15 @@ class StandaloneInvocation:
                     )
                 try:
                     preflight = scheduled_preflight(
-                        checkpoint, now=self.now, task_id=self.task_id
+                        checkpoint,
+                        now=self.now,
+                        task_id=self.task_id,
+                        pre_pause_readback=pre_pause_readback
+                        if self.strict_scheduler_evidence
+                        else None,
+                        post_pause_readback=post_pause_readback
+                        if self.strict_scheduler_evidence
+                        else None,
                     )
                 except Exception:
                     preflight = {
@@ -462,13 +647,27 @@ class StandaloneInvocation:
                         "reason_code": "checkpoint_invalid",
                     }
                 if preflight is not None:
+                    invalid_provenance = (
+                        {
+                            "task_id": self.task_id,
+                            "pause_confirmed": True,
+                            "pre_pause_readback": dict(pre_pause_readback or {}),
+                            "post_pause_readback": dict(post_pause_readback or {}),
+                        }
+                        if self.strict_scheduler_evidence
+                        and preflight.get("reason_code") == "scheduler_provenance_invalid"
+                        else None
+                    )
                     try:
                         persisted = self.begin_wake(
                             self.wake_id,
                             self.now,
-                            False,
+                            True if invalid_provenance is not None else False,
                             self.task_id if self.scheduled else None,
                             None,
+                            invalid_provenance
+                            if invalid_provenance is not None
+                            else ({} if self.strict_scheduler_evidence else None),
                         )
                     except Exception:
                         return self._end(
@@ -491,7 +690,25 @@ class StandaloneInvocation:
                 self.now,
                 True,
                 self.task_id if self.scheduled else None,
-                self.setup_task_provenance if not self.scheduled else None,
+                (
+                    (
+                        self.setup_task_provenance
+                        if self.setup_task_provenance is not None
+                        else ({ } if self.strict_scheduler_evidence else None)
+                    )
+                    if not self.scheduled
+                    else None
+                ),
+                (
+                    {
+                        "task_id": self.task_id,
+                        "pause_confirmed": True,
+                        "pre_pause_readback": dict(pre_pause_readback or {}),
+                        "post_pause_readback": dict(post_pause_readback or {}),
+                    }
+                    if self.scheduled and self.strict_scheduler_evidence
+                    else None
+                ),
             )
             if not isinstance(result, Mapping) or "next_action" not in result:
                 raise StandaloneInvocationError("begin-wake returned an invalid result")
@@ -735,11 +952,22 @@ class StandaloneInvocation:
                 for callback in (
                     self.prepare_retirement,
                     self.confirm_retirement,
+                    self.record_successor_intent,
                     self.record_successor_creation,
                     self.record_successor_readback,
                     self.record_successor_pause,
                 )
             )
+            if self.strict_scheduler_evidence and not retirement_enabled:
+                return self._finish_completion(
+                    now=now,
+                    actual_first_run=None,
+                    successor_id=None,
+                    completion_failure={
+                        "reason_code": "retirement_controller_unavailable",
+                        "evidence": {"creation_intent_required": True},
+                    },
+                )
             if not retirement_enabled and not self.allow_legacy_direct_callbacks:
                 # A registered predecessor is deletion authority only when the
                 # complete injected controller is present.  Do not silently
@@ -818,6 +1046,50 @@ class StandaloneInvocation:
                 if retirement.get("next_action") != "RETIREMENT_CONFIRMED":
                     return self._end(retirement)
             try:
+                post_retirement_checkpoint = self.host.read_checkpoint_directly()
+            except Exception:
+                post_retirement_checkpoint = {}
+            post_retirement_policy = (
+                post_retirement_checkpoint.get("automation_policy")
+                if isinstance(post_retirement_checkpoint, Mapping)
+                else None
+            )
+            post_retirement_retirement = (
+                post_retirement_checkpoint.get("task_retirement")
+                if isinstance(post_retirement_checkpoint, Mapping)
+                else None
+            )
+            maximum_wakes = (
+                post_retirement_policy.get("max_wakes")
+                if isinstance(post_retirement_policy, Mapping)
+                else None
+            )
+            if (
+                maximum_wakes is not None
+                and isinstance(post_retirement_checkpoint, Mapping)
+                and post_retirement_checkpoint.get("wake_count", 0) >= maximum_wakes
+                and isinstance(post_retirement_retirement, Mapping)
+                and post_retirement_retirement.get("phase") == "confirmed"
+                and post_retirement_retirement.get("successor") is None
+            ):
+                try:
+                    terminal_completion_now = _iso(self.host.now_utc())
+                except Exception:
+                    return self._finish_completion(
+                        now=now,
+                        actual_first_run=None,
+                        successor_id=None,
+                        completion_failure={
+                            "reason_code": "completion_anchor_unavailable",
+                            "evidence": {"final_wake_budget": maximum_wakes},
+                        },
+                    )
+                return self._finish_completion(
+                    now=terminal_completion_now,
+                    actual_first_run=None,
+                    successor_id=None,
+                )
+            try:
                 completion_now = _iso(self.host.now_utc())
             except Exception as error:
                 return self._finish_completion(
@@ -832,6 +1104,44 @@ class StandaloneInvocation:
             completion = _utc(completion_now)
 
             try:
+                if self.strict_scheduler_evidence:
+                    if self.record_successor_intent is None:
+                        return self._finish_completion(
+                            now=completion_now,
+                            actual_first_run=None,
+                            successor_id=None,
+                            completion_failure={
+                                "reason_code": "creation_intent_persistence_failed",
+                                "evidence": {"role": "successor"},
+                            },
+                        )
+                    try:
+                        existing_intent = self.host.read_checkpoint_directly().get(
+                            "creation_intent"
+                        )
+                    except Exception:
+                        existing_intent = None
+                    if isinstance(existing_intent, Mapping):
+                        if existing_intent.get("role") != "successor":
+                            raise StandaloneInvocationError(
+                                "An unresolved non-successor creation intent blocks rearm"
+                            )
+                        recorded = self.record_successor_creation(  # type: ignore[misc]
+                            self.wake_id,
+                            completion_now,
+                            "SUCCESSOR_CREATION_UNKNOWN",
+                            None,
+                            None,
+                            {"unresolved_creation_intent": dict(existing_intent)},
+                        )
+                        return self._end(recorded)
+                    intent_result = self.record_successor_intent(
+                        self.wake_id,
+                        completion_now,
+                        secrets.token_urlsafe(18),
+                    )
+                    if intent_result.get("next_action") != "CREATION_INTENT_RECORDED":
+                        return self._end(intent_result)
                 response = self.host.schedule_standalone_task(
                     prompt=self.prompt,
                     cadence_seconds=cadence_seconds,

@@ -28,10 +28,44 @@ the old heartbeat activated too early, used fixed-cadence overlap, allowed a
 and continued after `PAUSE_BLOCKED`. Do not describe `0.4.0` as production
 ready or use its old scheduled-task protocol as the default.
 
-Version `0.8.10` is the Codex-first default clean-context scheduling candidate. Its
-real scheduled-task and live GitHub integration remains unverified until an
-independent forward test completes; do not describe that integration as proven
-before then.
+Version `0.8.11` is the lifecycle-hardening contract for the Codex-first
+default clean-context scheduler. It defines default checkpoint schema v4 and
+standalone handoff protocol v13. Real scheduled-task and live GitHub
+integration remains unverified until an independent forward test completes;
+do not describe that integration as proven before then.
+
+### Public lifecycle identifiers and admission contract
+
+The default standalone lifecycle uses checkpoint schema v4 and standalone
+protocol v13. `wake_count` is admission accounting: it increments exactly
+once only after a wake has passed all required preflight and provenance checks
+and has been successfully admitted. Invocation attempts, scheduler delivery,
+pause failures, rejected or ambiguous provenance, duplicate/idempotent calls,
+and completion do not increment it.
+
+The raw `--pause-confirmed` input is not admission authority. It records a
+host observation only; it cannot create, replace, or override proof that the
+delivered task and scheduler state were read and verified. Scheduler mutations
+therefore require strict pre/post scheduler provenance bound to the exact task
+ID and the expected persisted metadata. If either side is missing, ambiguous,
+or mismatched, the lifecycle remains paused and fails closed.
+
+Before a scheduler task-creation call, the lifecycle durably journals the
+creation intent. The intent is reconciled with the exact returned task ID and
+post-creation readback; an uncertain result remains paused and cannot be
+resolved through name, prompt, age, or scheduler-list discovery.
+
+Legacy schema-v3 state with a non-zero `wake_count` or an active task chain is
+not silently migrated into schema v4. It fails closed and requires explicit
+fresh setup. Exact-ID predecessor retirement remains mandatory: `NONE` means
+confirmed retirement with no current task, while `UNKNOWN` means exact
+scheduler truth is unavailable and is not evidence of absence.
+
+The portable Python controller can enforce lifecycle safety and fail-closed
+behavior once it is invoked, but it cannot guarantee that Desktop supplies a
+pre-model scheduler gate. The public contract therefore claims safety, not
+unattended liveness; it does not claim proven continuous unattended Desktop
+operation or infer such a gate from a flag, native plan, or test result.
 
 ## Default control surface
 
@@ -48,7 +82,9 @@ alias), `begin-wake`, `snapshot`,
 `freeze`, `record`, `resolve`, `retry`, `trigger-result`, `confirm-policy`,
 `prepare-publication`, `publication-result`, `configure-policy`, and
 `restore-repair`, `authorize-successor`, `complete-wake`, and
-`reconcile-successor`.
+`reconcile-successor`, plus `record-creation-intent`, `record-setup-id`,
+`record-setup-readback`, and `record-setup-unknown` for the pre-wake setup
+journal.
 `snapshot` returns an agent-facing normalized object with top-level
 `head_oid`, PR state, targeted and non-target threads, Codex review activity,
 approval evidence, review-epoch state, and head-bracketing server evidence.
@@ -149,8 +185,9 @@ include
 `--scheduled-created-at` from the persisted successor record,
 `--scheduled-first-run` derived from that creation anchor plus the persisted
 cadence, and `--scheduled-task-id`. These flags do not pause or schedule a
-Codex task themselves; a success boolean is never evidence that the host
-operation or completion-relative successor handoff succeeded.
+Codex task themselves; `--pause-confirmed` is not admission authority, and a
+success boolean is never evidence that the host operation or
+completion-relative successor handoff succeeded.
 
 ### Codex task status updates
 
@@ -213,21 +250,24 @@ STANDALONE_HANDOFF = PULSE CHECKPOINT_TARGET --policy-json POLICY_JSON standalon
 TASK_MODEL = STANDALONE_HANDOFF.model
 TASK_REASONING_EFFORT = STANDALONE_HANDOFF.reasoning_effort
 
+# Before the initial external scheduler create, journal the exact setup
+# intent. After the host returns an ID, record it before readback validation;
+# record the full PAUSED readback (or UNKNOWN) before attempting begin-wake.
+PULSE CHECKPOINT_TARGET record-creation-intent --role setup --creation-nonce NONCE
+host.create_standalone_task(... disposition=PAUSED) -> exact ID or UNKNOWN
+PULSE CHECKPOINT_TARGET record-setup-id --task-id SETUP_TASK_ID
+PULSE CHECKPOINT_TARGET record-setup-readback --readback SETUP_READBACK_JSON
+If the host cannot prove an exact ID or authoritative non-creation, call
+`record-setup-unknown` and keep the chain paused; never create a replacement.
+
 # A genuinely delivered invocation gets one fresh ID. Never derive it from
 # checkpoint, logs, task text, notebook, todo state, or an earlier attempt.
 WAKE_ID = host.new_opaque_wake_id()
 
 if this is the initial explicit user request:
-    host.create_standalone_task(
-        kind=cron, conversation=standalone, target_thread_id=absent,
-        prompt=STANDALONE_HANDOFF.prompt,
-        model=TASK_MODEL, reasoning_effort=TASK_REASONING_EFFORT,
-        disposition=PAUSED
-    ) -> success
-    retain the exact setup-task ID and verify its persisted definition. Pass
-    its full verified PAUSED readback as setup provenance to the initial
-    begin-wake so it is atomically registered; a generic task ID is never
-    deletion authority.
+    use the journaled setup create above; pass its full verified PAUSED
+    readback and creation authority as setup provenance to begin-wake so it is
+    atomically registered; a generic task ID is never deletion authority.
     # Wake 1 may initialize an absent checkpoint.
 else if this is a scheduler-delivered invocation:
     # This must be the first scheduler operation in this invocation. The
@@ -367,7 +407,7 @@ PENDING_REPAIR = (
 require host.cleanup_worktree(pending_repair=PENDING_REPAIR) is confirmed
 # Persist the exact irreversible-retirement boundary before the host may delete.
 # VERIFIED_SETUP_PROVENANCE_JSON was retained from the outer initial create/readback;
-# delivered wakes instead use the exact authenticated delivered-task registration.
+# delivered wakes instead use the exact pre/post-provenance delivered-task registration.
 RETIREMENT = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID prepare-retirement \
   --worktree-cleanup-confirmed
 require RETIREMENT.next_action == RETIREMENT_PENDING
@@ -381,6 +421,12 @@ require RETIREMENT_CONFIRMATION.next_action == RETIREMENT_CONFIRMED
 # begin another wake, or perform PR work. Explicit exact reconciliation is the
 # only retry path. No name/prompt/age/listing-based task discovery is permitted.
 COMPLETION_NOW = host.now_utc()
+# Persist the successor creation intent only after cleanup and confirmed exact
+# retirement. It authorizes exactly one PAUSED create and supplies a local
+# nonce; do not embed that nonce in the canonical prompt.
+PULSE CHECKPOINT_TARGET --wake-id WAKE_ID record-creation-intent \
+  --role successor --creation-nonce FRESH_OPAQUE_NONCE \
+  --intent-wake-id WAKE_ID
 successor_result = host.create_standalone_task(
     kind=cron, conversation=standalone, target_thread_id=absent,
     prompt=STANDALONE_HANDOFF.prompt, cadence_seconds=cadence_seconds,
@@ -490,10 +536,10 @@ current implementation.
 ## Native execution plan contract
 
 Native execution plans are user-visible execution telemetry, not durable
-workflow state. The supported and validated scope for this capability is the
-Codex Desktop scheduled-task workflow only. Do not detect Desktop versus CLI,
-add frontend-specific branches, or add CLI compatibility, fallback, prompt,
-or display behavior.
+workflow state. Do not infer a pre-model scheduler gate or unattended
+liveness from a native plan. Do not detect Desktop versus CLI, add
+frontend-specific branches, or add CLI compatibility, fallback, prompt, or
+display behavior.
 
 The setup conversation must create its Desktop-native execution plan before
 the first scheduler mutation and update it as setup proceeds, including task
@@ -579,6 +625,10 @@ result or rejects without incrementing `wake_count`; that idempotence does not
 make the repeated call a new wake. Lease renewal, snapshot refresh,
 completion, and recovery inspection are not new wakes. A stale or incomplete
 marker produces `PAUSE_RECOVERY`; it never auto-takes over the marker.
+
+Only a successfully admitted wake increments `wake_count`. The counter is
+not a measure of attempted invocations or raw scheduler signals, and a
+supplied `--pause-confirmed` value cannot admit a wake by itself.
 
 Before every scheduled `begin-wake`, directly inspect the current checkpoint:
 stop on a non-empty `active_wake_id`, `failure_latch`, or a future
@@ -735,8 +785,9 @@ invocation:
    returns success and the direct preflight passes. A pause failure may use an
    unconfirmed `begin-wake` only to persist `PAUSE_BLOCKED`, then ends this
    invocation. For every scheduled delivery, pass the delivered task's ID as
-   `--delivered-task-id`; `pulse.py` compares it with the checkpoint's persisted
-   active successor before starting the wake. The initial user wake has no
+   `--delivered-task-id`; `pulse.py` validates its structured pre/post
+   provenance against the checkpoint's persisted successor before starting the
+   wake. The initial user wake has no
    delivered successor ID and omits this option.
 8. Run this wake's snapshot, frozen batch, repair/retry, outcome/resolve, and
    aggregate publication work. Before freezing, require the wake worktree's

@@ -13,7 +13,11 @@ SCRIPTS = ROOT / "skills" / "codex-review-pulse" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import pulse  # noqa: E402
-from standalone_orchestration import StandaloneInvocation, StandaloneInvocationError  # noqa: E402
+from standalone_orchestration import (  # noqa: E402
+    StandaloneInvocation,
+    StandaloneInvocationError,
+    create_initial_setup_task,
+)
 from state_model import empty_checkpoint  # noqa: E402
 
 
@@ -61,6 +65,49 @@ def waiting_checkpoint(
         schedule_anchor_created_at="2026-08-26T00:26:00+00:00",
         scheduled_task_id="task-1",
     )
+    return state
+
+
+def strict_waiting_checkpoint() -> dict[str, object]:
+    state = waiting_checkpoint()
+    handoff = pulse._handoff_identity(state)
+    durable = {
+        "id": "task-1",
+        "status": "PAUSED",
+        "prompt": handoff["prompt"],
+        "prompt_sha256": handoff["prompt_sha256"],
+        "scheduler_kind": "cron",
+        "conversation_mode": "standalone",
+        "target_thread_id": None,
+        "model": handoff["model"],
+        "reasoning_effort": handoff["reasoning_effort"],
+        "cadence_seconds": handoff["cadence_seconds"],
+        "created_at": "2026-08-26T00:37:00+00:00",
+        "first_run": "2026-08-26T00:47:00+00:00",
+    }
+    state["task_retirement"] = {
+        "phase": "confirmed",
+        "wake_id": "seed-wake",
+        "task_id": "setup-task",
+        "role": "setup",
+        "provenance": {"task_id": "setup-task"},
+        "handoff": handoff,
+        "rearm": {
+            "action": "WAIT_REVIEW",
+            "source_action": "WAIT_REVIEW",
+            "proof": {"decision": deepcopy(state["last_decision"])},
+        },
+        "successor": {
+            "task_id": "task-1",
+            "status": "authorized",
+            "completion_anchor": "2026-08-26T00:36:00+00:00",
+            "created_at": durable["created_at"],
+            "first_run": durable["first_run"],
+            "readback": durable,
+        },
+    }
+    state["scheduled_task_id"] = "task-1"
+    state["scheduled_task_disposition"] = "AUTHORIZED"
     return state
 
 
@@ -202,6 +249,23 @@ class InMemoryHost:
 
     def read_task(self, task_id: str) -> dict[str, object]:
         self.operations.append(("read-standalone", task_id))
+        if task_id not in self.created_tasks:
+            retirement = (self.state or {}).get("task_retirement")
+            successor = (
+                retirement.get("successor")
+                if isinstance(retirement, dict)
+                else None
+            )
+            durable = (
+                successor.get("readback")
+                if isinstance(successor, dict)
+                else None
+            )
+            if isinstance(durable, dict) and successor.get("task_id") == task_id:
+                self.created_tasks[task_id] = {
+                    **deepcopy(durable),
+                    "status": "ACTIVE",
+                }
         task = self.created_tasks[task_id]
         return {
             **task,
@@ -296,6 +360,7 @@ class HostInvocation:
             complete_wake=self._complete_wake,
             prepare_retirement=self._prepare_retirement if retirement else None,
             confirm_retirement=self._confirm_retirement if retirement else None,
+            record_successor_intent=self._record_successor_intent if retirement else None,
             record_successor_creation=self._record_successor_creation if retirement else None,
             record_successor_readback=self._record_successor_readback if retirement else None,
             record_successor_pause=self._record_successor_pause if retirement else None,
@@ -317,6 +382,7 @@ class HostInvocation:
         pause_confirmed: bool,
         delivered_task_id: str | None,
         setup_task_provenance: dict[str, object] | None = None,
+        delivered_task_provenance: dict[str, object] | None = None,
     ) -> dict[str, object]:
         self.host.operations.append(("begin-wake", wake_id))
         state = self.host.state or empty_checkpoint("Owner/Repo", 17)
@@ -327,6 +393,7 @@ class HostInvocation:
             pause_heartbeat=lambda: pause_confirmed,
             delivered_task_id=delivered_task_id,
             setup_task_provenance=setup_task_provenance,
+            delivered_task_provenance=delivered_task_provenance,
         )
         return result
 
@@ -409,6 +476,19 @@ class HostInvocation:
         )
         return result
 
+    def _record_successor_intent(
+        self, wake_id: str, now: str, creation_nonce: str
+    ) -> dict[str, object]:
+        self.host.operations.append(("record-successor-intent", creation_nonce))
+        self.host.state, result = pulse.record_creation_intent(
+            self.host.state or {},
+            role="successor",
+            wake_id=wake_id,
+            now=now,
+            creation_nonce=creation_nonce,
+        )
+        return result
+
     def _record_successor_readback(
         self, wake_id: str, now: str, task: dict[str, object]
     ) -> dict[str, object]:
@@ -476,8 +556,73 @@ class HostInvocation:
 
 
 class DefaultHostWakeContractTests(unittest.TestCase):
+    def test_initial_setup_creation_is_journaled_without_admitting_a_wake(self) -> None:
+        host = InMemoryHost(
+            state=empty_checkpoint("Owner/Repo", 17),
+            created_at="2026-08-26T00:00:00+00:00",
+        )
+
+        def record_intent(now: str, nonce: str) -> dict[str, object]:
+            host.state, result = pulse.record_creation_intent(
+                host.state or {},
+                role="setup",
+                now=now,
+                creation_nonce=nonce,
+            )
+            return result
+
+        def record_id(now: str, task_id: str) -> dict[str, object]:
+            host.state, result = pulse.record_setup_creation_id(
+                host.state or {},
+                now=now,
+                task_id=task_id,
+            )
+            return result
+
+        def record_unknown(
+            now: str, evidence: dict[str, object]
+        ) -> dict[str, object]:
+            host.state, result = pulse.record_setup_creation_unknown(
+                host.state or {},
+                now=now,
+                evidence=evidence,
+            )
+            return result
+
+        def record_readback(
+            now: str, task: dict[str, object]
+        ) -> dict[str, object]:
+            host.state, result = pulse.record_setup_creation_readback(
+                host.state or {},
+                now=now,
+                task=task,
+            )
+            return result
+
+        handoff = pulse.build_standalone_task_handoff("Owner/Repo", 17)
+        result = create_initial_setup_task(
+            host,
+            prompt=handoff["prompt"],
+            cadence_seconds=600,
+            model=handoff["model"],
+            reasoning_effort=handoff["reasoning_effort"],
+            record_setup_intent=record_intent,
+            record_setup_id=record_id,
+            record_setup_readback=record_readback,
+            record_setup_unknown=record_unknown,
+            creation_nonce="initial-setup-nonce",
+        )
+
+        self.assertEqual(host.scheduled_statuses, ["PAUSED"])
+        self.assertEqual(host.state["wake_count"], 0)
+        self.assertEqual(result["task_id"], "task-2")
+        self.assertEqual(
+            result["provenance"]["creation_authority"]["creation_nonce"],
+            "initial-setup-nonce",
+        )
+
     def test_scheduled_rearm_retires_only_the_authenticated_delivered_task(self) -> None:
-        state = waiting_checkpoint()
+        state = strict_waiting_checkpoint()
         host = InMemoryHost(
             state=state,
             created_at="2026-08-26T00:37:00+00:00",
@@ -492,6 +637,7 @@ class DefaultHostWakeContractTests(unittest.TestCase):
             retirement=True,
         )
         self.assertEqual(invocation.begin()["next_action"], "WAKE_STARTED")
+        self.assertEqual(host.state["wake_count"], 2)
         invocation.snapshot()
         result = invocation.complete(reanchor_succeeds=True)
 
@@ -507,6 +653,90 @@ class DefaultHostWakeContractTests(unittest.TestCase):
         self.assertLess(names.index("delete-task"), names.index("schedule-standalone"))
         self.assertLess(names.index("authorize-successor"), names.index("complete-wake"))
         self.assertEqual(names[-1], "activate-task")
+
+    def test_valid_structured_delivery_replay_does_not_increment_again(self) -> None:
+        host = InMemoryHost(
+            state=strict_waiting_checkpoint(),
+            created_at="2026-08-26T00:37:00+00:00",
+            wake_ids=("fresh-wake-1",),
+        )
+        invocation = HostInvocation(
+            host,
+            scheduled=True,
+            now="2026-08-26T00:36:00+00:00",
+            task_id="task-1",
+            prompt=pulse.build_standalone_task_handoff("Owner/Repo", 17)["prompt"],
+            retirement=True,
+        )
+
+        first = invocation.begin()
+        replay = pulse.begin_wake(
+            host.state,
+            wake_id=invocation.wake_id or "",
+            now="2026-08-26T00:36:01+00:00",
+            pause_heartbeat=lambda: True,
+            delivered_task_id="task-1",
+            delivered_task_provenance={
+                "task_id": "task-1",
+                "pause_confirmed": True,
+                "pre_pause_readback": {
+                    **host.created_tasks["task-1"],
+                    "status": "ACTIVE",
+                },
+                "post_pause_readback": host.created_tasks["task-1"],
+            },
+        )[1]
+
+        self.assertEqual(first["next_action"], "WAKE_STARTED")
+        self.assertEqual(replay, first)
+        self.assertEqual(host.state["wake_count"], 2)
+
+    def test_mismatched_post_pause_scheduler_metadata_is_rejected_before_wake(self) -> None:
+        host = InMemoryHost(
+            state=strict_waiting_checkpoint(),
+            created_at="2026-08-26T00:37:00+00:00",
+            readback_model="gpt-5.6-terra",
+        )
+        invocation = HostInvocation(
+            host,
+            scheduled=True,
+            now="2026-08-26T00:36:00+00:00",
+            task_id="task-1",
+            prompt=pulse.build_standalone_task_handoff("Owner/Repo", 17)["prompt"],
+            retirement=True,
+        )
+
+        result = invocation.begin()
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "scheduler_provenance_invalid")
+        self.assertEqual(host.state["wake_count"], 1)
+        self.assertNotIn(("snapshot", invocation.wake_id), host.operations)
+
+    def test_final_admitted_wake_retires_without_creating_a_sixth_task(self) -> None:
+        state = strict_waiting_checkpoint()
+        state["automation_policy"]["max_wakes"] = 2
+        host = InMemoryHost(
+            state=state,
+            created_at="2026-08-26T00:37:00+00:00",
+        )
+        invocation = HostInvocation(
+            host,
+            scheduled=True,
+            now="2026-08-26T00:36:00+00:00",
+            task_id="task-1",
+            prompt=pulse.build_standalone_task_handoff("Owner/Repo", 17)["prompt"],
+            retirement=True,
+        )
+
+        invocation.begin()
+        invocation.snapshot()
+        result = invocation.complete(reanchor_succeeds=True)
+
+        self.assertEqual(result["next_action"], "STOP_POLICY_LIMIT")
+        self.assertEqual(result["reason_code"], "maximum_wakes_reached_after_admission")
+        self.assertNotIn(("schedule-standalone", "600"), host.operations)
+        self.assertNotIn(("activate-task", "task-2"), host.operations)
 
     def test_one_invocation_can_begin_only_one_wake(self) -> None:
         host = InMemoryHost(wake_ids=("fresh-wake-1",))

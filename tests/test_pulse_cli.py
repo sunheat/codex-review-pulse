@@ -14,7 +14,8 @@ PULSE = ROOT / "skills" / "codex-review-pulse" / "scripts" / "pulse.py"
 SCRIPTS = ROOT / "skills" / "codex-review-pulse" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from checkpoint_store import checkpoint_path, load_checkpoint  # noqa: E402
+from checkpoint_store import checkpoint_path, load_checkpoint, save_checkpoint  # noqa: E402
+import pulse  # noqa: E402
 
 
 NOW = "2026-08-26T00:00:00+00:00"
@@ -175,6 +176,7 @@ class CliHarness:
         self.fixture_path = root / "fixture.json"
         self.counts_path = root / "mutation-count.txt"
         self.calls_path = root / "graphql-count.txt"
+        self.setup_provenance_path = root / "setup-provenance.json"
         payload = dict(fixture or self.default_fixture())
         if payload.get("head_oid") == "HEAD1":
             payload["head_oid"] = self.initial_head
@@ -209,13 +211,61 @@ class CliHarness:
     def graphql_count(self) -> int:
         return int(self.calls_path.read_text(encoding="utf-8")) if self.calls_path.exists() else 0
 
-    def run(self, *command: str, wake_id: str = "wake-1", now: str = NOW) -> subprocess.CompletedProcess[str]:
+    def run(
+        self,
+        *command: str,
+        wake_id: str = "wake-1",
+        now: str = NOW,
+        auto_setup_provenance: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment["PATH"] = str(self.fake_bin) + os.pathsep + environment.get("PATH", "")
         environment["PULSE_FAKE_GH_FIXTURE"] = str(self.fixture_path)
         environment["PULSE_FAKE_GH_COUNTS"] = str(self.counts_path)
         environment["PULSE_FAKE_GH_CALLS"] = str(self.calls_path)
         environment["CODEX_REVIEW_PULSE_GH_SCRIPT"] = str(self.fake_bin / "fake_gh.py")
+        command_args = list(command)
+        if (
+            auto_setup_provenance
+            and "begin-wake" in command_args
+            and "--pause-confirmed" in command_args
+            and "--delivered-task-id" not in command_args
+            and "--setup-task-provenance" not in command_args
+        ):
+            handoff = pulse.build_standalone_task_handoff("owner/repo", 17)
+            self.setup_provenance_path.write_text(
+                json.dumps(
+                    {
+                        "task_id": "setup-task",
+                        "pause_confirmed": True,
+                        "creation_authority": {
+                            "role": "setup",
+                            "task_id": "setup-task",
+                            "protocol_version": 13,
+                            "prompt_sha256": handoff["prompt_sha256"],
+                            "creation_nonce": "cli-test-setup-nonce",
+                        },
+                        "readback": {
+                            "id": "setup-task",
+                            "status": "PAUSED",
+                            "prompt": handoff["prompt"],
+                            "prompt_sha256": handoff["prompt_sha256"],
+                            "scheduler_kind": "cron",
+                            "conversation_mode": "standalone",
+                            "target_thread_id": None,
+                            "model": handoff["model"],
+                            "reasoning_effort": handoff["reasoning_effort"],
+                            "cadence_seconds": 600,
+                            "created_at": "2026-08-26T00:00:00+00:00",
+                            "first_run": "2026-08-26T00:10:00+00:00",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            command_args.extend(
+                ["--setup-task-provenance", str(self.setup_provenance_path)]
+            )
         arguments = [
             sys.executable,
             str(PULSE),
@@ -225,7 +275,7 @@ class CliHarness:
             wake_id,
             "--now",
             now,
-            *command,
+            *command_args,
         ]
         return subprocess.run(
             arguments,
@@ -258,6 +308,76 @@ class CliHarness:
 
 
 class PulseCliTests(unittest.TestCase):
+    def test_setup_creation_intent_cli_round_trip_precedes_begin_wake(self) -> None:
+        harness = CliHarness(self)
+        intent = harness.json_output(
+            harness.run(
+                "record-creation-intent",
+                "--role",
+                "setup",
+                "--creation-nonce",
+                "cli-intent-nonce",
+            )
+        )
+        self.assertEqual(intent["next_action"], "CREATION_INTENT_RECORDED")
+        harness.json_output(
+            harness.run("record-setup-id", "--task-id", "setup-task")
+        )
+        handoff = pulse.build_standalone_task_handoff("owner/repo", 17)
+        readback = {
+            "id": "setup-task",
+            "status": "PAUSED",
+            "prompt": handoff["prompt"],
+            "prompt_sha256": handoff["prompt_sha256"],
+            "scheduler_kind": "cron",
+            "conversation_mode": "standalone",
+            "target_thread_id": None,
+            "model": handoff["model"],
+            "reasoning_effort": handoff["reasoning_effort"],
+            "cadence_seconds": 600,
+            "created_at": NOW,
+            "first_run": "2026-08-26T00:10:00+00:00",
+        }
+        readback_path = harness.checkout.parent / "setup-readback.json"
+        readback_path.write_text(json.dumps(readback), encoding="utf-8")
+        verified = harness.json_output(
+            harness.run("record-setup-readback", "--readback", str(readback_path))
+        )
+        proof_path = harness.checkout.parent / "setup-proof.json"
+        proof_path.write_text(
+            json.dumps(verified["setup_task_provenance"]), encoding="utf-8"
+        )
+        admitted = harness.json_output(
+            harness.run(
+                "begin-wake",
+                "--pause-confirmed",
+                "--setup-task-provenance",
+                str(proof_path),
+                auto_setup_provenance=False,
+            )
+        )
+
+        self.assertEqual(admitted["next_action"], "WAKE_STARTED")
+        self.assertEqual(admitted["wake_count"], 1)
+
+    def test_raw_pause_confirmation_cannot_admit_initial_wake(self) -> None:
+        harness = CliHarness(self)
+        result = harness.json_output(
+            harness.run(
+                "begin-wake",
+                "--pause-confirmed",
+                auto_setup_provenance=False,
+            )
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "scheduler_provenance_invalid")
+        state = load_checkpoint(
+            checkpoint_path("owner/repo", 17, repository_path=harness.checkout)
+        )
+        self.assertEqual(state["wake_count"], 0)
+        self.assertEqual(harness.graphql_count(), 0)
+
     def test_successor_authorization_makes_delivery_safe_before_activation(self) -> None:
         fixture = CliHarness.default_fixture()
         fixture["eyes"] = [{
@@ -800,6 +920,60 @@ class PulseCliTests(unittest.TestCase):
             )
         )
 
+        checkpoint = checkpoint_path("owner/repo", 17, repository_path=harness.checkout)
+        state = load_checkpoint(checkpoint)
+        handoff = pulse._handoff_identity(state)
+        durable_readback = {
+            "id": "task-1",
+            "status": "PAUSED",
+            "prompt": handoff["prompt"],
+            "prompt_sha256": handoff["prompt_sha256"],
+            "scheduler_kind": "cron",
+            "conversation_mode": "standalone",
+            "target_thread_id": None,
+            "model": handoff["model"],
+            "reasoning_effort": handoff["reasoning_effort"],
+            "cadence_seconds": handoff["cadence_seconds"],
+            "created_at": "2026-08-26T00:01:00+00:00",
+            "first_run": "2026-08-26T00:11:00+00:00",
+        }
+        state["task_retirement"] = {
+            "phase": "confirmed",
+            "wake_id": "wake-1",
+            "task_id": "setup-task",
+            "role": "setup",
+            "provenance": {"task_id": "setup-task"},
+            "handoff": handoff,
+            "rearm": {
+                "action": "WAIT_RETRY",
+                "source_action": "WAIT_RETRY",
+                "proof": {"pending_repair": {}},
+            },
+            "successor": {
+                "task_id": "task-1",
+                "status": "authorized",
+                "completion_anchor": "2026-08-26T00:01:00+00:00",
+                "created_at": durable_readback["created_at"],
+                "first_run": durable_readback["first_run"],
+                "readback": durable_readback,
+            },
+        }
+        state["scheduled_task_id"] = "task-1"
+        state["scheduled_task_disposition"] = "AUTHORIZED"
+        save_checkpoint(checkpoint, state)
+        delivered_provenance = harness.checkout.parent / "delivered-provenance.json"
+        delivered_provenance.write_text(
+            json.dumps(
+                {
+                    "task_id": "task-1",
+                    "pause_confirmed": True,
+                    "pre_pause_readback": {**durable_readback, "status": "ACTIVE"},
+                    "post_pause_readback": durable_readback,
+                }
+            ),
+            encoding="utf-8",
+        )
+
         fixture = harness.read_fixture()
         fixture["threads"] = []
         harness.write_fixture(fixture)
@@ -809,6 +983,8 @@ class PulseCliTests(unittest.TestCase):
                 "--pause-confirmed",
                 "--delivered-task-id",
                 "task-1",
+                "--delivered-task-provenance",
+                str(delivered_provenance),
                 wake_id="wake-2",
                 now="2026-08-26T00:11:00+00:00",
             )

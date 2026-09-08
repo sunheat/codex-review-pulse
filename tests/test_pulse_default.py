@@ -75,6 +75,8 @@ class DefaultLifecycleTests(unittest.TestCase):
                 "model": handoff["model"],
                 "reasoning_effort": handoff["reasoning_effort"],
                 "cadence_seconds": 600,
+                "created_at": "2026-08-26T00:00:00+00:00",
+                "first_run": "2026-08-26T00:10:00+00:00",
             },
         }
 
@@ -255,7 +257,7 @@ class DefaultLifecycleTests(unittest.TestCase):
 
         self.assertEqual(handoff["repository"], "owner/repo")
         self.assertEqual(handoff["pull_request_number"], 17)
-        self.assertEqual(handoff["protocol_version"], 12)
+        self.assertEqual(handoff["protocol_version"], 13)
         self.assertEqual(handoff["model"], "gpt-5.6-luna")
         self.assertEqual(handoff["reasoning_effort"], "xhigh")
         self.assertEqual(handoff["scheduler_kind"], "cron")
@@ -348,10 +350,99 @@ class DefaultLifecycleTests(unittest.TestCase):
         legacy = empty_checkpoint("Owner/Repo", 17)
         legacy["default_mode_schema_version"] = 1
         migrated = pulse.ensure_default_lifecycle(legacy)
-        self.assertEqual(migrated["default_mode_schema_version"], 3)
+        self.assertEqual(migrated["default_mode_schema_version"], 4)
         self.assertEqual(migrated["automation_policy"]["profile"], "autonomous")
         self.assertIsNone(migrated["automation_policy"]["max_wakes"])
         self.assertEqual(migrated["retry_state"]["wake_attempts"], 0)
+
+    def test_legacy_schema_three_admitted_count_fails_closed(self) -> None:
+        legacy = empty_checkpoint("Owner/Repo", 17)
+        legacy["default_mode_schema_version"] = 3
+        legacy["wake_count"] = 1
+
+        with self.assertRaisesRegex(
+            pulse.DefaultWakeError, "legacy_wake_accounting_unverified"
+        ):
+            pulse.ensure_default_lifecycle(legacy)
+
+    def test_setup_creation_intent_is_verified_before_initial_admission(self) -> None:
+        state, intent = pulse.record_creation_intent(
+            empty_checkpoint("Owner/Repo", 17),
+            role="setup",
+            now=NOW,
+            creation_nonce="setup-nonce",
+        )
+        self.assertEqual(intent["next_action"], "CREATION_INTENT_RECORDED")
+        state, recorded = pulse.record_setup_creation_id(
+            state,
+            now=NOW,
+            task_id="setup-task",
+        )
+        self.assertEqual(recorded["next_action"], "SETUP_TASK_ID_RECORDED")
+        handoff = pulse.build_standalone_task_handoff("Owner/Repo", 17)
+        readback = {
+            "id": "setup-task",
+            "status": "PAUSED",
+            "prompt": handoff["prompt"],
+            "prompt_sha256": handoff["prompt_sha256"],
+            "scheduler_kind": "cron",
+            "conversation_mode": "standalone",
+            "target_thread_id": None,
+            "model": handoff["model"],
+            "reasoning_effort": handoff["reasoning_effort"],
+            "cadence_seconds": 600,
+            "created_at": NOW,
+            "first_run": "2026-08-26T00:10:00+00:00",
+        }
+        state, verified = pulse.record_setup_creation_readback(
+            state,
+            now=NOW,
+            task=readback,
+        )
+        self.assertEqual(verified["next_action"], "SETUP_TASK_VERIFIED")
+        state, admitted = pulse.begin_wake(
+            state,
+            wake_id="wake-1",
+            now=NOW,
+            pause_heartbeat=lambda: True,
+            setup_task_provenance=verified["setup_task_provenance"],
+        )
+
+        self.assertEqual(admitted["next_action"], "WAKE_STARTED")
+        self.assertEqual(state["wake_count"], 1)
+        self.assertEqual(state["task_retirement"]["task_id"], "setup-task")
+
+    def test_unresolved_setup_intent_blocks_a_second_external_create(self) -> None:
+        state, _ = pulse.record_creation_intent(
+            empty_checkpoint("Owner/Repo", 17),
+            role="setup",
+            now=NOW,
+            creation_nonce="first-nonce",
+        )
+
+        replay_state, replay = pulse.record_creation_intent(
+            state,
+            role="setup",
+            now=NOW,
+            creation_nonce="second-nonce",
+        )
+
+        self.assertEqual(replay["next_action"], "CREATION_INTENT_RECORDED")
+        self.assertEqual(replay["reason_code"], "creation_intent_already_pending")
+        self.assertEqual(
+            replay_state["creation_intent"]["creation_nonce"], "first-nonce"
+        )
+
+    def test_failed_pause_does_not_consume_admission_budget(self) -> None:
+        state, result = pulse.begin_wake(
+            empty_checkpoint("Owner/Repo", 17),
+            wake_id="wake-1",
+            now=NOW,
+            pause_heartbeat=lambda: False,
+        )
+
+        self.assertEqual(result["reason_code"], "heartbeat_pause_unconfirmed")
+        self.assertEqual(state["wake_count"], 0)
 
     def test_pushes_between_wakes_coalesce_to_the_latest_stable_head(self) -> None:
         state, _ = started()
