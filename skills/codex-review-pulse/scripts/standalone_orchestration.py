@@ -2,8 +2,10 @@
 
 The scheduler and Codex task APIs are host capabilities, so this module keeps
 them behind injected adapters.  It owns only the ordering and single-use
-contract: one scheduler delivery creates one wake, and one invocation can
-schedule at most one standalone successor before it ends at ``complete-wake``.
+contract: one scheduler delivery creates one wake; a rearmable wake durably
+retires its one exact registered predecessor before successor creation; and one
+invocation can schedule at most one standalone successor before it ends at
+``complete-wake``.
 """
 
 from __future__ import annotations
@@ -62,6 +64,12 @@ class StandaloneTaskHost(Protocol):
     def read_task(self, task_id: str) -> Mapping[str, Any]:
         """Read normalized task metadata and the persisted first-run timestamp."""
 
+    def delete_task(self, task_id: str) -> object:
+        """Delete only the exact registered predecessor task ID."""
+
+    def lookup_task(self, task_id: str) -> object:
+        """Return PRESENT, AUTHORITATIVE_NOT_FOUND, or READBACK_UNKNOWN."""
+
     def cleanup_worktree(
         self, *, pending_repair: Mapping[str, Any] | None = None
     ) -> object:
@@ -92,7 +100,7 @@ class StandaloneTaskHost(Protocol):
         """Activate with the host's full persisted task metadata and confirm it."""
 
 
-BeginWake = Callable[[str, str, bool, str | None], Mapping[str, Any]]
+BeginWake = Callable[..., Mapping[str, Any]]
 CompleteWake = Callable[
     [
         str,
@@ -104,6 +112,13 @@ CompleteWake = Callable[
     ],
     Mapping[str, Any],
 ]
+PrepareRetirement = Callable[[str, str, bool], Mapping[str, Any]]
+ConfirmRetirement = Callable[[str, str, str, str, str, Mapping[str, Any] | None], Mapping[str, Any]]
+RecordSuccessorCreation = Callable[
+    [str, str, str, str | None, str | None, Mapping[str, Any] | None], Mapping[str, Any]
+]
+RecordSuccessorReadback = Callable[[str, str, Mapping[str, Any]], Mapping[str, Any]]
+RecordSuccessorPause = Callable[[str, str, str, bool, Mapping[str, Any] | None], Mapping[str, Any]]
 
 
 def _confirmed(value: object) -> bool:
@@ -149,6 +164,56 @@ def _task_id(response: object) -> str:
             if isinstance(value, str) and value.strip():
                 return value
     raise StandaloneInvocationError("Standalone task creation returned no task ID")
+
+
+def _lookup_outcome(response: object) -> str:
+    """Normalize an exact-ID scheduler lookup without treating errors as absence."""
+    if isinstance(response, Mapping):
+        value = response.get("outcome", response.get("status"))
+        if value in {"PRESENT", "AUTHORITATIVE_NOT_FOUND", "READBACK_UNKNOWN"}:
+            return str(value)
+    return "READBACK_UNKNOWN"
+
+
+def _creation_outcome(response: object) -> str:
+    """Normalize host creation evidence; missing IDs are never proven no-create."""
+    if isinstance(response, Mapping):
+        value = response.get("outcome")
+        if value in {
+            "CREATED_EXACT_ID",
+            "AUTHORITATIVE_NO_SUCCESSOR",
+            "SUCCESSOR_CREATION_UNKNOWN",
+        }:
+            return str(value)
+    try:
+        _task_id(response)
+    except StandaloneInvocationError:
+        return "SUCCESSOR_CREATION_UNKNOWN"
+    return "CREATED_EXACT_ID"
+
+
+def _retirement_delete_outcome(host: StandaloneTaskHost, task_id: str) -> tuple[str, dict[str, Any]]:
+    """Classify exact delete using only a fresh exact task lookup on ambiguity."""
+    try:
+        response = host.delete_task(task_id)
+    except Exception as error:
+        response = {"exception": str(error)}
+    if response is True or (
+        isinstance(response, Mapping)
+        and response.get("outcome") == "RETIREMENT_CONFIRMED"
+    ):
+        return "confirmed", {"delete": response}
+    try:
+        lookup = host.lookup_task(task_id)
+    except Exception as error:
+        lookup = {"exception": str(error)}
+    normalized_lookup = _lookup_outcome(lookup)
+    evidence = {"delete": response, "lookup": normalized_lookup}
+    if normalized_lookup == "AUTHORITATIVE_NOT_FOUND":
+        return "confirmed", evidence
+    if normalized_lookup == "PRESENT":
+        return "non_deletion", evidence
+    return "unknown", evidence
 
 
 def _validate_task_readback(
@@ -255,6 +320,13 @@ class StandaloneInvocation:
         now: str,
         begin_wake: BeginWake,
         complete_wake: CompleteWake,
+        setup_task_provenance: Mapping[str, Any] | None = None,
+        prepare_retirement: PrepareRetirement | None = None,
+        confirm_retirement: ConfirmRetirement | None = None,
+        record_successor_creation: RecordSuccessorCreation | None = None,
+        record_successor_readback: RecordSuccessorReadback | None = None,
+        record_successor_pause: RecordSuccessorPause | None = None,
+        allow_legacy_direct_callbacks: bool = False,
     ) -> None:
         if not task_id.strip():
             raise ValueError("A task ID is required")
@@ -267,6 +339,17 @@ class StandaloneInvocation:
         self.now = now
         self.begin_wake = begin_wake
         self.complete_wake = complete_wake
+        self.setup_task_provenance = (
+            deepcopy(dict(setup_task_provenance))
+            if isinstance(setup_task_provenance, Mapping)
+            else None
+        )
+        self.prepare_retirement = prepare_retirement
+        self.confirm_retirement = confirm_retirement
+        self.record_successor_creation = record_successor_creation
+        self.record_successor_readback = record_successor_readback
+        self.record_successor_pause = record_successor_pause
+        self.allow_legacy_direct_callbacks = allow_legacy_direct_callbacks
         self.prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         self.wake_id: str | None = None
         self.started = False
@@ -343,6 +426,7 @@ class StandaloneInvocation:
                             self.now,
                             False,
                             self.task_id if self.scheduled else None,
+                            None,
                         )
                     except Exception:
                         return self._end(
@@ -384,6 +468,7 @@ class StandaloneInvocation:
                             self.now,
                             False,
                             self.task_id if self.scheduled else None,
+                            None,
                         )
                     except Exception:
                         return self._end(
@@ -406,6 +491,7 @@ class StandaloneInvocation:
                 self.now,
                 True,
                 self.task_id if self.scheduled else None,
+                self.setup_task_provenance if not self.scheduled else None,
             )
             if not isinstance(result, Mapping) or "next_action" not in result:
                 raise StandaloneInvocationError("begin-wake returned an invalid result")
@@ -644,6 +730,93 @@ class StandaloneInvocation:
                         },
                     },
                 )
+            retirement_enabled = all(
+                callback is not None
+                for callback in (
+                    self.prepare_retirement,
+                    self.confirm_retirement,
+                    self.record_successor_creation,
+                    self.record_successor_readback,
+                    self.record_successor_pause,
+                )
+            )
+            if not retirement_enabled and not self.allow_legacy_direct_callbacks:
+                # A registered predecessor is deletion authority only when the
+                # complete injected controller is present.  Do not silently
+                # fall back to the old accumulating-task lifecycle.
+                try:
+                    checkpoint = self.host.read_checkpoint_directly()
+                except Exception:
+                    checkpoint = {}
+                retirement = checkpoint.get("task_retirement") if isinstance(checkpoint, Mapping) else None
+                if (
+                    isinstance(retirement, Mapping)
+                    and retirement.get("wake_id") == self.wake_id
+                    and retirement.get("phase") in {"registered", "pending"}
+                ):
+                    return self._finish_completion(
+                        now=now,
+                        actual_first_run=None,
+                        successor_id=None,
+                        completion_failure={
+                            "reason_code": "retirement_controller_unavailable",
+                            "evidence": {"task_id": retirement.get("task_id")},
+                        },
+                    )
+            if retirement_enabled:
+                # The pending checkpoint write is the durable boundary before
+                # the irreversible exact-ID host delete.  No completion clock
+                # is taken until that deletion is confirmed.
+                try:
+                    prepared = self.prepare_retirement(  # type: ignore[misc]
+                        self.wake_id,
+                        now,
+                        True,
+                    )
+                except Exception as error:
+                    return self._end(
+                        {
+                            "next_action": "PAUSE_RECOVERY",
+                            "reason_code": "retirement_prepare_persistence_failed",
+                            "evidence": {"error": str(error)},
+                        }
+                    )
+                if prepared.get("next_action") != "RETIREMENT_PENDING":
+                    return self._end(prepared)
+                predecessor_id = prepared.get("scheduled_task_id")
+                role = prepared.get("role")
+                if not isinstance(predecessor_id, str) or role not in {"setup", "delivered"}:
+                    return self._end(
+                        {
+                            "next_action": "PAUSE_RECOVERY",
+                            "reason_code": "retirement_pending_invalid",
+                        }
+                    )
+                delete_outcome, delete_evidence = _retirement_delete_outcome(
+                    self.host, predecessor_id
+                )
+                try:
+                    retirement = self.confirm_retirement(  # type: ignore[misc]
+                        self.wake_id,
+                        now,
+                        predecessor_id,
+                        role,
+                        delete_outcome,
+                        delete_evidence,
+                    )
+                except Exception as error:
+                    # Physical deletion may already have occurred.  The
+                    # pending marker remains the only recovery authority; do
+                    # not manufacture a successor or overwrite it.
+                    return self._end(
+                        {
+                            "next_action": "PAUSE_RECOVERY",
+                            "reason_code": "retirement_confirmation_persistence_failed",
+                            "evidence": {"error": str(error), **delete_evidence},
+                        }
+                    )
+                if retirement.get("next_action") != "RETIREMENT_CONFIRMED":
+                    return self._end(retirement)
             try:
                 completion_now = _iso(self.host.now_utc())
             except Exception as error:
@@ -670,7 +843,30 @@ class StandaloneInvocation:
                     prompt_sha256=self.prompt_sha256,
                     status="PAUSED",
                 )
+                if retirement_enabled:
+                    creation_outcome = _creation_outcome(response)
+                    if creation_outcome != "CREATED_EXACT_ID":
+                        recorded = self.record_successor_creation(  # type: ignore[misc]
+                            self.wake_id,
+                            completion_now,
+                            creation_outcome,
+                            None,
+                            None,
+                            {"creation_response": response},
+                        )
+                        return self._end(recorded)
                 successor_id = _task_id(response)
+                if retirement_enabled:
+                    recorded = self.record_successor_creation(  # type: ignore[misc]
+                        self.wake_id,
+                        completion_now,
+                        "CREATED_EXACT_ID",
+                        successor_id,
+                        completion_now,
+                        {"creation_response": response},
+                    )
+                    if recorded.get("next_action") != "SUCCESSOR_CREATED":
+                        return self._end(recorded)
                 readback_failed = True
                 task = self.host.read_task(successor_id)
                 _validate_task_readback(
@@ -712,6 +908,14 @@ class StandaloneInvocation:
                     raise StandaloneInvocationError(
                         "Standalone task readback returned an invalid first run"
                     )
+                if retirement_enabled:
+                    recorded = self.record_successor_readback(  # type: ignore[misc]
+                        self.wake_id,
+                        completion_now,
+                        task,
+                    )
+                    if recorded.get("next_action") != "SUCCESSOR_READY":
+                        return self._end(recorded)
                 authorization_attempted = True
                 if not _confirmed(
                     self.host.authorize_successor(
@@ -730,8 +934,38 @@ class StandaloneInvocation:
                 actual_first_run = observed_first_run
                 readback_failed = False
             except Exception:
+                # Authorization is a checkpoint mutation.  A lost host
+                # callback may still have durably authorized this exact
+                # successor, in which case retrying would duplicate the
+                # authorization boundary.
+                if authorization_attempted and not authorization_confirmed and successor_id is not None:
+                    try:
+                        durable = self.host.read_checkpoint_directly()
+                        authorization = durable.get("successor_authorization")
+                        authorization_confirmed = (
+                            isinstance(authorization, Mapping)
+                            and authorization.get("wake_id") == self.wake_id
+                            and authorization.get("scheduled_task_id") == successor_id
+                            and durable.get("wake_phase") == "successor_authorized"
+                        )
+                        if authorization_confirmed:
+                            actual_first_run = observed_first_run
+                            readback_failed = False
+                    except Exception:
+                        authorization_confirmed = False
                 if successor_id is not None:
                     pause_confirmed = self._pause_successor(successor_id)
+                    if retirement_enabled:
+                        try:
+                            self.record_successor_pause(  # type: ignore[misc]
+                                self.wake_id,
+                                completion_now,
+                                successor_id,
+                                pause_confirmed,
+                                {"readback_failed": readback_failed},
+                            )
+                        except Exception:
+                            pause_confirmed = False
                     if not pause_confirmed:
                         completion_failure = {
                             "reason_code": "successor_cleanup_unconfirmed",
@@ -751,14 +985,20 @@ class StandaloneInvocation:
                             "successor_task_id": successor_id,
                         },
                     }
-                elif completion_failure is None and authorization_confirmed:
-                    completion_failure = {
-                        "reason_code": "successor_activation_unconfirmed",
-                        "evidence": {
-                            "successor_task_id": successor_id,
-                        },
-                    }
                 if completion_failure is None:
+                    if retirement_enabled:
+                        try:
+                            recorded = self.record_successor_creation(  # type: ignore[misc]
+                                self.wake_id,
+                                completion_now,
+                                "SUCCESSOR_CREATION_UNKNOWN",
+                                None,
+                                None,
+                                {"creation_response": "unavailable"},
+                            )
+                            return self._end(recorded)
+                        except Exception:
+                            pass
                     successor_id = None
                 if first_run_mismatch:
                     actual_first_run = observed_first_run

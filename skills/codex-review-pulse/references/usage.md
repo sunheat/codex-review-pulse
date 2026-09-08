@@ -37,8 +37,13 @@ drift is rejected.
 The host adapter's `--pause-confirmed` and `--schedule-reanchored` inputs are
 post-success confirmations only. They do not call or authorize a Codex
 automation operation. The supported local-host path completes worktree cleanup,
-reads the host UTC completion anchor, creates a paused cadence-only standalone
-successor without `DTSTART`, and reads back its persisted ID, prompt and digest,
+persists the registered exact setup/delivered predecessor as retirement pending,
+deletes only that ID and durably confirms exact retirement, then reads the host
+UTC completion anchor. `NONE` is a confirmed retired predecessor with no current
+task; `UNKNOWN` is an exact readback/delete ambiguity and remains handoff-only
+until explicit exact reconciliation. It never uses task discovery or a scheduler
+scan. Only then does it create a paused cadence-only standalone successor without
+`DTSTART`, and reads back its persisted ID, prompt and digest,
 scheduler/conversation metadata, absent target attachment, model, reasoning
 settings, cadence, paused status, and creation timestamp. Persist
 `authorize-successor` with the verified schedule while the wake remains active
@@ -90,7 +95,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
 This extracts `skills/codex-review-pulse` from the named Git commit into
 `$env:USERPROFILE\.agents\skills\codex-review-pulse`. It does not copy the
 mutable working-tree files and does not create a symlink. The installed
-manifest records version `0.8.9`, the full source commit, and SHA-256 file
+manifest records version `0.8.10`, the full source commit, and SHA-256 file
 hashes. Verification independently reconstructs that inventory from the pinned
 Git commit, so changing both an installed file and its adjacent manifest does
 not reauthorize the modified bytes.
@@ -104,7 +109,7 @@ explicit alternate configured location.
 
 ```powershell
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
-  --expected-version 0.8.9 `
+  --expected-version 0.8.10 `
   --expected-source-commit $commit
 ```
 
@@ -123,7 +128,7 @@ python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_prefligh
   --repo OWNER/REPO `
   --pr NUMBER `
   --repository-path C:\path\to\target-repository `
-  --expected-skill-version 0.8.9 `
+  --expected-skill-version 0.8.10 `
   --expected-source-commit $commit `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector `

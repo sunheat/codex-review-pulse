@@ -141,6 +141,17 @@ authorizes a verified successor before activation, and restores and verifies
 pending repair bytes before resolution or publication. This keeps scheduler
 delivery, successor identity, and retry recovery durable across process exits.
 
+## 0.8.10 exact predecessor retirement
+
+For a rearmable default wake, the separately verified setup task or the
+authenticated delivered task is registered with begin-wake, then advances from
+registered to pending to confirmed retirement before successor creation. The
+checkpoint distinguishes no current task (`NONE`) from externally unprovable
+state (`UNKNOWN`), retains only bounded predecessor evidence, and permits only
+handoff recovery after retirement. It never discovers tasks heuristically or
+adds scheduler-wide cleanup. Existing v11 active chains without immutable
+handoff evidence fail closed and require an explicit fresh setup.
+
 ## Deferred milestones
 
 - public-API connector and automatic-review detection bound to a head OID;

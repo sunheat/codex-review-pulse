@@ -30,7 +30,7 @@ wake, and continued after `PAUSE_BLOCKED` by clearing a latch with a generated
 recovery authorization. The old scheduled-task semantics must not be used as
 the default or described as production-ready.
 
-Version `0.8.9` is the current Codex-first default clean-context scheduling candidate.
+Version `0.8.10` is the current Codex-first default clean-context scheduling candidate.
 Its real scheduled-task and live GitHub integration remains unverified until an
 independent forward test completes.
 
@@ -86,7 +86,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py update \
   --source-repository . \
   --source-commit "$commit"
 python "$HOME/.agents/skills/codex-review-pulse/scripts/manage_pilot_install.py" verify \
-  --expected-version 0.8.9 \
+  --expected-version 0.8.10 \
   --expected-source-commit "$commit"
 ```
 
@@ -104,7 +104,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
   --source-repository . `
   --source-commit $commit
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
-  --expected-version 0.8.9 `
+  --expected-version 0.8.10 `
   --expected-source-commit $commit
 ```
 
@@ -115,7 +115,7 @@ no other runner targets the PR:
 ```powershell
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_preflight.py `
   --repo OWNER/REPO --pr NUMBER `
-  --expected-skill-version 0.8.9 `
+  --expected-skill-version 0.8.10 `
   --expected-source-commit $commit `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector `
@@ -157,9 +157,16 @@ later target mismatch instead of drifting to another PR. An ambiguous checkout
 must be stopped and supplied an explicit `--repo OWNER/REPO --pr NUMBER`.
 
 Each scheduler delivery runs in a new standalone task/conversation. The host
-pauses the delivered task, completes worktree cleanup, reads a final UTC
-completion anchor, then creates one paused successor with the unchanged
-canonical prompt only after a rearmable result. The host-supported path creates
+pauses the delivered task and atomically registers that authenticated exact ID
+when it begins the wake; wake one similarly registers only a separately
+verified setup-task readback. After a rearmable result and confirmed worktree
+cleanup, it persists immutable handoff and action proof, marks that exact
+predecessor pending, deletes only that ID, and durably confirms retirement
+before reading a final UTC completion anchor or creating a successor. `NONE`
+means the predecessor is confirmed retired and no current task exists;
+`UNKNOWN` remains blocked until an explicit exact-ID reconciliation. The host
+never scans or discovers scheduler tasks. Only then does it create one paused
+successor with the unchanged canonical prompt. The host-supported path creates
 a cadence-only recurring task without `DTSTART`, reads back its persisted ID,
 prompt and digest, scheduler/conversation metadata, absent target attachment,
 model, reasoning settings, cadence, paused status, and creation timestamp, and

@@ -59,12 +59,203 @@ def started(checkpoint=None, *, wake_id: str = "wake-1", now: str = NOW):
 
 
 class DefaultLifecycleTests(unittest.TestCase):
+    def _setup_provenance(self, task_id: str = "setup-task") -> dict:
+        handoff = pulse.build_standalone_task_handoff("Owner/Repo", 17)
+        return {
+            "task_id": task_id,
+            "pause_confirmed": True,
+            "readback": {
+                "id": task_id,
+                "status": "PAUSED",
+                "prompt": handoff["prompt"],
+                "prompt_sha256": handoff["prompt_sha256"],
+                "scheduler_kind": "cron",
+                "conversation_mode": "standalone",
+                "target_thread_id": None,
+                "model": handoff["model"],
+                "reasoning_effort": handoff["reasoning_effort"],
+                "cadence_seconds": 600,
+            },
+        }
+
+    def _retirement_ready_state(self) -> tuple[dict, str]:
+        state, _ = pulse.begin_wake(
+            empty_checkpoint("Owner/Repo", 17),
+            wake_id="wake-1",
+            now=NOW,
+            pause_heartbeat=lambda: True,
+            setup_task_provenance=self._setup_provenance(),
+        )
+        state, _ = pulse.record_snapshot(
+            state, snapshot(), wake_id="wake-1", now=NOW
+        )
+        state, prepared = pulse.prepare_task_retirement(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:25:00+00:00",
+            worktree_cleanup_confirmed=True,
+        )
+        self.assertEqual(prepared["next_action"], "RETIREMENT_PENDING")
+        state, confirmed = pulse.confirm_task_retirement(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:25:01+00:00",
+            task_id="setup-task",
+            role="setup",
+            outcome="confirmed",
+            evidence={"delete": "confirmed"},
+        )
+        self.assertEqual(confirmed["next_action"], "RETIREMENT_CONFIRMED")
+        return state, "2026-08-26T00:26:00+00:00"
+
+    def _record_verified_successor(self, state: dict, anchor: str) -> dict:
+        state, created = pulse.record_retirement_successor_creation(
+            state,
+            wake_id="wake-1",
+            now=anchor,
+            outcome="CREATED_EXACT_ID",
+            task_id="successor-task",
+            completion_anchor=anchor,
+        )
+        self.assertEqual(created["next_action"], "SUCCESSOR_CREATED")
+        handoff = state["task_retirement"]["handoff"]
+        readback = {
+            "id": "successor-task",
+            "status": "PAUSED",
+            "prompt": handoff["prompt"],
+            "prompt_sha256": handoff["prompt_sha256"],
+            "scheduler_kind": "cron",
+            "conversation_mode": "standalone",
+            "target_thread_id": None,
+            "model": handoff["model"],
+            "reasoning_effort": handoff["reasoning_effort"],
+            "cadence_seconds": handoff["cadence_seconds"],
+            "created_at": anchor,
+            "first_run": "2026-08-26T00:36:00+00:00",
+        }
+        state, ready = pulse.record_retirement_successor_readback(
+            state, wake_id="wake-1", now=anchor, task=readback
+        )
+        self.assertEqual(ready["next_action"], "SUCCESSOR_READY")
+        return state
+
+    def test_exact_setup_retirement_is_pending_before_delete_then_finalizes_successor(self) -> None:
+        state, anchor = self._retirement_ready_state()
+        self.assertEqual(state["scheduled_task_disposition"], "NONE")
+        self.assertIsNone(state["scheduled_task_id"])
+        state = self._record_verified_successor(state, anchor)
+        state, authorized = pulse.authorize_successor(
+            state,
+            wake_id="wake-1",
+            now=anchor,
+            scheduled_created_at=anchor,
+            scheduled_first_run="2026-08-26T00:36:00+00:00",
+            scheduled_task_id="successor-task",
+        )
+        self.assertEqual(authorized["next_action"], "SUCCESSOR_AUTHORIZED")
+        state, completed = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now=anchor,
+            schedule_next_wake=lambda _: "2026-08-26T00:36:00+00:00",
+            schedule_anchor_created_at=anchor,
+            scheduled_task_id="successor-task",
+            require_schedule_anchor=True,
+        )
+        self.assertEqual(completed["next_action"], "WAIT_REVIEW")
+        self.assertEqual(state["scheduled_task_disposition"], "AUTHORIZED")
+        self.assertEqual(state["task_retirement"]["phase"], "confirmed")
+        self.assertEqual(state["task_retirement"]["successor"]["status"], "authorized")
+
+    def test_unknown_retirement_blocks_pr_work_and_requires_exact_reconciliation(self) -> None:
+        state, _ = self._retirement_ready_state()
+        # Rebuild the pending state to exercise a delete outcome that cannot
+        # establish either presence or absence.
+        state, _ = pulse.begin_wake(
+            empty_checkpoint("Owner/Repo", 17),
+            wake_id="wake-2",
+            now=NOW,
+            pause_heartbeat=lambda: True,
+            setup_task_provenance=self._setup_provenance("setup-2"),
+        )
+        state, _ = pulse.record_snapshot(state, snapshot(), wake_id="wake-2", now=NOW)
+        state, _ = pulse.prepare_task_retirement(
+            state, wake_id="wake-2", now=NOW, worktree_cleanup_confirmed=True
+        )
+        state, result = pulse.confirm_task_retirement(
+            state,
+            wake_id="wake-2",
+            now=NOW,
+            task_id="setup-2",
+            role="setup",
+            outcome="unknown",
+        )
+        self.assertEqual(result["reason_code"], "task_retirement_unknown")
+        self.assertEqual(state["scheduled_task_disposition"], "UNKNOWN")
+        with self.assertRaisesRegex(pulse.DefaultWakeError, "durable recovery latch"):
+            pulse.record_snapshot(state, snapshot(), wake_id="wake-2", now=NOW)
+        state, reconciled = pulse.reconcile_task_retirement(
+            state,
+            wake_id="wake-2",
+            now=NOW,
+            task_id="setup-2",
+            role="setup",
+            lookup="PRESENT",
+        )
+        self.assertEqual(reconciled["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(state["scheduled_task_id"], "setup-2")
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+
+    def test_v2_active_checkpoint_without_exact_task_identity_fails_closed(self) -> None:
+        legacy = empty_checkpoint("Owner/Repo", 17)
+        legacy.update(
+            {
+                "default_mode_schema_version": 2,
+                "active_wake_id": "legacy-wake",
+                "scheduled_task_id": None,
+                "scheduled_task_disposition": "PAUSED",
+            }
+        )
+        with self.assertRaisesRegex(pulse.DefaultWakeError, "legacy_active_task_identity_unknown"):
+            pulse.ensure_default_lifecycle(legacy)
+
+    def test_recovered_authorized_successor_finalizes_without_replaying_pr_work(self) -> None:
+        state, anchor = self._retirement_ready_state()
+        state = self._record_verified_successor(state, anchor)
+        state, _ = pulse.authorize_successor(
+            state,
+            wake_id="wake-1",
+            now=anchor,
+            scheduled_created_at=anchor,
+            scheduled_first_run="2026-08-26T00:36:00+00:00",
+            scheduled_task_id="successor-task",
+        )
+        pulse._retirement_pause(
+            state,
+            reason_code="successor_finalization_interrupted",
+            now="2026-08-26T00:27:00+00:00",
+        )
+        task = state["task_retirement"]["successor"]["readback"]
+        state, result = pulse.recover_retirement_successor(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:28:00+00:00",
+            action="finalize",
+            task=task,
+            delivery_observed=False,
+            activation_confirmed=False,
+        )
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        self.assertEqual(state["scheduled_task_disposition"], "AUTHORIZED")
+        with self.assertRaisesRegex(pulse.DefaultWakeError, "active wake"):
+            pulse.record_snapshot(state, snapshot(), wake_id="wake-2", now=NOW)
+
     def test_standalone_handoff_is_target_bound_and_orders_publication(self) -> None:
         handoff = pulse.build_heartbeat_handoff("Owner/Repo", 17)
 
         self.assertEqual(handoff["repository"], "owner/repo")
         self.assertEqual(handoff["pull_request_number"], 17)
-        self.assertEqual(handoff["protocol_version"], 11)
+        self.assertEqual(handoff["protocol_version"], 12)
         self.assertEqual(handoff["model"], "gpt-5.6-luna")
         self.assertEqual(handoff["reasoning_effort"], "xhigh")
         self.assertEqual(handoff["scheduler_kind"], "cron")
@@ -122,8 +313,8 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertIn("checkpoint must remain AUTHORIZED until delivery", handoff["prompt"])
         self.assertIn("never activate from authorization alone", handoff["prompt"])
         self.assertIn("must never be reactivated", handoff["prompt"])
-        self.assertIn("retain the exact paused setup-task ID", handoff["prompt"])
-        self.assertIn("delete that exact setup task", handoff["prompt"])
+        self.assertIn("registers its verified paused setup task atomically", handoff["prompt"])
+        self.assertIn("delete only that registered task ID", handoff["prompt"])
         self.assertIn("remove that worktree", handoff["prompt"])
         self.assertIn("persisted created_at plus cadence", handoff["prompt"])
         self.assertIn("Desktop-native update_plan tool", handoff["prompt"])
@@ -157,7 +348,7 @@ class DefaultLifecycleTests(unittest.TestCase):
         legacy = empty_checkpoint("Owner/Repo", 17)
         legacy["default_mode_schema_version"] = 1
         migrated = pulse.ensure_default_lifecycle(legacy)
-        self.assertEqual(migrated["default_mode_schema_version"], 2)
+        self.assertEqual(migrated["default_mode_schema_version"], 3)
         self.assertEqual(migrated["automation_policy"]["profile"], "autonomous")
         self.assertIsNone(migrated["automation_policy"]["max_wakes"])
         self.assertEqual(migrated["retry_state"]["wake_attempts"], 0)

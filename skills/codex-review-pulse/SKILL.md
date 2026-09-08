@@ -28,7 +28,7 @@ the old heartbeat activated too early, used fixed-cadence overlap, allowed a
 and continued after `PAUSE_BLOCKED`. Do not describe `0.4.0` as production
 ready or use its old scheduled-task protocol as the default.
 
-Version `0.8.9` is the Codex-first default clean-context scheduling candidate. Its
+Version `0.8.10` is the Codex-first default clean-context scheduling candidate. Its
 real scheduled-task and live GitHub integration remains unverified until an
 independent forward test completes; do not describe that integration as proven
 before then.
@@ -224,10 +224,10 @@ if this is the initial explicit user request:
         model=TASK_MODEL, reasoning_effort=TASK_REASONING_EFFORT,
         disposition=PAUSED
     ) -> success
-    retain the exact setup-task ID and verify its persisted definition. Before
-    creating a successor, delete that exact paused setup task and require
-    confirmed deletion; if deletion cannot be confirmed, keep it paused,
-    persist a cleanup blocker, and end without creating another task.
+    retain the exact setup-task ID and verify its persisted definition. Pass
+    its full verified PAUSED readback as setup provenance to the initial
+    begin-wake so it is atomically registered; a generic task ID is never
+    deletion authority.
     # Wake 1 may initialize an absent checkpoint.
 else if this is a scheduler-delivered invocation:
     # This must be the first scheduler operation in this invocation. The
@@ -268,7 +268,7 @@ else:
 # Git-common-dir state, not configured checkout files.
 if this is the initial explicit user request:
     begin_result = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID --policy-json POLICY_JSON begin-wake \
-      --pause-confirmed
+      --pause-confirmed --setup-task-provenance VERIFIED_SETUP_PROVENANCE_JSON
 else:
     begin_result = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID begin-wake \
       --pause-confirmed --delivered-task-id DELIVERED_TASK_ID
@@ -365,6 +365,21 @@ PENDING_REPAIR = (
     else absent
 )
 require host.cleanup_worktree(pending_repair=PENDING_REPAIR) is confirmed
+# Persist the exact irreversible-retirement boundary before the host may delete.
+# VERIFIED_SETUP_PROVENANCE_JSON was retained from the outer initial create/readback;
+# delivered wakes instead use the exact authenticated delivered-task registration.
+RETIREMENT = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID prepare-retirement \
+  --worktree-cleanup-confirmed
+require RETIREMENT.next_action == RETIREMENT_PENDING
+DELETE = host.delete_exact_task(RETIREMENT.scheduled_task_id)
+LOOKUP = host.lookup_exact_task(RETIREMENT.scheduled_task_id) if DELETE is ambiguous else absent
+RETIREMENT_CONFIRMATION = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID confirm-retirement \
+  --task-id RETIREMENT.scheduled_task_id --role RETIREMENT.role \
+  --outcome confirmed|non_deletion|unknown --evidence DELETE_AND_LOOKUP_JSON
+require RETIREMENT_CONFIRMATION.next_action == RETIREMENT_CONFIRMED
+# A non-confirmed/UNKNOWN result is handoff-only; do not create a successor,
+# begin another wake, or perform PR work. Explicit exact reconciliation is the
+# only retry path. No name/prompt/age/listing-based task discovery is permitted.
 COMPLETION_NOW = host.now_utc()
 successor_result = host.create_standalone_task(
     kind=cron, conversation=standalone, target_thread_id=absent,
@@ -639,9 +654,12 @@ checkpoint's `next_not_before`. This keeps delivery and the lifecycle deadline
 aligned when completion and task creation fall in different fractional seconds.
 
 Never rely on pausing and reactivating a fixed recurring task to reset its
-clock, and do not submit `DTSTART` during immediate automation creation. Create
-one new paused cadence-only successor immediately after choosing
-`wake_completed_at`.
+clock, and do not submit `DTSTART` during immediate automation creation. After
+confirmed cleanup and a durable rearm proof, persist an exact registered
+predecessor as retirement `pending`, delete only that ID, and persist confirmed
+retirement before choosing the completion anchor or creating one new paused
+cadence-only successor. `NONE` means confirmed retirement with no current task;
+`UNKNOWN` means exact scheduler truth is unavailable and is not absence.
 Read back its persisted ID, prompt, cadence, and `created_at`; require the
 creation anchor to be at or after `wake_completed_at` at the scheduler's
 representable precision, then derive:
@@ -730,15 +748,19 @@ invocation:
    focused validation. Stop immediately on any `PAUSE_*` or `STOP_*`.
  9. For `WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head `REQUEST_REVIEW`, finish
     all publication, remote-head, validation, and task-owned worktree cleanup first.
-    Only then read the host's current UTC time as the completion anchor. Do not use a
-    timestamp captured before cleanup or before the final durable close.
+    Persist immutable handoff and action proof plus exact predecessor retirement
+    pending evidence, delete exactly that registered setup/delivered task, and
+    durably confirm it. On any ambiguous delete/readback result, remain
+    handoff-only and require explicit exact reconciliation. Only after confirmed
+    retirement read the host's current UTC completion anchor.
 10. On a scheduled delivery, reload the target-bound handoff with
    `standalone-task-prompt` from the persisted policy and without
    `--policy-json`. Require its prompt and SHA-256 to match the delivered
    task's persisted canonical prompt, then use that handoff's model and
    reasoning settings for the successor. Do not carry `POLICY_JSON`,
    `STANDALONE_HANDOFF`, or task-setting variables from an earlier invocation.
-   Create one new standalone successor task in `PAUSED` state with the
+   Create one new standalone successor task in `PAUSED` state only after that
+   confirmed exact retirement, with the
    verified handoff and a cadence-only recurring schedule. Do not submit
    `DTSTART` or hand-write a raw scheduling directive. Extract its ID inside
    the cleanup boundary, then read back the successor's persisted ID,

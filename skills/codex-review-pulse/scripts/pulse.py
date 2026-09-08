@@ -48,8 +48,8 @@ from state_model import (
 
 
 DEFAULT_CADENCE_SECONDS = 600
-DEFAULT_MODE_SCHEMA_VERSION = 2
-STANDALONE_TASK_PROTOCOL_VERSION = 11
+DEFAULT_MODE_SCHEMA_VERSION = 3
+STANDALONE_TASK_PROTOCOL_VERSION = 12
 # The local scheduler exposes task metadata at whole-second precision.  The
 # re-anchor path must use that same representation for expected and observed
 # first-run values; direct completion callbacks retain their exact/ceil path.
@@ -76,7 +76,16 @@ PAUSE_ACTIONS = {
     "PAUSE_POLICY_CONFIRMATION",
 }
 TERMINAL_ACTIONS = {"STOP_TERMINAL", "STOP_CLOSED", "STOP_POLICY_LIMIT"}
-SCHEDULED_TASK_DISPOSITIONS = {"PAUSED", "AUTHORIZED", "ACTIVE"}
+SCHEDULED_TASK_DISPOSITIONS = {"PAUSED", "AUTHORIZED", "ACTIVE", "NONE", "UNKNOWN"}
+RETIREMENT_PHASES = {"registered", "pending", "confirmed", "unknown"}
+RETIREMENT_ROLES = {"setup", "delivered"}
+HANDOFF_ONLY_PHASES = {
+    "retirement_pending",
+    "retirement_recovery",
+    "successor_ready",
+    "successor_authorized",
+    "successor_finalized",
+}
 
 
 class DefaultWakeError(RuntimeError):
@@ -105,10 +114,10 @@ def build_standalone_task_handoff(
         "This is a scheduler-delivered "
         "standalone invocation, not a continuation of another task and not a "
         "same-task heartbeat; never reuse a Codex conversation or targetThreadId. "
-        "On the initial user request, retain the exact paused setup-task ID. Before "
-        "creating a successor, delete that exact setup task and require confirmed "
-        "deletion; if deletion cannot be confirmed, keep it paused, persist a cleanup "
-        "blocker, and end without creating another task. "
+        "The outer setup path registers its verified paused setup task atomically "
+        "with wake one; every delivered wake registers only its authenticated exact "
+        "delivered task in the same begin-wake transition. Never infer a predecessor "
+        "from a name, prompt, age, or scheduler listing. "
         "Before every Codex automation status transition, read the task's persisted "
         "definition and submit the full cron update payload: preserve kind, name, "
         "prompt, recurrence, model, reasoning, project, environment, and destination, "
@@ -157,14 +166,22 @@ def build_standalone_task_handoff(
         "needed, write an immutable patch plus manifest under the Git common dir and "
         "pass that manifest to pulse retry --pending-repair; the next clean worktree "
         "must verify and apply it before focused validation. Leave push-created "
-        "review artifacts for a later wake. When rearming, create one new standalone "
-        "successor task in PAUSED state with the unchanged prompt and a host-supported "
+        "review artifacts for a later wake. For a rearmable result only, complete "
+        "worktree cleanup, persist immutable handoff plus exact predecessor retirement "
+        "pending evidence, delete only that registered task ID, and durably confirm "
+        "the exact retirement before taking the completion clock or creating anything. "
+        "A timeout, malformed delete response, or unreadable exact lookup is UNKNOWN, "
+        "not absence: leave the original wake handoff-only and use explicit exact "
+        "reconciliation. After confirmed retirement, create one new standalone "
+        "successor task in PAUSED state with the persisted handoff and a host-supported "
         "cadence-only recurring schedule; do not submit DTSTART. Extract its ID inside "
-        "the cleanup boundary, then read back the persisted task ID, status, "
+        "the durable handoff boundary, then read back the persisted task ID, status, "
         "creation timestamp, prompt and prompt digest, cron/standalone metadata, "
         "absent target thread, model, reasoning settings, and cadence before accepting "
-        "it. Cleanup must finish before taking the host's current UTC completion "
-        "anchor and before creating the successor. Run authorize-successor with its "
+        "it. Cleanup and confirmed exact retirement must finish before taking the host's "
+        "current UTC completion anchor and before creating the successor. A known "
+        "successor ID is never discarded or recreated; unknown create IDs require "
+        "manual recovery, never discovery. Run authorize-successor with its "
         "verified ID and schedule while the successor remains PAUSED and the current "
         "wake remains active. Then call complete-wake to durably finalize the wake; its "
         "checkpoint must remain AUTHORIZED until delivery. Only after that finalization "
@@ -387,15 +404,211 @@ def _default_review_epoch() -> dict[str, Any]:
     }
 
 
+def _nonempty_task_id(value: object) -> str | None:
+    """Return an exact scheduler ID only when it is a non-empty string."""
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _handoff_identity(
+    state: Mapping[str, Any], *, handoff: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """Build the immutable static handoff evidence for one retirement edge.
+
+    This deliberately records the canonical rendered prompt rather than an
+    in-memory ``StandaloneInvocation`` object.  A later process can therefore
+    validate a known successor without rediscovering scheduler tasks.
+    """
+    rendered = (
+        dict(handoff)
+        if isinstance(handoff, Mapping)
+        else build_standalone_task_handoff(
+            str(state["repository"]),
+            int(state["pull_request_number"]),
+            policy=state["automation_policy"],
+        )
+    )
+    required = (
+        "protocol_version",
+        "repository",
+        "pull_request_number",
+        "model",
+        "reasoning_effort",
+        "scheduler_kind",
+        "conversation_mode",
+        "target_thread_id",
+        "prompt",
+        "prompt_sha256",
+    )
+    if any(key not in rendered for key in required):
+        raise ValueError("Standalone handoff evidence is incomplete")
+    prompt = rendered.get("prompt")
+    digest = rendered.get("prompt_sha256")
+    if (
+        rendered.get("protocol_version") != STANDALONE_TASK_PROTOCOL_VERSION
+        or rendered.get("repository") != state.get("repository")
+        or rendered.get("pull_request_number") != state.get("pull_request_number")
+        or not isinstance(prompt, str)
+        or not prompt
+        or not isinstance(digest, str)
+        or hashlib.sha256(prompt.encode("utf-8")).hexdigest() != digest
+        or rendered.get("scheduler_kind") != "cron"
+        or rendered.get("conversation_mode") != "standalone"
+        or rendered.get("target_thread_id") is not None
+    ):
+        raise ValueError("Standalone handoff evidence is inconsistent")
+    return {
+        "protocol_version": rendered["protocol_version"],
+        "repository": rendered["repository"],
+        "pull_request_number": rendered["pull_request_number"],
+        "model": rendered["model"],
+        "reasoning_effort": rendered["reasoning_effort"],
+        "cadence_seconds": state["automation_policy"]["cadence_seconds"],
+        "scheduler_kind": rendered["scheduler_kind"],
+        "conversation_mode": rendered["conversation_mode"],
+        "target_thread_id": rendered["target_thread_id"],
+        "prompt": prompt,
+        "prompt_sha256": digest,
+        "policy_digest": state["automation_policy_digest"],
+    }
+
+
+def _validate_retirement_record(state: Mapping[str, Any], record: Mapping[str, Any]) -> None:
+    """Validate one bounded exact predecessor-retirement record."""
+    phase = record.get("phase")
+    task_id = _nonempty_task_id(record.get("task_id"))
+    role = record.get("role")
+    wake_id = record.get("wake_id")
+    if (
+        phase not in RETIREMENT_PHASES
+        or task_id is None
+        or role not in RETIREMENT_ROLES
+        or not isinstance(wake_id, str)
+        or not wake_id
+        or not isinstance(record.get("provenance"), Mapping)
+        or not isinstance(record.get("handoff"), Mapping)
+    ):
+        raise ValueError("Task retirement evidence is malformed")
+    handoff = record["handoff"]
+    if (
+        handoff.get("repository") != state.get("repository")
+        or handoff.get("pull_request_number") != state.get("pull_request_number")
+        or handoff.get("protocol_version") != STANDALONE_TASK_PROTOCOL_VERSION
+        or handoff.get("scheduler_kind") != "cron"
+        or handoff.get("conversation_mode") != "standalone"
+        or handoff.get("target_thread_id") is not None
+        or isinstance(handoff.get("cadence_seconds"), bool)
+        or not isinstance(handoff.get("cadence_seconds"), int)
+        or handoff.get("cadence_seconds") <= 0
+        or not isinstance(handoff.get("policy_digest"), str)
+        or not handoff.get("policy_digest")
+        or not isinstance(handoff.get("prompt"), str)
+        or hashlib.sha256(handoff["prompt"].encode("utf-8")).hexdigest()
+        != handoff.get("prompt_sha256")
+    ):
+        raise ValueError("Task retirement handoff evidence is inconsistent")
+    if phase in {"pending", "confirmed", "unknown"}:
+        rearm = record.get("rearm")
+        if not isinstance(rearm, Mapping):
+            raise ValueError("Task retirement rearm evidence is missing")
+        action = rearm.get("action")
+        source_action = rearm.get("source_action")
+        proof = rearm.get("proof")
+        if action not in REARM_ACTIONS or not isinstance(proof, Mapping):
+            raise ValueError("Task retirement rearm evidence is invalid")
+        if source_action == "RUN_BATCH":
+            if (proof.get("publication") or {}).get("status") != "succeeded":
+                raise ValueError("Task retirement publication proof is invalid")
+        elif source_action == "WAIT_RETRY":
+            if not isinstance(proof.get("pending_repair"), Mapping):
+                raise ValueError("Task retirement retry proof is invalid")
+        elif source_action == "REQUEST_REVIEW":
+            if (proof.get("trigger") or {}).get("status") != "emitted":
+                raise ValueError("Task retirement trigger proof is invalid")
+        elif source_action == "WAIT_REVIEW":
+            if not isinstance(proof.get("decision"), Mapping):
+                raise ValueError("Task retirement wait proof is invalid")
+        else:
+            raise ValueError("Task retirement rearm source is invalid")
+
+
+def _validate_retirement_shape(state: Mapping[str, Any]) -> None:
+    """Enforce truthful task-pointer and disposition semantics for lifecycle v3."""
+    record = state.get("task_retirement")
+    task_id = _nonempty_task_id(state.get("scheduled_task_id"))
+    disposition = state.get("scheduled_task_disposition")
+    if record is None:
+        if disposition in {"NONE", "UNKNOWN"}:
+            raise ValueError("A NONE or UNKNOWN scheduler state requires retirement evidence")
+        return
+    if not isinstance(record, Mapping):
+        raise ValueError("Task retirement evidence is malformed")
+    _validate_retirement_record(state, record)
+    phase = record["phase"]
+    predecessor = record["task_id"]
+    successor = record.get("successor")
+    if phase in {"registered", "pending"}:
+        if task_id != predecessor or disposition != "PAUSED":
+            raise ValueError("Registered or pending predecessor state is not truthful")
+        return
+    if phase == "unknown" and not isinstance(successor, Mapping):
+        if task_id is not None or disposition != "UNKNOWN":
+            raise ValueError("Unknown predecessor retirement state is not truthful")
+        return
+    if phase not in {"confirmed", "unknown"}:
+        return
+    if not isinstance(successor, Mapping):
+        if task_id is not None or disposition != "NONE":
+            raise ValueError("Confirmed retirement without successor must use NONE")
+        return
+    successor_id = _nonempty_task_id(successor.get("task_id"))
+    successor_status = successor.get("status")
+    if successor_id is None:
+        if successor_status != "creation_unknown" or task_id is not None or disposition != "UNKNOWN":
+            raise ValueError("Unknown successor creation state is not truthful")
+        return
+    if task_id != successor_id:
+        raise ValueError("Known successor ID must remain the current scheduler pointer")
+    if successor_status == "unknown":
+        if disposition != "UNKNOWN":
+            raise ValueError("Unknown successor status must use UNKNOWN disposition")
+    elif successor_status == "paused":
+        if disposition != "PAUSED":
+            raise ValueError("Known paused successor must use PAUSED disposition")
+    elif successor_status == "authorized":
+        if disposition != "AUTHORIZED":
+            raise ValueError("Authorized successor must use AUTHORIZED disposition")
+    elif successor_status == "active":
+        if disposition != "ACTIVE":
+            raise ValueError("Active successor must use ACTIVE disposition")
+    else:
+        raise ValueError("Known successor status is invalid")
+
+
 def ensure_default_lifecycle(checkpoint: dict[str, Any]) -> dict[str, Any]:
     """Add and validate default lifecycle state, migrating schema version 1."""
     result = deepcopy(checkpoint)
     previous_version = result.get("default_mode_schema_version")
     if (
         isinstance(previous_version, bool)
-        or previous_version not in (None, 1, DEFAULT_MODE_SCHEMA_VERSION)
+        or previous_version not in (None, 1, 2, DEFAULT_MODE_SCHEMA_VERSION)
     ):
         raise ValueError("Unsupported Codex-first default lifecycle schema version")
+    # A v2 active initial wake did not persist its setup task identity.  Do
+    # not stamp it as v3 NONE/UNKNOWN: either would invent scheduler truth.
+    if (
+        previous_version == 2
+        and result.get("active_wake_id")
+        and result.get("scheduled_task_id") is None
+        and result.get("scheduled_task_disposition", "PAUSED") == "PAUSED"
+    ):
+        raise DefaultWakeError("legacy_active_task_identity_unknown")
+    # v11 never carried the immutable retirement handoff required to compare a
+    # live task safely with protocol v12.  Active chains therefore require an
+    # explicit fresh setup rather than an implicit renderer compatibility mode.
+    if previous_version == 2 and (
+        result.get("active_wake_id") or result.get("scheduled_task_id")
+    ):
+        raise DefaultWakeError("legacy_v11_handoff_unverified")
     defaults: dict[str, Any] = {
         "default_mode_schema_version": DEFAULT_MODE_SCHEMA_VERSION,
         "active_wake_id": None,
@@ -407,6 +620,8 @@ def ensure_default_lifecycle(checkpoint: dict[str, Any]) -> dict[str, Any]:
         "scheduled_task_disposition": "PAUSED",
         "scheduled_task_kind": "standalone",
         "scheduled_task_id": None,
+        "task_retirement": None,
+        "previous_task_retirement": None,
         "wake_count": 0,
         "failure_latch": None,
         "last_wake_id": None,
@@ -455,6 +670,7 @@ def ensure_default_lifecycle(checkpoint: dict[str, Any]) -> dict[str, Any]:
         value = retry_state.get(key, 0)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"Default retry state field {key} is invalid")
+    _validate_retirement_shape(result)
     return result
 
 
@@ -526,6 +742,14 @@ def _pause(
     clear_active_wake: bool = True,
 ) -> dict[str, Any]:
     """Make pause absorbing for the current wake and persist its evidence."""
+    retirement = state.get("task_retirement")
+    if isinstance(retirement, Mapping) and retirement.get("phase") in {"confirmed", "unknown"}:
+        return _retirement_pause(
+            state,
+            reason_code=reason_code,
+            now=now,
+            evidence=evidence,
+        )
     active_wake_id = state.get("active_wake_id")
     mutation_occurred = bool(mutation_occurred) or bool(
         state.get("wake_mutation_occurred")
@@ -569,12 +793,21 @@ def _terminal(
 
 
 def _require_active_wake(
-    state: dict[str, Any], wake_id: str, *, allow_retry_completion: bool = False
+    state: dict[str, Any],
+    wake_id: str,
+    *,
+    allow_retry_completion: bool = False,
+    allow_handoff_only: bool = False,
 ) -> None:
     if state.get("failure_latch"):
         raise DefaultWakeError("This wake is paused by a durable recovery latch")
     if state.get("active_wake_id") != wake_id:
         raise DefaultWakeError("The requested operation is not owned by the active wake")
+    if (
+        state.get("wake_phase") in HANDOFF_ONLY_PHASES
+        and not allow_handoff_only
+    ):
+        raise DefaultWakeError("The active wake is limited to successor handoff recovery")
     if state.get("wake_phase") in {"paused", "terminal", "completed"} or (
         state.get("wake_phase") == "retry_waiting" and not allow_retry_completion
     ):
@@ -627,6 +860,68 @@ def _record_default_trigger_event(
     return events[attempted_head]
 
 
+def _validated_setup_provenance(
+    state: Mapping[str, Any], provenance: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Require the outer setup path's exact paused-task readback proof."""
+    task_id = _nonempty_task_id(provenance.get("task_id"))
+    readback = provenance.get("readback")
+    if task_id is None or provenance.get("pause_confirmed") is not True or not isinstance(readback, Mapping):
+        raise DefaultWakeError("verified setup task provenance is required")
+    handoff = _handoff_identity(state)
+    expected = {
+        "id": task_id,
+        "status": "PAUSED",
+        "prompt": handoff["prompt"],
+        "prompt_sha256": handoff["prompt_sha256"],
+        "scheduler_kind": "cron",
+        "conversation_mode": "standalone",
+        "target_thread_id": None,
+        "model": handoff["model"],
+        "reasoning_effort": handoff["reasoning_effort"],
+        "cadence_seconds": handoff["cadence_seconds"],
+    }
+    for key, expected_value in expected.items():
+        actual = readback.get(key)
+        if key == "id" and actual is None:
+            actual = readback.get("task_id")
+        if actual != expected_value:
+            raise DefaultWakeError("verified setup task provenance does not match handoff")
+    return {
+        "task_id": task_id,
+        "pause_confirmed": True,
+        "readback": deepcopy(dict(readback)),
+    }
+
+
+def _register_retirement_target(
+    state: dict[str, Any],
+    *,
+    wake_id: str,
+    task_id: str,
+    role: str,
+    provenance: Mapping[str, Any],
+) -> None:
+    """Install the one exact predecessor with the same mutation as begin-wake."""
+    if role not in RETIREMENT_ROLES or _nonempty_task_id(task_id) is None:
+        raise ValueError("Task retirement registration is invalid")
+    existing = state.get("task_retirement")
+    if isinstance(existing, Mapping) and existing.get("phase") == "confirmed":
+        state["previous_task_retirement"] = deepcopy(dict(existing))
+    state["task_retirement"] = {
+        "phase": "registered",
+        "wake_id": wake_id,
+        "task_id": task_id,
+        "role": role,
+        "provenance": deepcopy(dict(provenance)),
+        "handoff": _handoff_identity(state),
+        "rearm": None,
+        "successor": None,
+    }
+    state["scheduled_task_id"] = task_id
+    state["scheduled_task_disposition"] = "PAUSED"
+
+
 def begin_wake(
     checkpoint: dict[str, Any],
     *,
@@ -636,6 +931,8 @@ def begin_wake(
     policy_overrides: Mapping[str, Any] | None = None,
     pause_heartbeat: Callable[[], object] | None = None,
     delivered_task_id: str | None = None,
+    setup_task_provenance: Mapping[str, Any] | None = None,
+    delivered_task_provenance: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Begin one wake after authenticating any scheduled delivery."""
     if not isinstance(wake_id, str) or not wake_id.strip():
@@ -670,6 +967,8 @@ def begin_wake(
         not isinstance(delivered_task_id, str) or not delivered_task_id.strip()
     ):
         raise ValueError("Delivered task ID must be a non-empty string")
+    if setup_task_provenance is not None and delivered_task_id is not None:
+        raise ValueError("Setup provenance cannot be supplied for a delivered task")
 
     if state.get("wake_phase") in {"terminal", "closed"}:
         raise DefaultWakeError(
@@ -843,6 +1142,31 @@ def begin_wake(
                 (state.get("active_batch") or {}).get("targeted_thread_ids") or []
             ),
             **({"pending_repair": deepcopy(pending_repair)} if pending_repair else {}),
+        )
+    # Registration is the last part of a successful begin-wake replacement,
+    # after preflight and pending-repair validation.  A rejected delivery must
+    # leave the prior completed retirement evidence untouched.
+    if delivered_task_id is not None:
+        _register_retirement_target(
+            state,
+            wake_id=wake_id,
+            task_id=delivered_task_id,
+            role="delivered",
+            provenance={
+                "task_id": delivered_task_id,
+                "pause_confirmed": True,
+                "authenticated": True,
+                "readback": deepcopy(dict(delivered_task_provenance or {})),
+            },
+        )
+    elif setup_task_provenance is not None:
+        verified_setup = _validated_setup_provenance(state, setup_task_provenance)
+        _register_retirement_target(
+            state,
+            wake_id=wake_id,
+            task_id=verified_setup["task_id"],
+            role="setup",
+            provenance=verified_setup,
         )
     result = _decision(
         "WAKE_STARTED",
@@ -1586,6 +1910,584 @@ def _validate_successor_rearmability(
     return None
 
 
+def _retirement_rearm_proof(state: Mapping[str, Any]) -> dict[str, Any]:
+    """Freeze the original rearmable result instead of trusting later recovery."""
+    decision = state.get("last_decision")
+    if not isinstance(decision, Mapping):
+        raise DefaultWakeError("The wake has no durable rearmable decision")
+    action = decision.get("next_action")
+    if action == "WAIT_REVIEW":
+        publication = (state.get("active_batch") or {}).get("publication") or {}
+        if publication.get("status") == "succeeded":
+            return {
+                "action": "WAIT_REVIEW",
+                "source_action": "RUN_BATCH",
+                "proof": {"publication": deepcopy(publication)},
+            }
+        return {
+            "action": "WAIT_REVIEW",
+            "source_action": "WAIT_REVIEW",
+            "proof": {"decision": deepcopy(dict(decision))},
+        }
+    if action == "WAIT_RETRY":
+        batch = state.get("active_batch")
+        pending_repair = batch.get("pending_repair") if isinstance(batch, Mapping) else None
+        if not isinstance(pending_repair, Mapping):
+            raise DefaultWakeError("Retry retirement requires a durable pending repair")
+        return {
+            "action": "WAIT_RETRY",
+            "source_action": "WAIT_RETRY",
+            "proof": {"pending_repair": deepcopy(dict(pending_repair))},
+        }
+    if action == "REQUEST_REVIEW":
+        snapshot = state.get("last_snapshot")
+        head_oid = snapshot.get("head_oid") if isinstance(snapshot, Mapping) else None
+        event = (
+            (state.get("trigger_events") or {}).get(head_oid)
+            if isinstance(head_oid, str)
+            else None
+        )
+        if not isinstance(event, Mapping) or event.get("status") != "emitted":
+            raise DefaultWakeError("Review-trigger retirement requires emitted evidence")
+        return {
+            "action": "REQUEST_REVIEW",
+            "source_action": "REQUEST_REVIEW",
+            "proof": {"head_oid": head_oid, "trigger": deepcopy(dict(event))},
+        }
+    if action == "RUN_BATCH":
+        publication = (state.get("active_batch") or {}).get("publication") or {}
+        if publication.get("status") != "succeeded":
+            raise DefaultWakeError("Batch retirement requires completed publication")
+        return {
+            "action": "WAIT_REVIEW",
+            "source_action": "RUN_BATCH",
+            "proof": {"publication": deepcopy(publication)},
+        }
+    raise DefaultWakeError("The wake has no rearmable completion proof")
+
+
+def _retirement_pause(
+    state: dict[str, Any],
+    *,
+    reason_code: str,
+    now: str,
+    evidence: Any = None,
+) -> dict[str, Any]:
+    """Fail closed after predecessor retirement without fabricating PAUSED state."""
+    record = state.get("task_retirement")
+    if not isinstance(record, Mapping) or record.get("phase") not in {"confirmed", "unknown"}:
+        raise DefaultWakeError("Retirement-aware pause requires retirement evidence")
+    successor = record.get("successor")
+    if record.get("phase") == "unknown":
+        state["scheduled_task_id"] = None
+        state["scheduled_task_disposition"] = "UNKNOWN"
+    elif not isinstance(successor, Mapping):
+        state["scheduled_task_id"] = None
+        state["scheduled_task_disposition"] = "NONE"
+    elif _nonempty_task_id(successor.get("task_id")) is None:
+        state["scheduled_task_id"] = None
+        state["scheduled_task_disposition"] = "UNKNOWN"
+    elif successor.get("status") == "unknown":
+        state["scheduled_task_id"] = successor["task_id"]
+        state["scheduled_task_disposition"] = "UNKNOWN"
+    else:
+        state["scheduled_task_id"] = successor["task_id"]
+        state["scheduled_task_disposition"] = "PAUSED"
+        if isinstance(successor, dict):
+            successor["status"] = "paused"
+    state["wake_phase"] = "retirement_recovery"
+    state["failure_latch"] = {
+        "reason_code": reason_code,
+        "latched_at": now,
+        "evidence": deepcopy(evidence),
+    }
+    result = _decision(
+        "PAUSE_RECOVERY",
+        reason_code,
+        evidence=deepcopy(evidence),
+        mutation_occurred=bool(state.get("wake_mutation_occurred")),
+    )
+    _set_last_result(state, result)
+    return result
+
+
+def prepare_task_retirement(
+    checkpoint: dict[str, Any],
+    *,
+    wake_id: str,
+    now: str,
+    worktree_cleanup_confirmed: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Persist the exact irreversible-retirement boundary before host deletion."""
+    state = ensure_default_lifecycle(checkpoint)
+    _require_active_wake(state, wake_id, allow_retry_completion=True)
+    record = state.get("task_retirement")
+    if not isinstance(record, Mapping) or record.get("phase") != "registered":
+        result = _pause(
+            state,
+            reason_code="retirement_provenance_missing",
+            now=_iso(now),
+            evidence={"task_retirement": deepcopy(record)},
+            action="PAUSE_RECOVERY",
+        )
+        return state, result
+    if record.get("wake_id") != wake_id:
+        raise DefaultWakeError("Retirement target does not belong to the active wake")
+    if worktree_cleanup_confirmed is not True:
+        result = _pause(
+            state,
+            reason_code="worktree_cleanup_unconfirmed",
+            now=_iso(now),
+            evidence={"worktree_cleanup_confirmed": False},
+            action="PAUSE_RECOVERY",
+        )
+        return state, result
+    try:
+        proof = _retirement_rearm_proof(state)
+    except DefaultWakeError as error:
+        result = _pause(
+            state,
+            reason_code="retirement_not_rearmable",
+            now=_iso(now),
+            evidence={"error": str(error)},
+            action="PAUSE_RECOVERY",
+        )
+        return state, result
+    pending = deepcopy(dict(record))
+    pending["phase"] = "pending"
+    pending["rearm"] = proof
+    pending["worktree_cleanup_confirmed"] = True
+    pending["prepared_at"] = _iso(now)
+    state["task_retirement"] = pending
+    state["wake_phase"] = "retirement_pending"
+    result = _decision(
+        "RETIREMENT_PENDING",
+        "task_retirement_prepared",
+        wake_id=wake_id,
+        scheduled_task_id=pending["task_id"],
+        role=pending["role"],
+        mutation_occurred=False,
+    )
+    state["last_wake_result"] = deepcopy(result)
+    return state, result
+
+
+def confirm_task_retirement(
+    checkpoint: dict[str, Any],
+    *,
+    wake_id: str,
+    now: str,
+    task_id: str,
+    role: str,
+    outcome: str,
+    evidence: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Record an exact deletion result; only confirmed deletion may rearm."""
+    if outcome not in {"confirmed", "non_deletion", "unknown"}:
+        raise ValueError("Task retirement outcome is invalid")
+    state = ensure_default_lifecycle(checkpoint)
+    record = state.get("task_retirement")
+    if not isinstance(record, Mapping):
+        raise DefaultWakeError("Task retirement evidence is missing")
+    if (
+        record.get("wake_id") != wake_id
+        or record.get("task_id") != task_id
+        or record.get("role") != role
+        or record.get("phase") not in {"pending", "unknown", "confirmed"}
+    ):
+        raise DefaultWakeError("Task retirement result does not match the pending predecessor")
+    if record.get("phase") == "confirmed" and outcome == "confirmed":
+        return state, _decision(
+            "RETIREMENT_CONFIRMED",
+            "task_retirement_already_confirmed",
+            scheduled_task_id=task_id,
+            mutation_occurred=False,
+        )
+    if outcome == "non_deletion":
+        state["scheduled_task_id"] = task_id
+        state["scheduled_task_disposition"] = "PAUSED"
+        state["task_retirement"] = {**deepcopy(dict(record)), "phase": "pending"}
+        return state, _pause(
+            state,
+            reason_code="task_retirement_not_confirmed",
+            now=_iso(now),
+            evidence=deepcopy(dict(evidence or {})),
+            action="PAUSE_RECOVERY",
+        )
+    updated = deepcopy(dict(record))
+    updated["retirement_checked_at"] = _iso(now)
+    updated["retirement_evidence"] = deepcopy(dict(evidence or {}))
+    if outcome == "unknown":
+        updated["phase"] = "unknown"
+        state["task_retirement"] = updated
+        return state, _retirement_pause(
+            state,
+            reason_code="task_retirement_unknown",
+            now=_iso(now),
+            evidence=updated["retirement_evidence"],
+        )
+    updated["phase"] = "confirmed"
+    updated["confirmed_at"] = _iso(now)
+    state["task_retirement"] = updated
+    state["scheduled_task_id"] = None
+    state["scheduled_task_disposition"] = "NONE"
+    state["wake_phase"] = "retirement_recovery"
+    result = _decision(
+        "RETIREMENT_CONFIRMED",
+        "task_retirement_confirmed",
+        scheduled_task_id=task_id,
+        role=role,
+        mutation_occurred=False,
+    )
+    state["last_wake_result"] = deepcopy(result)
+    return state, result
+
+
+def reconcile_task_retirement(
+    checkpoint: dict[str, Any],
+    *,
+    wake_id: str,
+    now: str,
+    task_id: str,
+    role: str,
+    lookup: str,
+    evidence: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Retry only a named pending/unknown retirement through exact readback."""
+    if lookup not in {"PRESENT", "AUTHORITATIVE_NOT_FOUND", "READBACK_UNKNOWN"}:
+        raise ValueError("Retirement lookup result is invalid")
+    state = ensure_default_lifecycle(checkpoint)
+    record = state.get("task_retirement")
+    if not isinstance(record, Mapping) or record.get("phase") not in {"pending", "unknown"}:
+        raise DefaultWakeError("No pending exact retirement can be reconciled")
+    if record.get("wake_id") != wake_id or record.get("task_id") != task_id or record.get("role") != role:
+        raise DefaultWakeError("Retirement reconciliation does not match the exact predecessor")
+    if lookup == "AUTHORITATIVE_NOT_FOUND":
+        return confirm_task_retirement(
+            state,
+            wake_id=wake_id,
+            now=now,
+            task_id=task_id,
+            role=role,
+            outcome="confirmed",
+            evidence={"lookup": lookup, **deepcopy(dict(evidence or {}))},
+        )
+    if lookup == "PRESENT":
+        return confirm_task_retirement(
+            state,
+            wake_id=wake_id,
+            now=now,
+            task_id=task_id,
+            role=role,
+            outcome="non_deletion",
+            evidence={"lookup": lookup, **deepcopy(dict(evidence or {}))},
+        )
+    return confirm_task_retirement(
+        state,
+        wake_id=wake_id,
+        now=now,
+        task_id=task_id,
+        role=role,
+        outcome="unknown",
+        evidence={"lookup": lookup, **deepcopy(dict(evidence or {}))},
+    )
+
+
+def record_retirement_successor_creation(
+    checkpoint: dict[str, Any],
+    *,
+    wake_id: str,
+    now: str,
+    outcome: str,
+    task_id: str | None = None,
+    completion_anchor: str | None = None,
+    evidence: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Durably retain a known successor ID before its fallible readback."""
+    if outcome not in {
+        "CREATED_EXACT_ID",
+        "AUTHORITATIVE_NO_SUCCESSOR",
+        "SUCCESSOR_CREATION_UNKNOWN",
+    }:
+        raise ValueError("Successor creation outcome is invalid")
+    state = ensure_default_lifecycle(checkpoint)
+    record = state.get("task_retirement")
+    if (
+        not isinstance(record, Mapping)
+        or record.get("phase") != "confirmed"
+        or record.get("wake_id") != wake_id
+    ):
+        raise DefaultWakeError("Successor creation requires confirmed predecessor retirement")
+    if record.get("successor") is not None:
+        raise DefaultWakeError("A known successor must be reused rather than recreated")
+    updated = deepcopy(dict(record))
+    if outcome == "AUTHORITATIVE_NO_SUCCESSOR":
+        updated["successor_creation"] = {
+            "outcome": outcome,
+            "recorded_at": _iso(now),
+            "evidence": deepcopy(dict(evidence or {})),
+        }
+        state["task_retirement"] = updated
+        return state, _retirement_pause(
+            state,
+            reason_code="successor_creation_rejected",
+            now=_iso(now),
+            evidence=updated["successor_creation"],
+        )
+    if outcome == "SUCCESSOR_CREATION_UNKNOWN":
+        updated["successor"] = {
+            "task_id": None,
+            "status": "creation_unknown",
+            "recorded_at": _iso(now),
+            "evidence": deepcopy(dict(evidence or {})),
+        }
+        state["task_retirement"] = updated
+        return state, _retirement_pause(
+            state,
+            reason_code="successor_creation_unknown",
+            now=_iso(now),
+            evidence=updated["successor"],
+        )
+    exact_id = _nonempty_task_id(task_id)
+    if exact_id is None or not isinstance(completion_anchor, str):
+        raise ValueError("An exact successor ID and completion anchor are required")
+    _utc(completion_anchor)
+    updated["successor"] = {
+        "task_id": exact_id,
+        "status": "unknown",
+        "completion_anchor": _iso(completion_anchor),
+        "recorded_at": _iso(now),
+        "evidence": deepcopy(dict(evidence or {})),
+    }
+    state["task_retirement"] = updated
+    state["scheduled_task_id"] = exact_id
+    state["scheduled_task_disposition"] = "UNKNOWN"
+    state["wake_phase"] = "retirement_recovery"
+    result = _decision(
+        "SUCCESSOR_CREATED",
+        "successor_identity_recorded",
+        scheduled_task_id=exact_id,
+        mutation_occurred=False,
+    )
+    state["last_wake_result"] = deepcopy(result)
+    return state, result
+
+
+def record_retirement_successor_readback(
+    checkpoint: dict[str, Any],
+    *,
+    wake_id: str,
+    now: str,
+    task: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate a known paused successor against durable handoff evidence."""
+    state = ensure_default_lifecycle(checkpoint)
+    record = state.get("task_retirement")
+    if (
+        not isinstance(record, Mapping)
+        or record.get("phase") != "confirmed"
+        or record.get("wake_id") != wake_id
+        or not isinstance(record.get("successor"), Mapping)
+    ):
+        raise DefaultWakeError("Successor readback requires a confirmed exact retirement")
+    successor = record["successor"]
+    task_id = _nonempty_task_id(successor.get("task_id"))
+    if task_id is None:
+        raise DefaultWakeError("A successor without an exact ID cannot be read back")
+    handoff = record["handoff"]
+    observed_id = task.get("id", task.get("task_id"))
+    expected = {
+        "id": task_id,
+        "status": "PAUSED",
+        "prompt": handoff["prompt"],
+        "prompt_sha256": handoff["prompt_sha256"],
+        "scheduler_kind": handoff["scheduler_kind"],
+        "conversation_mode": handoff["conversation_mode"],
+        "target_thread_id": handoff["target_thread_id"],
+        "model": handoff["model"],
+        "reasoning_effort": handoff["reasoning_effort"],
+        "cadence_seconds": handoff["cadence_seconds"],
+    }
+    for key, expected_value in expected.items():
+        actual = observed_id if key == "id" else task.get(key)
+        if actual != expected_value:
+            raise DefaultWakeError("Successor readback does not match immutable handoff")
+    created_at = task.get("created_at")
+    first_run = task.get("first_run")
+    if not isinstance(created_at, str) or not isinstance(first_run, str):
+        raise DefaultWakeError("Successor readback lacks persisted schedule metadata")
+    created = _utc(created_at)
+    anchor = _utc(str(successor.get("completion_anchor")))
+    if _truncate_to_scheduler_precision(created) < _truncate_to_scheduler_precision(anchor):
+        raise DefaultWakeError("Successor creation predates the handoff anchor")
+    expected_first_run = _truncate_to_scheduler_precision(
+        created + timedelta(seconds=handoff["cadence_seconds"])
+    ).isoformat()
+    if not _schedule_times_match(
+        expected_first_run,
+        first_run,
+        ordered=True,
+        scheduler_precision=True,
+    ):
+        raise DefaultWakeError("Successor first run does not match persisted creation")
+    updated = deepcopy(dict(record))
+    updated["successor"] = {
+        **deepcopy(dict(successor)),
+        "status": "paused",
+        "created_at": _iso(created_at),
+        "first_run": _iso(first_run),
+        "readback_at": _iso(now),
+        "readback": deepcopy(dict(task)),
+    }
+    state["task_retirement"] = updated
+    state["scheduled_task_id"] = task_id
+    state["scheduled_task_disposition"] = "PAUSED"
+    state["wake_phase"] = "successor_ready"
+    result = _decision(
+        "SUCCESSOR_READY",
+        "successor_readback_verified",
+        scheduled_task_id=task_id,
+        mutation_occurred=False,
+    )
+    state["last_wake_result"] = deepcopy(result)
+    return state, result
+
+
+def record_retirement_successor_pause(
+    checkpoint: dict[str, Any],
+    *,
+    wake_id: str,
+    now: str,
+    task_id: str,
+    confirmed: bool,
+    evidence: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Record the only safe fallback after known-successor readback failure."""
+    state = ensure_default_lifecycle(checkpoint)
+    record = state.get("task_retirement")
+    successor = record.get("successor") if isinstance(record, Mapping) else None
+    if (
+        not isinstance(record, Mapping)
+        or record.get("phase") != "confirmed"
+        or record.get("wake_id") != wake_id
+        or not isinstance(successor, Mapping)
+        or successor.get("task_id") != task_id
+    ):
+        raise DefaultWakeError("Successor pause evidence does not match retirement handoff")
+    updated = deepcopy(dict(record))
+    updated_successor = deepcopy(dict(successor))
+    updated_successor["status"] = "paused" if confirmed else "unknown"
+    updated_successor["pause_evidence"] = deepcopy(dict(evidence or {}))
+    updated["successor"] = updated_successor
+    state["task_retirement"] = updated
+    state["scheduled_task_id"] = task_id
+    state["scheduled_task_disposition"] = "PAUSED" if confirmed else "UNKNOWN"
+    state["wake_phase"] = "retirement_recovery"
+    result = _decision(
+        "SUCCESSOR_PAUSED" if confirmed else "PAUSE_RECOVERY",
+        "successor_pause_confirmed" if confirmed else "successor_status_unknown",
+        scheduled_task_id=task_id,
+        mutation_occurred=False,
+    )
+    state["last_wake_result"] = deepcopy(result)
+    return state, result
+
+
+def recover_retirement_successor(
+    checkpoint: dict[str, Any],
+    *,
+    wake_id: str,
+    now: str,
+    action: str,
+    task: Mapping[str, Any],
+    delivery_observed: bool,
+    activation_confirmed: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Resume only a verified PAUSED successor handoff, never PR work.
+
+    The caller supplies fresh exact task readback after the user-authorized host
+    operation.  The latch is consumed only in this one returned checkpoint
+    replacement, so no durable unlatched active wake can run ordinary work.
+    """
+    if action not in {"authorize", "finalize"}:
+        raise ValueError("Retirement successor recovery action is invalid")
+    state = ensure_default_lifecycle(checkpoint)
+    record = state.get("task_retirement")
+    if (
+        not isinstance(record, Mapping)
+        or record.get("phase") != "confirmed"
+        or record.get("wake_id") != wake_id
+        or not isinstance(record.get("rearm"), Mapping)
+        or not isinstance(record.get("successor"), Mapping)
+    ):
+        raise DefaultWakeError("Retirement successor recovery evidence is incomplete")
+    successor = record["successor"]
+    task_id = _nonempty_task_id(successor.get("task_id"))
+    if task_id is None or successor.get("status") not in {"paused", "authorized"}:
+        raise DefaultWakeError("Retirement successor is not a known paused task")
+    if delivery_observed or activation_confirmed or task.get("status") != "PAUSED":
+        raise DefaultWakeError("Recovered successor must be paused and undelivered")
+    # Validate all immutable static and persisted timestamp fields against a
+    # copy first.  The live state stays unchanged if that check rejects.
+    probe = deepcopy(state)
+    record_retirement_successor_readback(
+        probe,
+        wake_id=wake_id,
+        now=now,
+        task=task,
+    )
+    latch = state.get("failure_latch")
+    if latch is not None:
+        if not isinstance(latch, Mapping) or latch.get("reason_code") not in {
+            "task_retirement_unknown",
+            "successor_creation_rejected",
+            "successor_creation_unknown",
+            "completion_anchor_unavailable",
+            "successor_authorization_unconfirmed",
+            "successor_finalization_interrupted",
+            "successor_activation_unconfirmed",
+            "successor_cleanup_unconfirmed",
+        }:
+            raise DefaultWakeError("Retirement recovery cannot consume an unrelated latch")
+        state["failure_latch"] = None
+    rearm = record["rearm"]
+    recovered_action = rearm.get("action")
+    if recovered_action not in REARM_ACTIONS:
+        raise DefaultWakeError("Retirement rearm proof is invalid")
+    state["last_decision"] = {
+        "next_action": recovered_action,
+        "reason_code": "recovered_retirement_handoff",
+        "proof": deepcopy(rearm.get("proof")),
+    }
+    if action == "authorize":
+        return authorize_successor(
+            state,
+            wake_id=wake_id,
+            now=successor["completion_anchor"],
+            scheduled_created_at=successor["created_at"],
+            scheduled_first_run=successor["first_run"],
+            scheduled_task_id=task_id,
+        )
+    authorization = state.get("successor_authorization")
+    if (
+        not isinstance(authorization, Mapping)
+        or authorization.get("wake_id") != wake_id
+        or authorization.get("scheduled_task_id") != task_id
+        or state.get("wake_phase") not in {"successor_authorized", "retirement_recovery"}
+    ):
+        raise DefaultWakeError("Retirement finalization requires exact durable authorization")
+    state["wake_phase"] = "successor_authorized"
+    return complete_wake(
+        state,
+        wake_id=wake_id,
+        now=successor["completion_anchor"],
+        schedule_next_wake=lambda _: successor["first_run"],
+        schedule_anchor_created_at=successor["created_at"],
+        scheduled_task_id=task_id,
+        require_schedule_anchor=True,
+    )
+
+
 def complete_wake(
     checkpoint: dict[str, Any],
     *,
@@ -1650,7 +2552,12 @@ def complete_wake(
         }:
             raise DefaultWakeError("Successor authorization is not ready for completion")
     else:
-        _require_active_wake(state, wake_id, allow_retry_completion=True)
+        _require_active_wake(
+            state,
+            wake_id,
+            allow_retry_completion=True,
+            allow_handoff_only=completion_failure is not None,
+        )
     if (
         require_schedule_anchor
         and schedule_anchor_created_at is not None
@@ -1688,7 +2595,10 @@ def complete_wake(
             action="PAUSE_RECOVERY",
             mutation_occurred=mutation_occurred,
         )
-        if authorized_handoff:
+        if authorized_handoff and not (
+            isinstance(state.get("task_retirement"), Mapping)
+            and state["task_retirement"].get("phase") == "confirmed"
+        ):
             state["successor_authorization"] = None
         state["last_wake_id"] = wake_id
         return state, result
@@ -1911,6 +2821,20 @@ def complete_wake(
     state["scheduled_task_kind"] = "standalone"
     if scheduled_task_id is not None:
         state["scheduled_task_id"] = scheduled_task_id
+    retirement = state.get("task_retirement")
+    if isinstance(retirement, Mapping) and retirement.get("phase") == "confirmed":
+        successor = retirement.get("successor")
+        if isinstance(successor, Mapping) and successor.get("task_id") == scheduled_task_id:
+            updated_retirement = deepcopy(dict(retirement))
+            updated_successor = deepcopy(dict(successor))
+            updated_successor["status"] = "authorized"
+            updated_retirement["successor"] = updated_successor
+            state["task_retirement"] = updated_retirement
+    elif isinstance(retirement, Mapping) and retirement.get("phase") == "registered":
+        # Older injected direct-first-run callbacks predate the host-side
+        # exact-delete contract.  They remain test-only compatibility input;
+        # never treat their generic task pointer as setup provenance.
+        state["task_retirement"] = None
     state["wake_phase"] = (
         "successor_finalized"
         if authorized_handoff
@@ -1932,7 +2856,12 @@ def authorize_successor(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Persist verified successor authority while the host task remains paused."""
     state = ensure_default_lifecycle(checkpoint)
-    _require_active_wake(state, wake_id, allow_retry_completion=True)
+    _require_active_wake(
+        state,
+        wake_id,
+        allow_retry_completion=True,
+        allow_handoff_only=True,
+    )
     if not isinstance(scheduled_task_id, str) or not scheduled_task_id.strip():
         raise ValueError("Scheduled task ID must be a non-empty string")
     rearmability_result = _validate_successor_rearmability(
@@ -1957,6 +2886,30 @@ def authorize_successor(
         scheduler_precision=True,
     ):
         raise DefaultWakeError("Successor first run does not match its creation anchor")
+    retirement = state.get("task_retirement")
+    if isinstance(retirement, Mapping) and retirement.get("phase") == "confirmed":
+        successor = retirement.get("successor")
+        if (
+            not isinstance(successor, Mapping)
+            or successor.get("task_id") != scheduled_task_id
+            or successor.get("status") != "paused"
+            or state.get("wake_phase") not in {"successor_ready", "retirement_recovery"}
+        ):
+            raise DefaultWakeError("Recovered successor authorization lacks exact paused readback")
+        if _truncate_to_scheduler_precision(_utc(successor.get("created_at"))) != _truncate_to_scheduler_precision(created_at):
+            raise DefaultWakeError("Recovered successor authorization creation time does not match")
+        if not _schedule_times_match(
+            successor.get("first_run"),
+            scheduled_first_run,
+            ordered=True,
+            scheduler_precision=True,
+        ):
+            raise DefaultWakeError("Recovered successor authorization first run does not match")
+    elif isinstance(retirement, Mapping) and retirement.get("phase") == "registered":
+        # Direct callback integrations from before retirement support never
+        # supplied outer provenance or a delete controller.  They are kept as
+        # a compatibility input only and cannot claim exact-task retirement.
+        state["task_retirement"] = None
     next_not_before = expected_first_run
     state["successor_authorization"] = {
         "wake_id": wake_id,
@@ -2067,6 +3020,13 @@ def reconcile_authorized_successor(
         state["scheduled_task_disposition"] = "ACTIVE"
         state["wake_phase"] = "retry_waiting" if prior_action == "WAIT_RETRY" else "completed"
         state["successor_authorization"] = None
+        retirement = state.get("task_retirement")
+        if isinstance(retirement, Mapping) and isinstance(retirement.get("successor"), Mapping):
+            updated_retirement = deepcopy(dict(retirement))
+            updated_successor = deepcopy(dict(updated_retirement["successor"]))
+            updated_successor["status"] = "active"
+            updated_retirement["successor"] = updated_successor
+            state["task_retirement"] = updated_retirement
         result = {
             "next_action": "SUCCESSOR_RECONCILED",
             "reason_code": "successor_activation_reconciled",
@@ -2087,6 +3047,13 @@ def reconcile_authorized_successor(
         "latched_at": _iso(now),
         "evidence": deepcopy(dict(evidence or {})),
     }
+    retirement = state.get("task_retirement")
+    if isinstance(retirement, Mapping) and isinstance(retirement.get("successor"), Mapping):
+        updated_retirement = deepcopy(dict(retirement))
+        updated_successor = deepcopy(dict(updated_retirement["successor"]))
+        updated_successor["status"] = "paused"
+        updated_retirement["successor"] = updated_successor
+        state["task_retirement"] = updated_retirement
     result = {
         "next_action": "PAUSE_RECOVERY",
         "reason_code": "successor_activation_recovery_required",
@@ -2323,8 +3290,9 @@ def parse_args() -> argparse.Namespace:
             "Host handoff:\n"
             "  pause the delivered standalone task before begin-wake; pass --pause-confirmed "
             "after success.\n"
-            "  create/read back one cadence-only standalone successor before "
-            "complete-wake --schedule-reanchored "
+            "  after confirmed cleanup, persist pending exact predecessor retirement, "
+            "delete and confirm that exact ID, then create/read back one cadence-only "
+            "standalone successor before complete-wake --schedule-reanchored "
             "--scheduled-created-at PERSISTED_CREATED_AT "
             "--scheduled-first-run DERIVED_FIRST_RUN "
             "--scheduled-task-id SUCCESSOR_ID."
@@ -2369,6 +3337,16 @@ def parse_args() -> argparse.Namespace:
     begin.add_argument(
         "--delivered-task-id",
         help="Scheduled task ID delivered by the host; must match the persisted successor",
+    )
+    begin.add_argument(
+        "--setup-task-provenance",
+        type=Path,
+        help="Verified initial paused-task readback JSON; atomically registered with wake one",
+    )
+    begin.add_argument(
+        "--delivered-task-provenance",
+        type=Path,
+        help="Optional exact delivered-task readback JSON retained with its wake registration",
     )
     begin.add_argument(
         "--policy-json",
@@ -2499,6 +3477,76 @@ def parse_args() -> argparse.Namespace:
         help="Confirm that the host performed the requested exact task operation",
     )
     reconcile_successor.add_argument("--evidence", type=Path)
+
+    prepare_retirement = commands.add_parser(
+        "prepare-retirement",
+        help="Persist the exact predecessor retirement boundary after confirmed cleanup",
+    )
+    prepare_retirement.add_argument("--worktree-cleanup-confirmed", action="store_true")
+
+    confirm_retirement = commands.add_parser(
+        "confirm-retirement",
+        help="Persist the normalized exact predecessor deletion result",
+    )
+    confirm_retirement.add_argument("--task-id", required=True)
+    confirm_retirement.add_argument("--role", required=True, choices=sorted(RETIREMENT_ROLES))
+    confirm_retirement.add_argument(
+        "--outcome", required=True, choices=["confirmed", "non_deletion", "unknown"]
+    )
+    confirm_retirement.add_argument("--evidence", type=Path)
+
+    reconcile_retirement = commands.add_parser(
+        "reconcile-retirement",
+        help="Reconcile only an exact pending or unknown predecessor retirement",
+    )
+    reconcile_retirement.add_argument("--task-id", required=True)
+    reconcile_retirement.add_argument("--role", required=True, choices=sorted(RETIREMENT_ROLES))
+    reconcile_retirement.add_argument(
+        "--lookup",
+        required=True,
+        choices=["PRESENT", "AUTHORITATIVE_NOT_FOUND", "READBACK_UNKNOWN"],
+    )
+    reconcile_retirement.add_argument("--evidence", type=Path)
+
+    successor_creation = commands.add_parser(
+        "record-successor-creation",
+        help="Persist normalized successor creation evidence after confirmed retirement",
+    )
+    successor_creation.add_argument(
+        "--outcome",
+        required=True,
+        choices=[
+            "CREATED_EXACT_ID",
+            "AUTHORITATIVE_NO_SUCCESSOR",
+            "SUCCESSOR_CREATION_UNKNOWN",
+        ],
+    )
+    successor_creation.add_argument("--scheduled-task-id")
+    successor_creation.add_argument("--completion-anchor")
+    successor_creation.add_argument("--evidence", type=Path)
+
+    successor_readback = commands.add_parser(
+        "record-successor-readback",
+        help="Persist exact paused-successor readback against the retirement handoff",
+    )
+    successor_readback.add_argument("--task-readback", required=True, type=Path)
+
+    successor_pause = commands.add_parser(
+        "record-successor-pause",
+        help="Persist the exact known-successor pause fallback after readback failure",
+    )
+    successor_pause.add_argument("--scheduled-task-id", required=True)
+    successor_pause.add_argument("--confirmed", action="store_true")
+    successor_pause.add_argument("--evidence", type=Path)
+
+    recover_retirement = commands.add_parser(
+        "recover-retirement-successor",
+        help="Resume only an exact paused, undelivered retired-successor handoff",
+    )
+    recover_retirement.add_argument("--action", required=True, choices=["authorize", "finalize"])
+    recover_retirement.add_argument("--task-readback", required=True, type=Path)
+    recover_retirement.add_argument("--delivery-observed", action="store_true")
+    recover_retirement.add_argument("--activation-confirmed", action="store_true")
     parser.add_argument(
         "--policy-json",
         dest="root_policy_json",
@@ -2517,6 +3565,16 @@ def parse_args() -> argparse.Namespace:
         else args.root_policy_json
     )
     return args
+
+
+def _read_json_object(path: Path, *, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Cannot read {label} JSON: {path}") from error
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{label} JSON must be an object")
+    return value
 
 
 def main() -> None:
@@ -2573,6 +3631,16 @@ def main() -> None:
             policy_overrides=policy_overrides,
             pause_heartbeat=lambda: args.pause_confirmed,
             delivered_task_id=args.delivered_task_id,
+            setup_task_provenance=(
+                _read_json_object(args.setup_task_provenance, label="setup task provenance")
+                if args.setup_task_provenance is not None
+                else None
+            ),
+            delivered_task_provenance=(
+                _read_json_object(args.delivered_task_provenance, label="delivered task provenance")
+                if args.delivered_task_provenance is not None
+                else None
+            ),
         )
         _write(path, state, result)
         return
@@ -2601,6 +3669,104 @@ def main() -> None:
 
     if not args.wake_id:
         raise RuntimeError("--wake-id is required")
+
+    if args.command == "prepare-retirement":
+        state, result = prepare_task_retirement(
+            state,
+            wake_id=args.wake_id,
+            now=now,
+            worktree_cleanup_confirmed=args.worktree_cleanup_confirmed,
+        )
+        _write(path, state, result)
+        return
+    if args.command == "confirm-retirement":
+        evidence = (
+            _read_json_object(args.evidence, label="retirement evidence")
+            if args.evidence is not None
+            else None
+        )
+        state, result = confirm_task_retirement(
+            state,
+            wake_id=args.wake_id,
+            now=now,
+            task_id=args.task_id,
+            role=args.role,
+            outcome=args.outcome,
+            evidence=evidence,
+        )
+        _write(path, state, result)
+        return
+    if args.command == "reconcile-retirement":
+        evidence = (
+            _read_json_object(args.evidence, label="retirement reconciliation evidence")
+            if args.evidence is not None
+            else None
+        )
+        state, result = reconcile_task_retirement(
+            state,
+            wake_id=args.wake_id,
+            now=now,
+            task_id=args.task_id,
+            role=args.role,
+            lookup=args.lookup,
+            evidence=evidence,
+        )
+        _write(path, state, result)
+        return
+    if args.command == "record-successor-creation":
+        evidence = (
+            _read_json_object(args.evidence, label="successor creation evidence")
+            if args.evidence is not None
+            else None
+        )
+        state, result = record_retirement_successor_creation(
+            state,
+            wake_id=args.wake_id,
+            now=now,
+            outcome=args.outcome,
+            task_id=args.scheduled_task_id,
+            completion_anchor=args.completion_anchor,
+            evidence=evidence,
+        )
+        _write(path, state, result)
+        return
+    if args.command == "record-successor-readback":
+        state, result = record_retirement_successor_readback(
+            state,
+            wake_id=args.wake_id,
+            now=now,
+            task=_read_json_object(args.task_readback, label="successor task readback"),
+        )
+        _write(path, state, result)
+        return
+    if args.command == "record-successor-pause":
+        evidence = (
+            _read_json_object(args.evidence, label="successor pause evidence")
+            if args.evidence is not None
+            else None
+        )
+        state, result = record_retirement_successor_pause(
+            state,
+            wake_id=args.wake_id,
+            now=now,
+            task_id=args.scheduled_task_id,
+            confirmed=args.confirmed,
+            evidence=evidence,
+        )
+        _write(path, state, result)
+        return
+    if args.command == "recover-retirement-successor":
+        state, result = recover_retirement_successor(
+            state,
+            wake_id=args.wake_id,
+            now=now,
+            action=args.action,
+            task=_read_json_object(args.task_readback, label="retirement successor readback"),
+            delivery_observed=args.delivery_observed,
+            activation_confirmed=args.activation_confirmed,
+        )
+        _write(path, state, result)
+        return
 
     if args.command == "snapshot":
         _require_active_wake(state, args.wake_id)
