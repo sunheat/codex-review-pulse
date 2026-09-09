@@ -457,6 +457,10 @@ if successor_result is success:
     SUCCESSOR_ID = absent
     try:
         SUCCESSOR_ID = require_nonempty_id(successor_result)
+        SUCCESSOR_CREATION_RESULT = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID record-successor-creation \
+          --outcome CREATED_EXACT_ID --scheduled-task-id SUCCESSOR_ID \
+          --completion-anchor COMPLETION_NOW
+        require SUCCESSOR_CREATION_RESULT.next_action == SUCCESSOR_CREATED
         SUCCESSOR = host.read_task(SUCCESSOR_ID)
         require SUCCESSOR.prompt == STANDALONE_HANDOFF.prompt
         require SUCCESSOR.prompt_sha256 == sha256(STANDALONE_HANDOFF.prompt)
@@ -473,6 +477,10 @@ if successor_result is success:
         )
         require SUCCESSOR.first_run is present
         require SUCCESSOR.first_run matches EXPECTED_FIRST_RUN at scheduler precision
+        SUCCESSOR_READBACK_JSON = write_json(SUCCESSOR)
+        SUCCESSOR_READBACK_RESULT = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID record-successor-readback \
+          --task-readback SUCCESSOR_READBACK_JSON
+        require SUCCESSOR_READBACK_RESULT.next_action == SUCCESSOR_READY
         # Authorization is setup evidence only. The wake remains active and
         # the task remains paused until complete-wake durably finalizes it.
         PULSE CHECKPOINT_TARGET --wake-id WAKE_ID --now COMPLETION_NOW authorize-successor \
