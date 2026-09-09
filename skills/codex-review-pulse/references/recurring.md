@@ -46,10 +46,11 @@ requires a new user interaction or a separately verifiable external source.
 
 ## Deferred boundary
 
-This phase does not approve indefinite unattended operation, a production
-scheduled-task integration, unknown connector capability, Pi portability,
-plugin packaging, generic reviewers, multi-forge behavior, or
-`gh-address-comments` reuse/vendor policy.
+Hardened compatibility mode does not support or authorize indefinite unattended
+operation or a production scheduled-task integration. Unknown connector
+capability, Pi portability, plugin packaging, generic reviewers, multi-forge
+behavior, and `gh-address-comments` reuse/vendor policy are also outside its
+supported boundary.
 
 ## Run contract
 

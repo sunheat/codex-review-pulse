@@ -16,7 +16,7 @@ when the checkout identifies one, asks one short question only when the target
 is ambiguous, and runs one recoverable wake at a time. Its default policy is
 aggressively autonomous and unbounded: it may repair PR-scoped code and tests,
 retry recoverable failures, publish the aggregate batch, resolve exact target
-threads, and rearm the same heartbeat until a Codex-specific stop condition or
+threads, and schedule a new standalone task/conversation until a Codex-specific stop condition or
 an explicit safety boundary is reached. It does not require a run contract,
 observation JSON, doctor, pilot preflight, immutable installation, runner
 identity, authority digest, owner token, or renewable lease.
@@ -28,10 +28,44 @@ the old heartbeat activated too early, used fixed-cadence overlap, allowed a
 and continued after `PAUSE_BLOCKED`. Do not describe `0.4.0` as production
 ready or use its old scheduled-task protocol as the default.
 
-Version `0.7.1` is the Codex-first default automation-policy candidate. Its
-real scheduled-task and live GitHub integration remains unverified until an
-independent forward test completes; do not describe that integration as proven
-before then.
+Version `0.8.12` is the lifecycle-hardening contract for the Codex-first
+default clean-context scheduler. It defines default checkpoint schema v4 and
+standalone handoff protocol v13. Real scheduled-task and live GitHub
+integration remains unverified until an independent forward test completes;
+do not describe that integration as proven before then.
+
+### Public lifecycle identifiers and admission contract
+
+The default standalone lifecycle uses checkpoint schema v4 and standalone
+protocol v13. `wake_count` is admission accounting: it increments exactly
+once only after a wake has passed all required preflight and provenance checks
+and has been successfully admitted. Invocation attempts, scheduler delivery,
+pause failures, rejected or ambiguous provenance, duplicate/idempotent calls,
+and completion do not increment it.
+
+The raw `--pause-confirmed` input is not admission authority. It records a
+host observation only; it cannot create, replace, or override proof that the
+delivered task and scheduler state were read and verified. Scheduler mutations
+therefore require strict pre/post scheduler provenance bound to the exact task
+ID and the expected persisted metadata. If either side is missing, ambiguous,
+or mismatched, the lifecycle remains paused and fails closed.
+
+Before a scheduler task-creation call, the lifecycle durably journals the
+creation intent. The intent is reconciled with the exact returned task ID and
+post-creation readback; an uncertain result remains paused and cannot be
+resolved through name, prompt, age, or scheduler-list discovery.
+
+Legacy schema-v3 state with a non-zero `wake_count` or an active task chain is
+not silently migrated into schema v4. It fails closed and requires explicit
+fresh setup. Exact-ID predecessor retirement remains mandatory: `NONE` means
+confirmed retirement with no current task, while `UNKNOWN` means exact
+scheduler truth is unavailable and is not evidence of absence.
+
+The portable Python controller can enforce lifecycle safety and fail-closed
+behavior once it is invoked, but it cannot guarantee that Desktop supplies a
+pre-model scheduler gate. The public contract therefore claims safety, not
+unattended liveness; it does not claim proven continuous unattended Desktop
+operation or infer such a gate from a flag, native plan, or test result.
 
 ## Default control surface
 
@@ -43,10 +77,14 @@ path; never substitute a similarly named script from the target repository.
 <loaded-skill-directory>/scripts/pulse.py
 ```
 
-Its small subcommands are `heartbeat-prompt`, `begin-wake`, `snapshot`,
+Its small subcommands are `standalone-task-prompt`, `heartbeat-prompt` (legacy
+alias), `begin-wake`, `snapshot`,
 `freeze`, `record`, `resolve`, `retry`, `trigger-result`, `confirm-policy`,
 `prepare-publication`, `publication-result`, `configure-policy`, and
-`complete-wake`.
+`restore-repair`, `authorize-successor`, `complete-wake`, and
+`reconcile-successor`, plus `record-creation-intent`, `record-setup-id`,
+`record-setup-readback`, and `record-setup-unknown` for the pre-wake setup
+journal.
 `snapshot` returns an agent-facing normalized object with top-level
 `head_oid`, PR state, targeted and non-target threads, Codex review activity,
 approval evidence, review-epoch state, and head-bracketing server evidence.
@@ -74,6 +112,7 @@ the PR-scoped checkpoint. Unless the request says otherwise, the policy is:
 - `publication=auto`, `thread_resolution=auto`, and `review_trigger=auto`;
 - `inline_retry_limit=3`, `no_progress_limit=3`, and
   `notifications=blockers-and-terminal`.
+- `model=gpt-5.6-luna` and `reasoning_effort=xhigh`.
 
 The policy is a control contract, not a request to bypass the hard invariants
 below. Codex-only targeting, current-head proof, frozen exact thread IDs,
@@ -86,8 +125,10 @@ persisted and enforced at the next wake.
 agent applies `execution_mode`, `allow_test_changes`, `inline_retry_limit`, and
 `notifications` while choosing local edits, validation, and reporting.
 
-Prompt instructions override these defaults. The host agent should convert them
-to the corresponding JSON fields before the initial `begin-wake`, for example:
+Prompt instructions override these defaults. The host agent must convert
+explicit model, reasoning, and wake-limit settings from the user's initial
+prompt to the corresponding JSON fields before rendering the initial handoff
+and before the initial `begin-wake`, for example:
 
 ```json
 {"max_wakes": 5, "deadline_at": "2026-08-27T10:00:00+10:00"}
@@ -106,12 +147,57 @@ authority. The next fresh wake resumes the frozen batch; a generic latch
 clearing or policy rewrite cannot resume it. A `never` operation is an
 absorbing opt-out and cannot be resumed through `confirm-policy`.
 
+### Task model configuration
+
+The default path persists the scheduled task model in the same normalized
+`automation_policy` as the lifecycle policy. The default is deliberately
+`gpt-5.6-luna` with `reasoning_effort=xhigh`; the model identifier is passed
+through to the host and is not restricted to a repository-side allowlist.
+The host remains responsible for rejecting a model or reasoning level that it
+does not support.
+
+Set these fields in the initial handoff or update them outside an active wake:
+
+```json
+{"model":"gpt-5.6-luna","reasoning_effort":"xhigh"}
+```
+
+For the CLI, pass that object through `--policy-json` to
+`standalone-task-prompt`, `begin-wake`, or `configure-policy`. The rendered
+standalone handoff includes `model` and `reasoning_effort`; the host maps them
+to its task-creation fields (`model` and `reasoningEffort`). Every successor
+must receive the persisted values and must pass them back in normalized task
+readback. A `configure-policy` change applies to later successor tasks; it
+does not mutate a task that has already been created.
+
+The program does not guess model settings from arbitrary prose. A user can
+write, for example, `use model gpt-5.6-terra with reasoning_effort medium` in
+the initial request; the host agent converts that explicit request to
+`--policy-json`. The generated canonical prompt intentionally does not embed
+these mutable values; the persisted policy and task metadata are authoritative,
+and every successor reuses that persisted configuration.
+
 The host adapter may pass `--pause-confirmed` to `begin-wake` and
 `--schedule-reanchored` to `complete-wake` only after successful host-tool
-calls. The latter must be accompanied by `--scheduled-first-run` containing
-the actual persisted first run read back from the updated task. These flags do
-not pause or schedule a Codex task themselves; a success boolean is never
-evidence that the host operation or completion-relative re-anchor succeeded.
+calls. The supported cadence-only successor path creates the task paused,
+verifies its ID and metadata, then confirms activation. The latter flag must
+include
+`--scheduled-created-at` from the persisted successor record,
+`--scheduled-first-run` derived from that creation anchor plus the persisted
+cadence, and `--scheduled-task-id`. These flags do not pause or schedule a
+Codex task themselves; `--pause-confirmed` is not admission authority, and a
+success boolean is never evidence that the host operation or
+completion-relative successor handoff succeeded.
+
+### Codex task status updates
+
+For a Codex cron task, a pause or activation must preserve the task's complete
+persisted definition. Read its task metadata first, then submit a full update
+containing its kind, name, prompt, recurrence, model, reasoning effort, project,
+execution environment, and destination, changing only `status`. Do not submit
+a status-only update: the local host rejects it before the pause can be
+confirmed. Reading task metadata is not a scheduler mutation; the full pause
+update remains the first scheduler mutation of a delivered wake.
 
 ### Host invocation boundary
 
@@ -140,29 +226,76 @@ task paused.
 ### Default CLI/host sequence
 
 The host owns the scheduled-task operations; `pulse.py` only records their
-confirmed results. The following is one complete host invocation. The marker
+confirmed results. The reusable ordering guard in
+`scripts/standalone_orchestration.py` accepts those host operations through an
+injected adapter; it does not call a scheduler or Codex API itself. The
+following is one complete host invocation. The marker
 `END_INVOCATION` means return the final report immediately; it is not a prompt
 to continue with another scheduler or pulse operation.
 
 ```text
 PULSE = "python <loaded-skill-directory>/scripts/pulse.py"
-TARGET = "--repository-path PR_CHECKOUT --repo OWNER/REPO --pr NUMBER"
+CONFIGURED_CHECKOUT = host project checkout, used only as a read-only locator
+TARGET = "--repository-path WAKE_WORKTREE --repo OWNER/REPO --pr NUMBER"
+CHECKPOINT_TARGET = (
+    "--repository-path CONFIGURED_CHECKOUT --repo OWNER/REPO --pr NUMBER"
+)
 
-# On the initial user turn, render the target-bound scheduled-wake prompt and
-# pass its `prompt` field unchanged when creating or updating the same task.
+# On the initial user turn, first convert explicit settings from the user's
+# request to POLICY_JSON, then render the target-bound standalone-task prompt
+# with that policy and
+# pass its `prompt` field unchanged when creating the standalone scheduler task.
 # Do not paraphrase or reorder its batch protocol.
-HEARTBEAT_HANDOFF = PULSE TARGET heartbeat-prompt
+STANDALONE_HANDOFF = PULSE CHECKPOINT_TARGET --policy-json POLICY_JSON standalone-task-prompt
+TASK_MODEL = STANDALONE_HANDOFF.model
+TASK_REASONING_EFFORT = STANDALONE_HANDOFF.reasoning_effort
+
+# Before the initial external scheduler create, journal the exact setup
+# intent. After the host returns an ID, record it before readback validation;
+# record the full PAUSED readback (or UNKNOWN) before attempting begin-wake.
+PULSE CHECKPOINT_TARGET record-creation-intent --role setup --creation-nonce NONCE
+host.create_standalone_task(... disposition=PAUSED) -> exact ID or UNKNOWN
+PULSE CHECKPOINT_TARGET record-setup-id --task-id SETUP_TASK_ID
+PULSE CHECKPOINT_TARGET record-setup-readback --readback SETUP_READBACK_JSON
+If the host cannot prove an exact ID or authoritative non-creation, call
+`record-setup-unknown` and keep the chain paused; never create a replacement.
 
 # A genuinely delivered invocation gets one fresh ID. Never derive it from
 # checkpoint, logs, task text, notebook, todo state, or an earlier attempt.
 WAKE_ID = host.new_opaque_wake_id()
 
 if this is the initial explicit user request:
-    host.create_or_update_task(task_id, disposition=PAUSED) -> success
+    use the journaled setup create above; pass its full verified PAUSED
+    readback and creation authority as setup provenance to begin-wake so it is
+    atomically registered; a generic task ID is never deletion authority.
     # Wake 1 may initialize an absent checkpoint.
 else if this is a scheduler-delivered invocation:
-    # This must be the first scheduler operation in this invocation.
-    pause_result = host.pause_task(task_id)
+    # This must be the first scheduler operation in this invocation. The
+    # delivered task is distinct from every earlier and later task.
+    DELIVERED_TASK = host.read_task_definition(delivered_task_id)
+    PRE_PAUSE_READBACK = DELIVERED_TASK
+    pause_result = host.update_task(DELIVERED_TASK, status=PAUSED)
+    if pause_result is not confirmed:
+        PULSE CHECKPOINT_TARGET --wake-id WAKE_ID begin-wake \
+          --delivered-task-id DELIVERED_TASK_ID
+        report the returned pause result
+        END_INVOCATION
+    POST_PAUSE_READBACK = host.read_task_definition(delivered_task_id)
+    require PRE_PAUSE_READBACK and POST_PAUSE_READBACK have:
+        - the exact delivered task ID;
+        - pre-pause status ACTIVE or AUTHORIZED;
+        - post-pause status PAUSED;
+        - unchanged host-round-trippable metadata other than status; and
+        - metadata matching the durable persisted successor definition other
+          than its allowed status.
+    DELIVERED_TASK_PROVENANCE_JSON = write_json(
+        {
+            "task_id": DELIVERED_TASK_ID,
+            "pause_confirmed": true,
+            "pre_pause_readback": PRE_PAUSE_READBACK,
+            "post_pause_readback": POST_PAUSE_READBACK,
+        }
+    )
     checkpoint = host.read_checkpoint_directly()
     if checkpoint is missing or unreadable:
         report PAUSE_RECOVERY / checkpoint_unavailable
@@ -173,27 +306,64 @@ else if this is a scheduler-delivered invocation:
     if checkpoint.failure_latch is non-empty:
         report PAUSE_RECOVERY / failure_latched
         END_INVOCATION
-    if checkpoint.next_not_before is later than current time:
-        report PAUSE_BLOCKED / cadence_not_elapsed
+    preflight = host.scheduled_preflight(
+        checkpoint, delivered_task_id, current time,
+        pre_pause_readback=PRE_PAUSE_READBACK,
+        post_pause_readback=POST_PAUSE_READBACK,
+    )
+    if preflight is not ready:
+        # This persists identity, disposition, malformed-state, and early
+        # cadence failures before ending the invocation. It uses the existing
+        # configured checkout because WAKE_WORKTREE does not exist yet.
+        PULSE CHECKPOINT_TARGET --wake-id WAKE_ID begin-wake \
+          --delivered-task-id DELIVERED_TASK_ID
+        report the persisted result
         END_INVOCATION
 else:
     report PAUSE_RECOVERY / invocation_not_scheduler_delivered
     END_INVOCATION
 
-# On wake 1, begin-wake may create the checkpoint. On later wakes, the direct
-# preflight above is mandatory immediately before this call.
-if this is the initial explicit user request or pause_result is confirmed:
-    PULSE TARGET --wake-id WAKE_ID begin-wake \
-      --pause-confirmed
+# Persist the wake before fallible remote/worktree setup. This writes only
+# Git-common-dir state, not configured checkout files.
+if this is the initial explicit user request:
+    begin_result = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID --policy-json POLICY_JSON begin-wake \
+      --pause-confirmed --setup-task-provenance VERIFIED_SETUP_PROVENANCE_JSON
 else:
-    # Do not pass --pause-confirmed. This call only persists PAUSE_BLOCKED.
-    PULSE TARGET --wake-id WAKE_ID begin-wake
-    report the returned pause result
-    END_INVOCATION
+    begin_result = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID begin-wake \
+      --pause-confirmed --delivered-task-id DELIVERED_TASK_ID \
+      --delivered-task-provenance DELIVERED_TASK_PROVENANCE_JSON
+require begin_result.next_action == WAKE_STARTED or END_INVOCATION
+
+# After the scheduled pause/checkpoint preflight above (or initial task
+# creation), independently read the authoritative remote PR head. Create a new
+# clean linked worktree at that exact commit for this wake. Never reuse an old
+# wake worktree or switch/reset/clean/modify CONFIGURED_CHECKOUT. All remaining
+# pulse commands, repository edits, validation, commit, and push run with
+# WAKE_WORKTREE as --repository-path. Linked worktrees share the repository's
+# Git-common-dir checkpoint without sharing checkout files.
+REMOTE_PR_HEAD = host.read_authoritative_pr_head()
+WAKE_WORKTREE = host.create_clean_linked_worktree(
+    repository=CONFIGURED_CHECKOUT, commit=REMOTE_PR_HEAD, unique_per_wake=true
+)
+
+# Before END_INVOCATION, verify this fresh task-owned worktree is clean, remove
+# it, and prune its administrative entry. Never remove CONFIGURED_CHECKOUT. If
+# cleanup cannot be confirmed, keep the next task paused and report the blocker.
+
+# A resumed batch must restore the verified patch into this worktree.
+if begin_result.resume_pending_batch and checkpoint.active_batch.pending_repair:
+    PULSE TARGET --wake-id WAKE_ID restore-repair
+    run focused validation of the restored repair
 
 snapshot = PULSE TARGET --wake-id WAKE_ID snapshot
 
 if snapshot.decision.next_action == RUN_BATCH:
+    require git -C WAKE_WORKTREE rev-parse HEAD == snapshot.head_oid
+    # The freeze command repeats this guard and persists a recovery pause on
+    # mismatch, before any outcome, edit, or exact resolution is allowed.
+
+if snapshot.decision.next_action == RUN_BATCH:
+    # Freeze the exact stable snapshot before processing any thread.
     PULSE TARGET --wake-id WAKE_ID freeze
     for each frozen thread:
         PULSE TARGET --wake-id WAKE_ID record --thread-id ID \
@@ -203,7 +373,12 @@ if snapshot.decision.next_action == RUN_BATCH:
         # defects when the behavior contract is correct. If a recoverable
         # failure remains, persist it and end this wake:
         PULSE TARGET --wake-id WAKE_ID retry \
-          --reason-code validation_retry --signature FAILURE_SIGNATURE
+          --reason-code validation_retry --signature FAILURE_SIGNATURE \
+          [--pending-repair PENDING_REPAIR_MANIFEST]
+        # If any fix-now work is uncommitted, PENDING_REPAIR_MANIFEST must
+        # identify an immutable Git-common-dir patch, its SHA-256, and the
+        # frozen head. The next clean worktree verifies and applies it before
+        # focused validation.
         # Otherwise, after the focused check passes:
         PULSE TARGET --wake-id WAKE_ID resolve --thread-id ID
     # Only after every exact resolution succeeds in this wake, run aggregate
@@ -225,49 +400,227 @@ if snapshot.decision.next_action is PAUSE_* or STOP_*:
     report the final result
     END_INVOCATION
 
+# A scheduled invocation is a fresh process: none of the initial-wake
+# handoff variables survive from an earlier task. Before creating a successor,
+# reload the handoff from the persisted policy without policy overrides, then
+# bind its canonical prompt to the task that delivered this wake. A policy
+# change may intentionally update the successor's model or reasoning settings,
+# but a prompt or prompt-digest mismatch is unverified and must pause.
+if this is a scheduler-delivered invocation:
+    PERSISTED_HANDOFF = PULSE TARGET standalone-task-prompt
+    require PERSISTED_HANDOFF.prompt == DELIVERED_TASK.prompt
+    require PERSISTED_HANDOFF.prompt_sha256 == sha256(DELIVERED_TASK.prompt)
+    STANDALONE_HANDOFF = PERSISTED_HANDOFF
+    TASK_MODEL = STANDALONE_HANDOFF.model
+    TASK_REASONING_EFFORT = STANDALONE_HANDOFF.reasoning_effort
+
 # WAIT_REVIEW, WAIT_RETRY, or a successfully recorded same-head REQUEST_REVIEW
 # may re-anchor. WAIT_RETRY resumes the same frozen batch on the next wake.
-# Choose COMPLETION_NOW once and use it for both actions. RFC 5545 schedule
-# timestamps do not support fractional seconds, so round the computed first run
-# up to the scheduler's representable precision before updating the heartbeat.
-COMPLETION_NOW = current UTC time
-NEXT_NOT_BEFORE = ceil_to_scheduler_precision(COMPLETION_NOW + cadence_seconds)
-reanchor_result = host.reanchor_task(task_id, first_run=NEXT_NOT_BEFORE)
-if reanchor_result is success:
-    ACTUAL_FIRST_RUN = host.read_task(task_id).first_run
-    completion = PULSE TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
-      --schedule-reanchored --scheduled-first-run ACTUAL_FIRST_RUN
-    report completion
-    END_INVOCATION
+# Cleanup is part of the completion boundary. It must finish before taking the
+# host clock anchor and before creating the next task. The host accepts a
+# cadence-only recurring schedule; do not inject DTSTART or raw directives.
+PENDING_REPAIR = (
+    checkpoint.active_batch.pending_repair
+    if COMPLETION_ACTION == WAIT_RETRY
+    else absent
+)
+require host.cleanup_worktree(pending_repair=PENDING_REPAIR) is confirmed
+# Persist the exact irreversible-retirement boundary before the host may delete.
+# VERIFIED_SETUP_PROVENANCE_JSON was retained from the outer initial create/readback;
+# delivered wakes instead use the exact pre/post-provenance delivered-task registration.
+RETIREMENT = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID prepare-retirement \
+  --worktree-cleanup-confirmed
+require RETIREMENT.next_action == RETIREMENT_PENDING
+DELETE = host.delete_exact_task(RETIREMENT.scheduled_task_id)
+LOOKUP = host.lookup_exact_task(RETIREMENT.scheduled_task_id) if DELETE is ambiguous else absent
+RETIREMENT_CONFIRMATION = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID confirm-retirement \
+  --task-id RETIREMENT.scheduled_task_id --role RETIREMENT.role \
+  --outcome confirmed|non_deletion|unknown --evidence DELETE_AND_LOOKUP_JSON
+require RETIREMENT_CONFIRMATION.next_action == RETIREMENT_CONFIRMED
+# A non-confirmed/UNKNOWN result is handoff-only; do not create a successor,
+# begin another wake, or perform PR work. Explicit exact reconciliation is the
+# only retry path. No name/prompt/age/listing-based task discovery is permitted.
+COMPLETION_NOW = host.now_utc()
+# Persist the successor creation intent only after cleanup and confirmed exact
+# retirement. It authorizes exactly one PAUSED create and supplies a local
+# nonce; do not embed that nonce in the canonical prompt.
+PULSE CHECKPOINT_TARGET --wake-id WAKE_ID record-creation-intent \
+  --role successor --creation-nonce FRESH_OPAQUE_NONCE \
+  --intent-wake-id WAKE_ID
+successor_result = host.create_standalone_task(
+    kind=cron, conversation=standalone, target_thread_id=absent,
+    prompt=STANDALONE_HANDOFF.prompt, cadence_seconds=cadence_seconds,
+    model=TASK_MODEL, reasoning_effort=TASK_REASONING_EFFORT,
+    disposition=PAUSED
+)
+if successor_result is success:
+    SUCCESSOR_ID = absent
+    try:
+        SUCCESSOR_ID = require_nonempty_id(successor_result)
+        SUCCESSOR_CREATION_RESULT = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID record-successor-creation \
+          --outcome CREATED_EXACT_ID --scheduled-task-id SUCCESSOR_ID \
+          --completion-anchor COMPLETION_NOW
+        require SUCCESSOR_CREATION_RESULT.next_action == SUCCESSOR_CREATED
+        SUCCESSOR = host.read_task(SUCCESSOR_ID)
+        require SUCCESSOR.prompt == STANDALONE_HANDOFF.prompt
+        require SUCCESSOR.prompt_sha256 == sha256(STANDALONE_HANDOFF.prompt)
+        require SUCCESSOR.scheduler_kind == cron
+        require SUCCESSOR.conversation_mode == standalone
+        require SUCCESSOR.target_thread_id is absent
+        require SUCCESSOR.model == TASK_MODEL
+        require SUCCESSOR.reasoning_effort == TASK_REASONING_EFFORT
+        require SUCCESSOR.cadence_seconds == cadence_seconds
+        require SUCCESSOR.disposition == PAUSED
+        require SUCCESSOR.created_at is at or after COMPLETION_NOW at scheduler precision
+        EXPECTED_FIRST_RUN = truncate_to_scheduler_precision(
+            SUCCESSOR.created_at + cadence_seconds
+        )
+        require SUCCESSOR.first_run is present
+        require SUCCESSOR.first_run matches EXPECTED_FIRST_RUN at scheduler precision
+        SUCCESSOR_READBACK_JSON = write_json(SUCCESSOR)
+        SUCCESSOR_READBACK_RESULT = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID record-successor-readback \
+          --task-readback SUCCESSOR_READBACK_JSON
+        require SUCCESSOR_READBACK_RESULT.next_action == SUCCESSOR_READY
+        # Authorization is setup evidence only. The wake remains active and
+        # the task remains paused until complete-wake durably finalizes it.
+        AUTHORIZATION_RESULT = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID --now COMPLETION_NOW authorize-successor \
+          --schedule-reanchored --scheduled-created-at SUCCESSOR.created_at \
+          --scheduled-first-run SUCCESSOR.first_run --scheduled-task-id SUCCESSOR_ID
+        require AUTHORIZATION_RESULT.next_action == SUCCESSOR_AUTHORIZED
+        completion = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
+          --schedule-reanchored --scheduled-created-at SUCCESSOR.created_at \
+          --scheduled-first-run SUCCESSOR.first_run \
+          --scheduled-task-id SUCCESSOR_ID
+        require completion.next_action in {WAIT_REVIEW, WAIT_RETRY, REQUEST_REVIEW}
+        # Activation is the final host mutation. Do not call pulse, cleanup,
+        # validation, or ordinary work after this operation.
+        require host.activate_task(SUCCESSOR_ID) is confirmed
+        report completion
+        END_INVOCATION
+    except Exception:
+        # Creation is atomic in PAUSED state. If ID extraction failed, the
+        # unknown task cannot run. If the ID is known, explicitly re-pause it
+        # before persisting the absorbing recovery state.
+        if SUCCESSOR_ID is present:
+            try:
+                cleanup_result = host.pause_task(SUCCESSOR_ID)
+            except Exception:
+                cleanup_result = None
+            PAUSE_CONFIRMED = cleanup_result is success
+        else:
+            PAUSE_CONFIRMED = true
+        FAILURE_FILE = write_json(
+            {
+                "reason_code": (
+                    "successor_readback_failed"
+                    if PAUSE_CONFIRMED
+                    else "successor_cleanup_unconfirmed"
+                ),
+                "evidence": {
+                    "successor_task_id": SUCCESSOR_ID,
+                    "pause_confirmed": PAUSE_CONFIRMED,
+                    "created_paused": true,
+                },
+            }
+        )
+        completion = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
+          --completion-failure FAILURE_FILE
+        report completion
+        END_INVOCATION
 else:
     # Do not pass --schedule-reanchored. This persists PAUSE_BLOCKED /
     # scheduled_task_reanchor_unavailable.
-    completion = PULSE TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake
+    completion = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake
     report completion
     END_INVOCATION
 ```
 
 The host must inspect the actual tool response before passing either
 confirmation flag. A boolean, model statement, or successful-looking command
-line is not a host-tool result. For the initial user turn, create or update
-the same task in `PAUSED` state first, then follow the same `begin-wake`
-confirmation sequence. After either form of `complete-wake`, report the final
-wake state and end the invocation immediately. Do not call scheduler list,
-re-read the checkpoint, roll a successor todo, verify that a successor was
-consumed, or call `begin-wake` again in that invocation. The CLI options are
-also visible in `pulse.py begin-wake --help` and `pulse.py complete-wake
---help`.
+line is not a host-tool result. For the initial user turn, create the
+standalone task in `PAUSED` state first, then follow the same `begin-wake`
+confirmation sequence. After durable `complete-wake` and the final activation
+(or a fail-closed failure path), report the final wake state and end the
+invocation immediately. Do not call scheduler list, reread the checkpoint, roll
+another successor, verify that a successor was consumed, or call `begin-wake`
+again in that invocation. The CLI options are
+also visible in `pulse.py standalone-task-prompt --help`, `pulse.py begin-wake
+--help`, and `pulse.py complete-wake --help`.
 
 The default path reuses the core state evaluator, head-bracketed GraphQL
 retrieval, atomic Git-common-directory checkpoint, frozen-batch transitions,
 and exact GraphQL resolver. It does not duplicate those implementations and
 does not import the hardened authority machinery.
 
-## One host wake, one plan
+For the default clean-context path, the Git-common-dir checkpoint is the
+canonical durable lifecycle and control authority. Checkpoint-referenced
+immutable repair patches/manifests and verified scheduler task metadata may
+persist across wakes as auxiliary recovery or evidence artifacts, but they are
+not independent workflow authorities. If a host exposes or uses a native
+execution plan, it is ephemeral user-facing telemetry rather than durable
+workflow authority; this skill does not claim native plan support in the
+current implementation.
 
-Treat the initial user turn as wake 1. When creating or updating the one
-heartbeat for the same task, leave it `PAUSED`; never activate it before wake
-1 starts.
+## Native execution plan contract
+
+Native execution plans are user-visible execution telemetry, not durable
+workflow state. Do not infer a pre-model scheduler gate or unattended
+liveness from a native plan. Do not detect Desktop versus CLI, add
+frontend-specific branches, or add CLI compatibility, fallback, prompt, or
+display behavior.
+
+The setup conversation must create its Desktop-native execution plan before
+the first scheduler mutation and update it as setup proceeds, including task
+creation and metadata readback. It may finish the plan only after task
+creation and successful metadata readback. If either operation fails, report
+the actual blocker, do not claim completion, and do not wait, poll, or track
+the first scheduled delivery. The setup conversation does not own that
+delivery or the worker's PR/review work.
+
+Each scheduled delivery, including the first one, starts a new standalone
+worker. After startup and before its first PR/review operation, that worker
+must create and maintain its own native execution plan. Do not inherit or
+reuse the setup plan or a plan from another standalone wake. A worker plan
+should contain only a few outcome-oriented steps, for example:
+
+1. Inspect current PR and review state.
+2. Classify actionable findings.
+3. Implement the required repair.
+4. Run focused and aggregate verification.
+5. Publish/rearm or record the final blocked/terminal result.
+
+While a plan is executing, exactly one step must be `in_progress`. After all
+steps complete, or after a terminal or blocked outcome, the plan may have no
+`in_progress` step. Update it promptly after the snapshot, classification,
+repair, focused or aggregate verification, publication, rearm, and final
+result; update it immediately when the approach changes. When pausing or
+blocking, report the concrete blocker and do not fabricate completion.
+
+Use the native `update_plan` tool when it is available in the supported
+Desktop harness. If it is unavailable, continue the workflow normally and
+report that native plan telemetry was unavailable; do not simulate it with a
+Python API, MCP API, text/database Todo, checkpoint field, custom plan ID, or
+another task-state subsystem. Do not persist or reuse a native plan across
+wakes. GitHub, Git, the checkpoint, and existing lifecycle state remain the
+only workflow facts.
+
+## One standalone delivery, one wake, one plan
+
+Treat the initial user turn as wake 1. Create its standalone scheduler task in
+`PAUSED` state; never activate it before wake 1 starts. Every later rearm
+creates one new standalone task/conversation with the same canonical prompt.
+No task may point at or continue another task's Codex conversation.
+
+The scheduler's configured project checkout is only a read-only repository
+locator. After the required scheduled-task pause and checkpoint preflight, each
+wake must create a new task-owned clean linked worktree at the independently
+verified remote PR head. After begin-wake persists via the configured locator,
+it must run every remaining pulse command, repository mutation,
+validation, commit, and push from that worktree with the worktree passed as
+`--repository-path`. Never reuse an earlier wake's worktree, and never switch,
+reset, clean, or modify the configured/main checkout. A linked worktree retains
+the required Git-common-dir checkpoint continuity while isolating checkout
+files across standalone wakes.
 
 The host invocation is the hard boundary: one invocation can successfully
 begin and plan at most one wake. Only a scheduler-delivered new invocation can
@@ -276,9 +629,9 @@ decisions, and future-task registration never authorize another `wake_id` in
 the current invocation.
 
 At the start of every scheduled wake, the first scheduler operation must pause
-that heartbeat. Continue only after the host confirms the pause. If pause
+the delivered standalone task. Continue only after the host confirms the pause. If pause
 confirmation is unavailable or fails, persist `PAUSE_BLOCKED`, keep the
-heartbeat paused, and end the turn without snapshot, freeze, resolve, commit,
+delivered task paused, and end the turn without snapshot, freeze, resolve, commit,
 push, trigger, or another plan.
 
 Persist an opaque `wake_id` and at least these fields in the default checkpoint:
@@ -289,6 +642,8 @@ Persist an opaque `wake_id` and at least these fields in the default checkpoint:
 - `wake_completed_at`
 - `next_not_before`
 - `scheduled_task_disposition`
+- `scheduled_task_kind` (`standalone`)
+- `scheduled_task_id` (the latest successor task when active)
 - `wake_count`
 
 Generate a fresh opaque `wake_id` when each real invocation arrives, and never
@@ -298,6 +653,10 @@ result or rejects without incrementing `wake_count`; that idempotence does not
 make the repeated call a new wake. Lease renewal, snapshot refresh,
 completion, and recovery inspection are not new wakes. A stale or incomplete
 marker produces `PAUSE_RECOVERY`; it never auto-takes over the marker.
+
+Only a successfully admitted wake increments `wake_count`. The counter is
+not a measure of attempted invocations or raw scheduler signals, and a
+supplied `--pause-confirmed` value cannot admit a wake by itself.
 
 Before every scheduled `begin-wake`, directly inspect the current checkpoint:
 stop on a non-empty `active_wake_id`, `failure_latch`, or a future
@@ -338,6 +697,9 @@ process review artifacts created by that push until a later wake.
 
 The following are default-path safety rules, not optional hardened ceremony:
 
+- Each wake uses a newly created clean linked worktree at the verified remote
+  PR head. The scheduler/project checkout remains read-only and is never the
+  repair workspace, even when the host binds a standalone task to that project.
 - For `fix-now`, focused validation must pass before resolving that exact
   thread. Repair the implementation or a stale PR-scoped test first when the
   autonomous policy permits; otherwise leave the thread unresolved and pause.
@@ -364,17 +726,40 @@ the next wake. Set:
 next_not_before = ceil_to_scheduler_precision(wake_completed_at + cadence_seconds)
 ```
 
-Never rely on pausing and reactivating a fixed RRULE to reset its clock. The
-host must re-anchor the next run to `next_not_before`. If the host cannot prove
-that completion-relative schedule, keep the disposition `PAUSED` and report
-`PAUSE_BLOCKED / scheduled_task_reanchor_unavailable`. The persisted first run
-is compared as a UTC instant. Because the first run is ordered after completion,
-the observed value may be equal to or at most one second later than
-`next_not_before`; an earlier value or a larger delay reports
-`PAUSE_BLOCKED / scheduled_task_reanchor_mismatch`. For comparisons without a
-logical ordering, the bounded tolerance is one second on either side. These
-tolerances cover representation precision only and never permit reuse of an
-earlier `DTSTART`.
+For a persisted-created-at successor, the scheduler's represented first run
+(`truncate_to_scheduler_precision(created_at + cadence_seconds)`) is also the
+checkpoint's `next_not_before`. This keeps delivery and the lifecycle deadline
+aligned when completion and task creation fall in different fractional seconds.
+
+Never rely on pausing and reactivating a fixed recurring task to reset its
+clock, and do not submit `DTSTART` during immediate automation creation. After
+confirmed cleanup and a durable rearm proof, persist an exact registered
+predecessor as retirement `pending`, delete only that ID, and persist confirmed
+retirement before choosing the completion anchor or creating one new paused
+cadence-only successor. `NONE` means confirmed retirement with no current task;
+`UNKNOWN` means exact scheduler truth is unavailable and is not absence.
+Read back its persisted ID, prompt, cadence, and `created_at`; require the
+creation anchor to be at or after `wake_completed_at` at the scheduler's
+representable precision, then derive:
+
+```text
+next_not_before = truncate_to_scheduler_precision(created_at + cadence_seconds)
+```
+
+The host-supported scheduler represents task metadata by truncating fractional
+seconds. The controller applies that same whole-second representation to the
+creation anchor, expected first run, and read-back first run; this accepts a
+sub-second representation difference without adding an arbitrary early-wake
+tolerance. A first run in an earlier represented second still fails closed.
+The creation anchor must still be at or after `wake_completed_at` at the
+scheduler's representable precision. If the host cannot prove the creation
+anchor and cadence, keep the disposition `PAUSED` and report the corresponding
+re-anchor/readback blocker.
+The public standalone rearm path must include the persisted task creation
+anchor. A missing or pre-completion anchor remains paused; the persisted first
+run must equal the creation-anchor-plus-cadence expectation or be at most one
+second later. Older injected direct-first-run integrations remain compatible
+with the legacy completion callback path.
 
 Multiple pushes that finish before the next wake naturally coalesce into the
 latest head accepted by that wake's stable GraphQL snapshot. A head change
@@ -394,48 +779,114 @@ external authorization. The default path has no automatic latch-clearing
 operation; recovery starts only in a new user turn or from a separately
 verifiable external authority.
 
-## Scheduled-task handoff
+## Standalone scheduled-task handoff
 
 The Python entry point does not call a private Codex automation API. The
 executing agent owns the following single handoff sequence for one host
 invocation:
 
 1. Treat the user's initial task as wake 1.
-2. Create or update the same-task recurring task while it is `PAUSED`.
+2. Create the initial standalone scheduled task while it is `PAUSED`; its
+   `prompt` is the exact output of `standalone-task-prompt`, its model and
+   reasoning settings come from that handoff, its scheduler kind is `cron`,
+   its conversation mode is standalone, and it has no `target_thread_id`.
 3. On each genuinely new scheduler-delivered invocation, generate a fresh
    opaque `wake_id`; never copy one from checkpoint, logs, task text, notebook,
    todo state, or a failed attempt. Do not treat an in-invocation tool result,
    rollover, model decision, or future task as delivery of another wake.
-4. At the start of every scheduled wake, call the task tool to pause that task.
+4. At the start of every scheduled wake, call the task tool to pause the
+   delivered standalone task.
 5. Read the checkpoint directly before `begin-wake`; stop with the task paused
    if it is missing/unreadable, has an active wake, has a failure latch, or has
    a future `next_not_before`. Do not replace it from memory or a summary.
-6. Submit `pause confirmed` to `begin-wake` only after the pause tool call
+6. If the delivered-task pause cannot be confirmed, call `begin-wake` without
+   pause confirmation to persist the pause result and end before remote-head or
+   worktree setup. Otherwise, persist begin-wake via the configured checkout
+   immediately after preflight, then independently verify the
+   remote PR head and create a
+   new task-owned clean linked worktree at that exact commit. Treat the
+   scheduler/project checkout as a read-only locator; never reuse an earlier
+   wake worktree or switch, reset, clean, or modify the configured checkout.
+   Use the new worktree as `--repository-path` for remaining pulse commands and run
+   all edits, validation, commit, and push from it.
+7. Submit `pause confirmed` to `begin-wake` only after the pause tool call
    returns success and the direct preflight passes. A pause failure may use an
    unconfirmed `begin-wake` only to persist `PAUSE_BLOCKED`, then ends this
-   invocation.
-7. Run this wake's snapshot, frozen batch, repair/retry, outcome/resolve, and
-   aggregate publication work. Stop immediately on any `PAUSE_*` or `STOP_*`.
-8. For `WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head `REQUEST_REVIEW`, choose one
-   completion timestamp and compute
-   `next_not_before = ceil_to_scheduler_precision(wake_completed_at + cadence_seconds)` without calling
-   `complete-wake` yet.
-9. Update the task so its next run is anchored to that timestamp, inspect the
-   host-tool result, then read back the task's actual persisted first run.
-10. After the task update and readback succeed, call `complete-wake` exactly
-   once with the same completion timestamp, `--schedule-reanchored`, and
-   `--scheduled-first-run ACTUAL_FIRST_RUN`. A stale or mismatched readback
-   persists a blocker and must not activate the checkpoint.
-11. If the task update or readback fails, call `complete-wake` exactly once without
-   `--schedule-reanchored`; this persists the re-anchor blocker and keeps the
-   task paused.
-12. Immediately report the result of either `complete-wake` call and end this
-    host invocation. Do not list scheduler tasks, reread the checkpoint, roll
-    or verify a successor, or call `begin-wake` again. On any other tool
-    failure, `PAUSE_*`, terminal result, or unproven success, leave the task
-    `PAUSED` and end the invocation. Never treat a model assertion, boolean
-    argument, or natural-language claim as proof that pause or re-scheduling
-    succeeded.
+   invocation. For every successful scheduled delivery, pass the delivered
+   task's ID as `--delivered-task-id` and the JSON file containing its exact
+   pre/post pause readbacks as `--delivered-task-provenance`; `pulse.py`
+   validates that structured provenance against the checkpoint's persisted
+   successor before starting the wake. The initial user wake has no delivered
+   successor ID and omits these options.
+8. Run this wake's snapshot, frozen batch, repair/retry, outcome/resolve, and
+   aggregate publication work. Before freezing, require the wake worktree's
+   `git rev-parse HEAD` to equal the stable snapshot head; `pulse.py freeze`
+   persists `PAUSE_RECOVERY / worktree_head_mismatch` otherwise. If a fix-now
+   repair is uncommitted when a recoverable retry is needed, persist an
+   immutable Git-common-dir patch and manifest, pass it to `pulse.py retry
+   --pending-repair`, and run restore-repair in the next clean worktree before
+   focused validation. Stop immediately on any `PAUSE_*` or `STOP_*`.
+ 9. For `WAIT_REVIEW`, `WAIT_RETRY`, or successful same-head `REQUEST_REVIEW`, finish
+    all publication, remote-head, validation, and task-owned worktree cleanup first.
+    Persist immutable handoff and action proof plus exact predecessor retirement
+    pending evidence, delete exactly that registered setup/delivered task, and
+    durably confirm it. On any ambiguous delete/readback result, remain
+    handoff-only and require explicit exact reconciliation. Only after confirmed
+    retirement read the host's current UTC completion anchor.
+10. On a scheduled delivery, reload the target-bound handoff with
+   `standalone-task-prompt` from the persisted policy and without
+   `--policy-json`. Require its prompt and SHA-256 to match the delivered
+   task's persisted canonical prompt, then use that handoff's model and
+   reasoning settings for the successor. Do not carry `POLICY_JSON`,
+   `STANDALONE_HANDOFF`, or task-setting variables from an earlier invocation.
+   Create one new standalone successor task in `PAUSED` state only after that
+   confirmed exact retirement, with the
+   verified handoff and a cadence-only recurring schedule. Do not submit
+   `DTSTART` or hand-write a raw scheduling directive. Extract its ID inside
+   the cleanup boundary, then read back the successor's persisted ID,
+   prompt and SHA-256, scheduler kind (`cron`), conversation mode
+   (`standalone`), absent `target_thread_id`, model, reasoning settings,
+    cadence, paused disposition, and creation timestamp. Require every field to
+    match the canonical handoff, require its creation timestamp to be at or after
+    the completion anchor at scheduler precision, and derive its first run as the
+    whole-second-truncated creation time plus cadence. Persist `authorize-successor`
+    with those verified values while the task is paused; authorization is setup
+    evidence and does not close the wake. Then call `complete-wake` exactly once
+    from the configured checkpoint-capable checkout with the same anchor,
+    `--schedule-reanchored`, `--scheduled-created-at`, the derived
+    `--scheduled-first-run`, and `--scheduled-task-id`. Require a successful
+    rearmable result before activation. The checkpoint remains `AUTHORIZED` after
+    durable finalization so a delivered task consumes the handoff.
+ 11. After durable finalization succeeds, activate only that verified successor
+     with the full metadata-preserving update. Activation is the final host
+     mutation in this invocation: do not call pulse, cleanup, validation, or
+     ordinary work afterward. If activation fails, pause the exact successor and
+     persist a recovery latch before ending.
+ 12. If successor creation, readback, authorization, cleanup, clock anchoring, or
+     finalization fails, keep the successor paused and call `complete-wake` once
+     without reanchor confirmation (or with `--completion-failure`) to persist the
+     blocker. Never activate an unverified or non-finalized successor.
+ 13. If a host restart occurs while `active_wake_id` is still present, do not
+     activate from authorization alone; keep the exact task paused and preserve
+     the active-wake guard. After durable finalization, reconciliation requires
+     exact task-status readback and explicit host evidence that no delivery was
+     observed. A delivered task must go directly through `begin-wake` with its
+     exact ID and must never be reactivated.
+ 14. Immediately report the result after the final host mutation and end this host
+     invocation. Do not list scheduler tasks, reread the checkpoint, roll or verify
+     a successor, or call `begin-wake` again. On any other tool failure, `PAUSE_*`,
+     terminal result, or unproven success, leave the task `PAUSED` and end the
+     invocation. Never treat a model assertion, boolean argument, or natural-
+     language claim as proof that pause, delivery gating, or re-scheduling succeeded.
+
+    A recurring cron task cannot guarantee that its first invocation is paused
+    before a model starts. A `usage_limit_exceeded` or equivalent failure before
+    the first tool call can therefore create another invocation even though the
+    checkpoint active-wake guard prevents duplicate PR mutation. The host adapter
+    must provide a one-shot/pre-model delivery gate for unattended safety; if it
+    exposes only ordinary recurring cron with no such gate, fail closed and report
+    that host limitation rather than claiming that self-pause prevents duplicate
+    task creation.
 
 ## Review termination
 
@@ -458,9 +909,9 @@ with evidence instead of triggering again.
 The standard short request authorizes autonomous PR-scoped implementation and
 test edits, repair of stale PR-scoped expectations, recoverable retries,
 targeted Codex thread exact resolution including recorded no-fix outcomes, one
-aggregate commit and push per batch, one trigger per head, and creation/update/
-pause/reanchor of one same-task heartbeat. It remains active across scheduled
-wakes until a Codex-specific terminal result or a hard blocker. A prompt can
+aggregate commit and push per batch, one trigger per head, and creation of one
+standalone successor task per rearmable wake. It remains active across
+scheduled wakes until a Codex-specific terminal result or a hard blocker. A prompt can
 narrow this scope by selecting `supervised`, `observe-only`, explicit limits,
 `allow_test_changes=false`, or confirmation policies. It never authorizes issue
 creation, merge, auto-merge, base changes, force-pushes, generic reviewers,
@@ -470,10 +921,6 @@ Host permissions are a separate boundary: unattended operation requires the
 host task/thread to have network access, full workspace access, and a
 non-interactive approval policy. The prompt can narrow behavior, but cannot
 grant capabilities that the host has not granted.
-
-This repository phase implements and tests the control logic only. Do not
-create a real scheduled task, mutate live GitHub, install the skill, commit,
-or push while developing or validating this change.
 
 ## Optional hardened mode
 

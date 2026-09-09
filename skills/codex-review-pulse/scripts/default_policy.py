@@ -17,15 +17,29 @@ from typing import Any, Mapping
 
 
 POLICY_SCHEMA_VERSION = 1
+DEFAULT_MODEL = "gpt-5.6-luna"
+DEFAULT_REASONING_EFFORT = "xhigh"
 
 _PROFILES = {"autonomous", "supervised", "observe-only"}
 _VALIDATION_FAILURES = {"repair", "pause"}
 _MUTATION_POLICIES = {"auto", "confirm", "never"}
 _NOTIFICATION_POLICIES = {"blockers-and-terminal", "every-wake", "silent"}
 _EXECUTION_MODES = {"unattended", "interactive"}
+_REASONING_EFFORTS = {
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+}
 
 DEFAULT_POLICY: dict[str, Any] = {
     "schema_version": POLICY_SCHEMA_VERSION,
+    "model": DEFAULT_MODEL,
+    "reasoning_effort": DEFAULT_REASONING_EFFORT,
     "profile": "autonomous",
     "execution_mode": "unattended",
     "cadence_seconds": 600,
@@ -104,6 +118,12 @@ def _non_negative_int(value: Any, field: str, *, allow_none: bool = False) -> in
     return value
 
 
+def _non_empty_string(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise PolicyError(f"{field} must be a non-empty string")
+    return value.strip()
+
+
 def normalize_policy(raw: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Validate and canonicalize a complete policy mapping."""
     if raw is None:
@@ -124,6 +144,17 @@ def normalize_policy(raw: Mapping[str, Any] | None = None) -> dict[str, Any]:
     policy.update(dict(raw))
     policy["schema_version"] = POLICY_SCHEMA_VERSION
     policy["profile"] = profile
+
+    policy["model"] = _non_empty_string(policy["model"], "model")
+    reasoning_effort = _non_empty_string(
+        policy["reasoning_effort"], "reasoning_effort"
+    ).lower()
+    if reasoning_effort not in _REASONING_EFFORTS:
+        raise PolicyError(
+            "reasoning_effort must be one of "
+            f"{sorted(_REASONING_EFFORTS)}"
+        )
+    policy["reasoning_effort"] = reasoning_effort
 
     if policy["execution_mode"] not in _EXECUTION_MODES:
         raise PolicyError(f"execution_mode must be one of {sorted(_EXECUTION_MODES)}")

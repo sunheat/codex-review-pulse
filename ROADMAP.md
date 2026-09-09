@@ -87,11 +87,112 @@ Pushes completed before the next wake continue to coalesce into the latest
 stable observed head. Head changes after a batch is frozen continue to pause
 recovery, so this release does not weaken the frozen-head publication gate.
 
+## 0.8.0 standalone clean-context scheduling
+
+Version `0.8.0` changes the default host handoff from a same-task heartbeat to
+standalone scheduled tasks. Each scheduler delivery is a new task/conversation
+using the canonical handoff produced by `pulse.py`. The installed skill and
+target repository instructions, including `AGENTS.md` when present, are runtime
+instruction/configuration inputs. The Git-common-dir checkpoint is the
+canonical default-path lifecycle and control authority. Checkpoint-referenced
+immutable repair patches/manifests and verified scheduler task metadata may
+persist as auxiliary recovery or evidence artifacts, but they are not
+independent workflow authorities.
+
+If a host exposes or uses a native execution plan, it is ephemeral user-facing
+telemetry rather than durable workflow authority. This roadmap does not claim
+that the current implementation has native plan support. The injected host
+orchestration guard proves one fresh wake per invocation,
+pause-before-preflight ordering, one successor per rearmable wake, and
+immediate termination after `complete-wake`.
+
+The network-free tests do not create real scheduler tasks, install skills, or
+mutate GitHub. Real Codex scheduled-task and live GitHub integration remains
+unverified.
+
+## 0.8.6 scheduler timestamp quantization
+
+The host-supported scheduler's task metadata is authoritative at whole-second
+precision with fractional seconds truncated. The standalone re-anchor host and
+controller use that same quantization for creation-anchor and first-run
+validation, accepting representation-only sub-second differences while still
+rejecting an earlier represented second. Direct completion callbacks retain
+their exact completion-relative ceiling behavior.
+
+## 0.8.7 paused-successor activation boundary
+
+Standalone successors are created paused, identified and read back inside the
+cleanup boundary, and activated only after their prompt, model, cadence,
+creation anchor, and first run are verified. Missing task IDs therefore leave
+only harmless paused records, while callback exceptions or malformed results
+re-pause every known activated successor before the invocation ends.
+
+## 0.8.8 metadata-preserving task status updates
+
+Codex cron status transitions now require a metadata read followed by a full
+persisted task update that changes only status. This prevents the local host
+from rejecting pause or activation attempts that omit required cron fields and
+leaving a live task paired with a fail-closed checkpoint.
+
+## 0.8.9 durable wake and repair handoffs
+
+The default lifecycle now persists a wake before fallible worktree setup,
+authorizes a verified successor before activation, and restores and verifies
+pending repair bytes before resolution or publication. This keeps scheduler
+delivery, successor identity, and retry recovery durable across process exits.
+
+## 0.8.10 exact predecessor retirement
+
+For a rearmable default wake, the separately verified setup task or the
+authenticated delivered task is registered with begin-wake, then advances from
+registered to pending to confirmed retirement before successor creation. The
+checkpoint distinguishes no current task (`NONE`) from externally unprovable
+state (`UNKNOWN`), retains only bounded predecessor evidence, and permits only
+handoff recovery after retirement. It never discovers tasks heuristically or
+adds scheduler-wide cleanup.
+
+## 0.8.11 lifecycle hardening
+
+Version `0.8.11` publishes default checkpoint schema v4 and standalone
+protocol v13. A wake is counted only after successful admission: `wake_count`
+does not include attempted invocations, scheduler delivery, pause failures,
+rejected or ambiguous provenance, duplicate calls, or completion. The raw
+`--pause-confirmed` input is only a host observation and is not admission
+authority.
+
+Scheduler mutations require strict pre/post provenance for the exact task ID
+and persisted metadata. Every task-creation attempt first records a durable
+creation intent, then reconciles that intent with the exact task ID and
+post-creation readback. Ambiguous results remain paused; task names, prompts,
+ages, and scheduler-wide listings cannot substitute for exact evidence.
+
+Legacy schema-v3 state with a non-zero `wake_count` or an active task chain
+fails closed rather than being silently migrated or replayed; explicit fresh
+setup is required. The exact-ID retirement contract remains unchanged:
+`NONE` is confirmed retirement with no current task, while `UNKNOWN` is
+unavailable exact scheduler truth and is not absence.
+
+The portable Python controller documents and enforces safety boundaries once
+invoked, but it cannot guarantee a Desktop pre-model scheduler gate. Public
+claims are therefore limited to safety and fail-closed behavior, not
+unattended liveness or proven continuous unattended Desktop operation. Real
+scheduled-task and live GitHub integration remain unverified.
+
+## 0.8.12 strict scheduled-delivery provenance
+
+Version `0.8.12` aligns the public scheduled-wake handoff with the strict
+controller path: read the delivered task before pause, submit its full
+persisted definition with only status changed, read it back after the pause,
+validate exact structured provenance, and pass that provenance to
+`begin-wake`. The CLI rejects a confirmed delivered task when the provenance
+file is omitted. This remains a fail-closed contract fix; real scheduled-task
+and live GitHub integration remain unverified.
+
 ## Deferred milestones
 
 - public-API connector and automatic-review detection bound to a head OID;
 - independent real scheduled-task integration and long-term unattended
-  heartbeat evidence;
+  clean-context evidence;
 - broader production notification/pause integration and multi-wake recovery
   history beyond the completed bounded evidence;
 - Codex plugin packaging and marketplace distribution;

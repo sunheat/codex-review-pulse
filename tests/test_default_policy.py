@@ -22,6 +22,8 @@ from default_policy import (  # noqa: E402
 class DefaultPolicyTests(unittest.TestCase):
     def test_default_is_unbounded_autonomous_and_mutating(self) -> None:
         policy = default_policy()
+        self.assertEqual(policy["model"], "gpt-5.6-luna")
+        self.assertEqual(policy["reasoning_effort"], "xhigh")
         self.assertEqual(policy["profile"], "autonomous")
         self.assertEqual(policy["execution_mode"], "unattended")
         self.assertIsNone(policy["max_wakes"])
@@ -47,6 +49,25 @@ class DefaultPolicyTests(unittest.TestCase):
         self.assertEqual(policy["thread_resolution"], "confirm")
         self.assertEqual(policy["cadence_seconds"], 1800)
         self.assertEqual(policy["max_wakes"], 5)
+
+    def test_model_and_reasoning_effort_can_be_overridden(self) -> None:
+        policy = apply_policy_overrides(
+            None,
+            {"model": "gpt-5.6-terra", "reasoning_effort": "medium"},
+        )
+        self.assertEqual(policy["model"], "gpt-5.6-terra")
+        self.assertEqual(policy["reasoning_effort"], "medium")
+
+    def test_model_and_reasoning_effort_validation_fails_closed(self) -> None:
+        with self.assertRaises(PolicyError):
+            normalize_policy({"model": "  "})
+        with self.assertRaises(PolicyError):
+            normalize_policy({"reasoning_effort": "unsupported"})
+
+    def test_policy_digest_binds_model_configuration(self) -> None:
+        changed = default_policy()
+        changed["model"] = "gpt-5.6-terra"
+        self.assertNotEqual(policy_digest(default_policy()), policy_digest(changed))
 
     def test_deadline_is_canonicalized_and_digest_is_stable(self) -> None:
         policy = normalize_policy(
