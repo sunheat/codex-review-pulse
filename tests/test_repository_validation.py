@@ -19,6 +19,23 @@ class RepositoryValidationTests(unittest.TestCase):
     def test_current_repository_passes_publication_checks(self) -> None:
         self.assertEqual(VALIDATOR.validate_repository(ROOT), [])
 
+    def test_skill_documents_structured_provenance_on_successful_scheduled_wake(self) -> None:
+        content = (ROOT / "skills" / "codex-review-pulse" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        start = content.index(
+            "begin_result = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID begin-wake"
+        )
+        end = content.index("require begin_result.next_action", start)
+        successful_path = content[start:end]
+        self.assertIn("--delivered-task-id DELIVERED_TASK_ID", successful_path)
+        self.assertIn(
+            "--delivered-task-provenance DELIVERED_TASK_PROVENANCE_JSON",
+            successful_path,
+        )
+        self.assertIn("PRE_PAUSE_READBACK", content)
+        self.assertIn("POST_PAUSE_READBACK", content)
+
     def test_markdown_validation_detects_missing_links_and_open_fences(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             root = Path(directory_name)

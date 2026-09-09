@@ -28,7 +28,7 @@ the old heartbeat activated too early, used fixed-cadence overlap, allowed a
 and continued after `PAUSE_BLOCKED`. Do not describe `0.4.0` as production
 ready or use its old scheduled-task protocol as the default.
 
-Version `0.8.11` is the lifecycle-hardening contract for the Codex-first
+Version `0.8.12` is the lifecycle-hardening contract for the Codex-first
 default clean-context scheduler. It defines default checkpoint schema v4 and
 standalone handoff protocol v13. Real scheduled-task and live GitHub
 integration remains unverified until an independent forward test completes;
@@ -273,12 +273,29 @@ else if this is a scheduler-delivered invocation:
     # This must be the first scheduler operation in this invocation. The
     # delivered task is distinct from every earlier and later task.
     DELIVERED_TASK = host.read_task_definition(delivered_task_id)
+    PRE_PAUSE_READBACK = DELIVERED_TASK
     pause_result = host.update_task(DELIVERED_TASK, status=PAUSED)
     if pause_result is not confirmed:
         PULSE CHECKPOINT_TARGET --wake-id WAKE_ID begin-wake \
           --delivered-task-id DELIVERED_TASK_ID
         report the returned pause result
         END_INVOCATION
+    POST_PAUSE_READBACK = host.read_task_definition(delivered_task_id)
+    require PRE_PAUSE_READBACK and POST_PAUSE_READBACK have:
+        - the exact delivered task ID;
+        - pre-pause status ACTIVE or AUTHORIZED;
+        - post-pause status PAUSED;
+        - unchanged host-round-trippable metadata other than status; and
+        - metadata matching the durable persisted successor definition other
+          than its allowed status.
+    DELIVERED_TASK_PROVENANCE_JSON = write_json(
+        {
+            "task_id": DELIVERED_TASK_ID,
+            "pause_confirmed": true,
+            "pre_pause_readback": PRE_PAUSE_READBACK,
+            "post_pause_readback": POST_PAUSE_READBACK,
+        }
+    )
     checkpoint = host.read_checkpoint_directly()
     if checkpoint is missing or unreadable:
         report PAUSE_RECOVERY / checkpoint_unavailable
@@ -290,7 +307,9 @@ else if this is a scheduler-delivered invocation:
         report PAUSE_RECOVERY / failure_latched
         END_INVOCATION
     preflight = host.scheduled_preflight(
-        checkpoint, delivered_task_id, current time
+        checkpoint, delivered_task_id, current time,
+        pre_pause_readback=PRE_PAUSE_READBACK,
+        post_pause_readback=POST_PAUSE_READBACK,
     )
     if preflight is not ready:
         # This persists identity, disposition, malformed-state, and early
@@ -311,7 +330,8 @@ if this is the initial explicit user request:
       --pause-confirmed --setup-task-provenance VERIFIED_SETUP_PROVENANCE_JSON
 else:
     begin_result = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID begin-wake \
-      --pause-confirmed --delivered-task-id DELIVERED_TASK_ID
+      --pause-confirmed --delivered-task-id DELIVERED_TASK_ID \
+      --delivered-task-provenance DELIVERED_TASK_PROVENANCE_JSON
 require begin_result.next_action == WAKE_STARTED or END_INVOCATION
 
 # After the scheduled pause/checkpoint preflight above (or initial task
@@ -784,11 +804,12 @@ invocation:
 7. Submit `pause confirmed` to `begin-wake` only after the pause tool call
    returns success and the direct preflight passes. A pause failure may use an
    unconfirmed `begin-wake` only to persist `PAUSE_BLOCKED`, then ends this
-   invocation. For every scheduled delivery, pass the delivered task's ID as
-   `--delivered-task-id`; `pulse.py` validates its structured pre/post
-   provenance against the checkpoint's persisted successor before starting the
-   wake. The initial user wake has no
-   delivered successor ID and omits this option.
+   invocation. For every successful scheduled delivery, pass the delivered
+   task's ID as `--delivered-task-id` and the JSON file containing its exact
+   pre/post pause readbacks as `--delivered-task-provenance`; `pulse.py`
+   validates that structured provenance against the checkpoint's persisted
+   successor before starting the wake. The initial user wake has no delivered
+   successor ID and omits these options.
 8. Run this wake's snapshot, frozen batch, repair/retry, outcome/resolve, and
    aggregate publication work. Before freezing, require the wake worktree's
    `git rev-parse HEAD` to equal the stable snapshot head; `pulse.py freeze`

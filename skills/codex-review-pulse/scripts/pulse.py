@@ -196,8 +196,14 @@ def build_standalone_task_handoff(
         "Derive the first run from persisted created_at plus cadence, then pass both "
         "timestamps to complete-wake. The creation timestamp must be at or after this "
         "wake's final completion anchor, so the successor cannot run early. For every scheduled "
-        "delivery, pass its exact task ID to begin-wake as --delivered-task-id "
-        "so pulse.py validates the persisted successor provenance. Preserve non-target "
+        "delivery, pass its exact task ID to begin-wake as --delivered-task-id. Before "
+        "that call, read the delivered task definition, save the pre-pause readback, "
+        "submit its full persisted definition with only status changed to PAUSED, read "
+        "the same exact task ID again, require exact ID/status/metadata equality against "
+        "the durable successor definition, and write structured provenance containing "
+        "task_id, pause_confirmed, pre_pause_readback, and post_pause_readback. Then "
+        "pass that JSON file to begin-wake as --delivered-task-provenance; pulse.py "
+        "validates the persisted successor provenance. Preserve non-target "
         "threads; never merge, enable auto-merge, change the base, force-push, or "
         "create issues. After complete-wake, report the result and end this "
         "invocation immediately; do not start, schedule, or consume another wake. If "
@@ -3884,7 +3890,9 @@ def parse_args() -> argparse.Namespace:
         epilog=(
             "Host handoff:\n"
             "  pause the delivered standalone task before begin-wake; pass --pause-confirmed "
-            "after success.\n"
+            "after success. A successful scheduled delivery must follow pre-read -> "
+            "full pause -> post-read -> structured provenance -> begin-wake, and pass "
+            "--delivered-task-provenance.\n"
             "  after confirmed cleanup, persist pending exact predecessor retirement, "
             "delete and confirm that exact ID, then create/read back one cadence-only "
             "standalone successor before complete-wake --schedule-reanchored "
@@ -3941,7 +3949,11 @@ def parse_args() -> argparse.Namespace:
     begin.add_argument(
         "--delivered-task-provenance",
         type=Path,
-        help="Optional exact delivered-task readback JSON retained with its wake registration",
+        help=(
+            "Exact structured pre/post pause readback JSON; required with "
+            "--pause-confirmed and --delivered-task-id for confirmed strict "
+            "scheduler delivery"
+        ),
     )
     begin.add_argument(
         "--policy-json",
@@ -4254,6 +4266,15 @@ def main() -> None:
     if args.command == "begin-wake":
         if not args.wake_id:
             raise RuntimeError("--wake-id is required")
+        if (
+            args.pause_confirmed
+            and args.delivered_task_id is not None
+            and args.delivered_task_provenance is None
+        ):
+            raise RuntimeError(
+                "Confirmed strict scheduler delivery requires exact structured "
+                "delivered-task provenance via --delivered-task-provenance"
+            )
         supplied_checkpoint = load_checkpoint(args.state_file) if args.state_file else None
         repository, pr_number = _resolve_command_target(
             args,
@@ -4280,11 +4301,7 @@ def main() -> None:
                 label="delivered task provenance",
             )
             if args.delivered_task_provenance is not None
-            else (
-                {}
-                if args.pause_confirmed and args.delivered_task_id is not None
-                else None
-            )
+            else None
         )
         state, result = begin_wake(
             state,

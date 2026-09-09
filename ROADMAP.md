@@ -178,6 +178,16 @@ claims are therefore limited to safety and fail-closed behavior, not
 unattended liveness or proven continuous unattended Desktop operation. Real
 scheduled-task and live GitHub integration remain unverified.
 
+## 0.8.12 strict scheduled-delivery provenance
+
+Version `0.8.12` aligns the public scheduled-wake handoff with the strict
+controller path: read the delivered task before pause, submit its full
+persisted definition with only status changed, read it back after the pause,
+validate exact structured provenance, and pass that provenance to
+`begin-wake`. The CLI rejects a confirmed delivered task when the provenance
+file is omitted. This remains a fail-closed contract fix; real scheduled-task
+and live GitHub integration remain unverified.
+
 ## Deferred milestones
 
 - public-API connector and automatic-review detection bound to a head OID;

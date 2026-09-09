@@ -141,6 +141,91 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertEqual(ready["next_action"], "SUCCESSOR_READY")
         return state
 
+    @staticmethod
+    def _delivered_provenance(state: dict, task_id: str = "successor-task") -> dict:
+        durable = state["task_retirement"]["successor"]["readback"]
+        return {
+            "task_id": task_id,
+            "pause_confirmed": True,
+            "pre_pause_readback": {**durable, "status": "ACTIVE"},
+            "post_pause_readback": {**durable, "status": "PAUSED"},
+        }
+
+    def _authorized_successor_state(self) -> dict:
+        state, anchor = self._retirement_ready_state()
+        state = self._record_verified_successor(state, anchor)
+        state, authorized = pulse.authorize_successor(
+            state,
+            wake_id="wake-1",
+            now=anchor,
+            scheduled_created_at=anchor,
+            scheduled_first_run="2026-08-26T00:36:00+00:00",
+            scheduled_task_id="successor-task",
+        )
+        self.assertEqual(authorized["next_action"], "SUCCESSOR_AUTHORIZED")
+        state, completed = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now=anchor,
+            schedule_next_wake=lambda _: "2026-08-26T00:36:00+00:00",
+            schedule_anchor_created_at=anchor,
+            scheduled_task_id="successor-task",
+            require_schedule_anchor=True,
+        )
+        self.assertEqual(completed["next_action"], "WAIT_REVIEW")
+        return state
+
+    def test_valid_structured_delivery_admits_once(self) -> None:
+        state = self._authorized_successor_state()
+
+        state, result = pulse.begin_wake(
+            state,
+            wake_id="wake-2",
+            now="2026-08-26T00:36:00+00:00",
+            pause_heartbeat=lambda: True,
+            delivered_task_id="successor-task",
+            delivered_task_provenance=self._delivered_provenance(state),
+        )
+
+        self.assertEqual(result["next_action"], "WAKE_STARTED")
+        self.assertEqual(state["wake_count"], 2)
+
+    def test_missing_post_pause_readback_fails_closed(self) -> None:
+        state = self._authorized_successor_state()
+        provenance = self._delivered_provenance(state)
+        provenance.pop("post_pause_readback")
+
+        state, result = pulse.begin_wake(
+            state,
+            wake_id="wake-2",
+            now="2026-08-26T00:36:00+00:00",
+            pause_heartbeat=lambda: True,
+            delivered_task_id="successor-task",
+            delivered_task_provenance=provenance,
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "scheduler_provenance_invalid")
+        self.assertEqual(state["wake_count"], 1)
+
+    def test_delivered_metadata_drift_fails_closed(self) -> None:
+        state = self._authorized_successor_state()
+        provenance = self._delivered_provenance(state)
+        provenance["post_pause_readback"]["model"] = "gpt-5.6-terra"
+
+        state, result = pulse.begin_wake(
+            state,
+            wake_id="wake-2",
+            now="2026-08-26T00:36:00+00:00",
+            pause_heartbeat=lambda: True,
+            delivered_task_id="successor-task",
+            delivered_task_provenance=provenance,
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "scheduler_provenance_invalid")
+        self.assertEqual(state["wake_count"], 1)
+
     def test_exact_setup_retirement_is_pending_before_delete_then_finalizes_successor(self) -> None:
         state, anchor = self._retirement_ready_state()
         self.assertEqual(state["scheduled_task_disposition"], "NONE")
@@ -474,6 +559,9 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertIn("do not submit DTSTART", handoff["prompt"])
         self.assertIn("full cron update payload", handoff["prompt"])
         self.assertIn("Never send a status-only update", handoff["prompt"])
+        self.assertIn("pre-pause readback", handoff["prompt"])
+        self.assertIn("post_pause_readback", handoff["prompt"])
+        self.assertIn("--delivered-task-provenance", handoff["prompt"])
         self.assertIn("under the Git common dir and", handoff["prompt"])
         self.assertNotIn("under the Git-common dir and", handoff["prompt"])
         self.assertIn("checkpoint must remain AUTHORIZED until delivery", handoff["prompt"])

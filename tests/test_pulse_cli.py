@@ -387,6 +387,23 @@ class PulseCliTests(unittest.TestCase):
         self.assertEqual(state["wake_count"], 0)
         self.assertEqual(harness.graphql_count(), 0)
 
+    def test_confirmed_delivered_wake_requires_structured_provenance(self) -> None:
+        harness = CliHarness(self)
+
+        result = harness.run(
+            "begin-wake",
+            "--pause-confirmed",
+            "--delivered-task-id",
+            "task-1",
+            auto_setup_provenance=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "Confirmed strict scheduler delivery requires exact structured delivered-task provenance",
+            result.stderr,
+        )
+
     def test_successor_authorization_makes_delivery_safe_before_activation(self) -> None:
         fixture = CliHarness.default_fixture()
         fixture["eyes"] = [{
@@ -475,6 +492,7 @@ class PulseCliTests(unittest.TestCase):
             text=True,
             check=True,
         ).stdout
+        begin_help = " ".join(begin_help.split())
         complete_help = subprocess.run(
             [sys.executable, str(PULSE), "complete-wake", "--help"],
             capture_output=True,
@@ -490,6 +508,10 @@ class PulseCliTests(unittest.TestCase):
 
         root_help = " ".join(root_help.split())
         self.assertIn("--pause-confirmed", root_help)
+        self.assertIn(
+            "pre-read -> full pause -> post-read -> structured provenance -> begin-wake",
+            root_help,
+        )
         self.assertIn("--schedule-reanchored", root_help)
         self.assertIn("retry", root_help)
         self.assertIn("confirm-policy", root_help)
@@ -505,6 +527,9 @@ class PulseCliTests(unittest.TestCase):
         self.assertIn("--pause-confirmed", begin_help)
         self.assertIn("--delivered-task-id", begin_help)
         self.assertIn("--setup-task-provenance", begin_help)
+        self.assertIn("--delivered-task-provenance", begin_help)
+        self.assertIn("required with --pause-confirmed", begin_help)
+        self.assertIn("confirmed strict scheduler delivery", begin_help)
         self.assertIn("--policy-json", begin_help)
         self.assertIn("--policy-json", configure_help)
         self.assertIn("--schedule-reanchored", complete_help)
@@ -591,6 +616,8 @@ class PulseCliTests(unittest.TestCase):
             )
         )
         calls_before = harness.graphql_count()
+        stale_provenance = harness.checkout.parent / "stale-provenance.json"
+        stale_provenance.write_text("{}", encoding="utf-8")
 
         result = harness.json_output(
             harness.run(
@@ -598,6 +625,8 @@ class PulseCliTests(unittest.TestCase):
                 "--pause-confirmed",
                 "--delivered-task-id",
                 "stale-task",
+                "--delivered-task-provenance",
+                str(stale_provenance),
                 wake_id="wake-2",
                 now="2026-08-26T00:11:00+00:00",
             )

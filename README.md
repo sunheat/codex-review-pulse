@@ -30,7 +30,7 @@ wake, and continued after `PAUSE_BLOCKED` by clearing a latch with a generated
 recovery authorization. The old scheduled-task semantics must not be used as
 the default or described as production-ready.
 
-Version `0.8.11` is the current Codex-first default clean-context lifecycle
+Version `0.8.12` is the current Codex-first default clean-context lifecycle
 hardening contract (checkpoint schema v4, standalone protocol v13). Its real
 scheduled-task and live GitHub integration remains unverified until an
 independent forward test completes. `wake_count` counts admitted wakes only;
@@ -90,7 +90,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py update \
   --source-repository . \
   --source-commit "$commit"
 python "$HOME/.agents/skills/codex-review-pulse/scripts/manage_pilot_install.py" verify \
-  --expected-version 0.8.11 \
+  --expected-version 0.8.12 \
   --expected-source-commit "$commit"
 ```
 
@@ -108,7 +108,7 @@ python skills/codex-review-pulse/scripts/manage_pilot_install.py install `
   --source-repository . `
   --source-commit $commit
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\manage_pilot_install.py verify `
-  --expected-version 0.8.11 `
+  --expected-version 0.8.12 `
   --expected-source-commit $commit
 ```
 
@@ -119,7 +119,7 @@ no other runner targets the PR:
 ```powershell
 python $env:USERPROFILE\.agents\skills\codex-review-pulse\scripts\pilot_preflight.py `
   --repo OWNER/REPO --pr NUMBER `
-  --expected-skill-version 0.8.11 `
+  --expected-skill-version 0.8.12 `
   --expected-source-commit $commit `
   --reviewer-login chatgpt-codex-connector `
   --approval-login chatgpt-codex-connector `
