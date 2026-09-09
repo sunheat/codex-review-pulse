@@ -627,6 +627,36 @@ class DefaultHostWakeContractTests(unittest.TestCase):
             "initial-setup-nonce",
         )
 
+    def test_pending_setup_intent_stops_before_external_recreation(self) -> None:
+        host = InMemoryHost(
+            state=empty_checkpoint("Owner/Repo", 17),
+            created_at="2026-08-26T00:00:00+00:00",
+        )
+
+        def record_intent(now: str, nonce: str) -> dict[str, object]:
+            return {
+                "next_action": "CREATION_INTENT_RECORDED",
+                "reason_code": "creation_intent_already_pending",
+            }
+
+        handoff = pulse.build_standalone_task_handoff("Owner/Repo", 17)
+        with self.assertRaisesRegex(
+            StandaloneInvocationError, "freshly persisted"
+        ):
+            create_initial_setup_task(
+                host,
+                prompt=handoff["prompt"],
+                cadence_seconds=600,
+                model=handoff["model"],
+                reasoning_effort=handoff["reasoning_effort"],
+                record_setup_intent=record_intent,
+                record_setup_id=lambda now, task_id: {},
+                record_setup_readback=lambda now, task: {},
+                record_setup_unknown=lambda now, evidence: {},
+                creation_nonce="replay-nonce",
+            )
+        self.assertEqual(host.scheduled_statuses, [])
+
     def test_scheduled_rearm_retires_only_the_authenticated_delivered_task(self) -> None:
         state = strict_waiting_checkpoint()
         host = InMemoryHost(
@@ -741,6 +771,8 @@ class DefaultHostWakeContractTests(unittest.TestCase):
 
         self.assertEqual(result["next_action"], "STOP_POLICY_LIMIT")
         self.assertEqual(result["reason_code"], "maximum_wakes_reached_after_admission")
+        self.assertEqual(host.state["scheduled_task_disposition"], "NONE")
+        self.assertIsNone(host.state["scheduled_task_id"])
         self.assertNotIn(("schedule-standalone", "600"), host.operations)
         self.assertNotIn(("activate-task", "task-2"), host.operations)
 

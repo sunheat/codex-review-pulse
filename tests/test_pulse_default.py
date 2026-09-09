@@ -312,6 +312,32 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertEqual(recovered["next_action"], "SUCCESSOR_AUTHORIZED")
         self.assertIsNone(state["failure_latch"])
 
+    def test_retirement_recovery_rejects_changed_successor_timestamps(self) -> None:
+        state, anchor = self._retirement_ready_state()
+        state = self._record_verified_successor(state, anchor)
+        task = deepcopy(state["task_retirement"]["successor"]["readback"])
+        task["created_at"] = "2026-08-26T00:27:00+00:00"
+        task["first_run"] = "2026-08-26T00:37:00+00:00"
+        with self.assertRaisesRegex(
+            pulse.DefaultWakeError, "timestamps do not match persisted evidence"
+        ):
+            pulse.recover_retirement_successor(
+                state,
+                wake_id="wake-1",
+                now="2026-08-26T00:27:00+00:00",
+                action="authorize",
+                task=task,
+                delivery_observed=False,
+                activation_confirmed=False,
+            )
+        self.assertEqual(
+            state["task_retirement"]["successor"]["created_at"], anchor
+        )
+        self.assertEqual(
+            state["task_retirement"]["successor"]["first_run"],
+            "2026-08-26T00:36:00+00:00",
+        )
+
     def test_recovered_authorized_successor_finalizes_without_replaying_pr_work(self) -> None:
         state, anchor = self._retirement_ready_state()
         state = self._record_verified_successor(state, anchor)
@@ -342,6 +368,53 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertEqual(state["scheduled_task_disposition"], "AUTHORIZED")
         with self.assertRaisesRegex(pulse.DefaultWakeError, "active wake"):
             pulse.record_snapshot(state, snapshot(), wake_id="wake-2", now=NOW)
+
+    def test_activation_failure_recovery_restores_released_wake_ownership(self) -> None:
+        state, anchor = self._retirement_ready_state()
+        state = self._record_verified_successor(state, anchor)
+        state, _ = pulse.authorize_successor(
+            state,
+            wake_id="wake-1",
+            now=anchor,
+            scheduled_created_at=anchor,
+            scheduled_first_run="2026-08-26T00:36:00+00:00",
+            scheduled_task_id="successor-task",
+        )
+        state, finalized = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now=anchor,
+            schedule_next_wake=lambda _: "2026-08-26T00:36:00+00:00",
+            schedule_anchor_created_at=anchor,
+            scheduled_task_id="successor-task",
+            require_schedule_anchor=True,
+        )
+        self.assertEqual(finalized["next_action"], "WAIT_REVIEW")
+        self.assertIsNone(state["active_wake_id"])
+        state, blocked = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now=anchor,
+            scheduled_task_id="successor-task",
+            completion_failure={
+                "reason_code": "successor_activation_unconfirmed",
+                "evidence": {"pause_confirmed": True},
+            },
+        )
+        self.assertEqual(blocked["reason_code"], "successor_activation_unconfirmed")
+        task = state["task_retirement"]["successor"]["readback"]
+        state, recovered = pulse.recover_retirement_successor(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:27:00+00:00",
+            action="authorize",
+            task=task,
+            delivery_observed=False,
+            activation_confirmed=False,
+        )
+        self.assertEqual(recovered["next_action"], "SUCCESSOR_AUTHORIZED")
+        self.assertEqual(state["active_wake_id"], "wake-1")
+        self.assertIsNone(state["failure_latch"])
 
     def test_standalone_handoff_is_target_bound_and_orders_publication(self) -> None:
         handoff = pulse.build_heartbeat_handoff("Owner/Repo", 17)
@@ -502,6 +575,7 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertEqual(admitted["next_action"], "WAKE_STARTED")
         self.assertEqual(state["wake_count"], 1)
         self.assertEqual(state["task_retirement"]["task_id"], "setup-task")
+        self.assertIsNone(state["creation_intent"])
 
     def test_unresolved_setup_intent_blocks_a_second_external_create(self) -> None:
         state, _ = pulse.record_creation_intent(

@@ -511,6 +511,15 @@ class PulseCliTests(unittest.TestCase):
         self.assertIn("--scheduled-first-run", complete_help)
         self.assertIn("--scheduled-created-at", complete_help)
         self.assertIn("--completion-failure", complete_help)
+        recovery_help = subprocess.run(
+            [sys.executable, str(PULSE), "recover-retirement-successor", "--help"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        recovery_help = " ".join(recovery_help.split())
+        self.assertIn("--delivery-not-observed", recovery_help)
+        self.assertIn("--activation-not-confirmed", recovery_help)
 
     def test_canonical_heartbeat_prompt_is_rendered_without_a_checkpoint(self) -> None:
         harness = CliHarness(self)

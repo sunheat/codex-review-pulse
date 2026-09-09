@@ -1605,6 +1605,17 @@ def begin_wake(
                 "validation": "exact_setup_creation_authority_and_readback",
             },
         )
+        # The verified setup intent has been consumed by this exact admitted
+        # task.  Clear it in the same checkpoint replacement so the first
+        # rearm can journal a successor intent instead of treating setup as an
+        # unresolved external create.
+        if (
+            isinstance(state.get("creation_intent"), Mapping)
+            and state["creation_intent"].get("role") == "setup"
+            and state["creation_intent"].get("task_id") == validated_setup["task_id"]
+            and state["creation_intent"].get("status") == "VERIFIED"
+        ):
+            state["creation_intent"] = None
     # The scheduler adapter is deliberately injected.  Count only after the
     # complete structured proof and all checkpoint admission checks succeed.
     state["wake_count"] += 1
@@ -2918,6 +2929,31 @@ def recover_retirement_successor(
         now=now,
         task=task,
     )
+    persisted_created_at = successor.get("created_at")
+    persisted_first_run = successor.get("first_run")
+    fresh_created_at = task.get("created_at")
+    fresh_first_run = task.get("first_run")
+    if not all(
+        isinstance(value, str) and value.strip()
+        for value in (
+            persisted_created_at,
+            persisted_first_run,
+            fresh_created_at,
+            fresh_first_run,
+        )
+    ):
+        raise DefaultWakeError(
+            "Retirement recovery lacks persisted successor schedule evidence"
+        )
+    if (
+        _truncate_to_scheduler_precision(persisted_created_at)
+        != _truncate_to_scheduler_precision(fresh_created_at)
+        or _truncate_to_scheduler_precision(persisted_first_run)
+        != _truncate_to_scheduler_precision(fresh_first_run)
+    ):
+        raise DefaultWakeError(
+            "Retirement recovery task timestamps do not match persisted evidence"
+        )
     latch = state.get("failure_latch")
     if latch is not None:
         if not isinstance(latch, Mapping) or latch.get("reason_code") not in {
@@ -2933,6 +2969,19 @@ def recover_retirement_successor(
             "successor_cleanup_unconfirmed",
         }:
             raise DefaultWakeError("Retirement recovery cannot consume an unrelated latch")
+        if (
+            latch.get("reason_code")
+            in {"successor_activation_unconfirmed", "successor_cleanup_unconfirmed"}
+            and state.get("active_wake_id") is None
+            and state.get("last_wake_id") == wake_id
+        ):
+            # Activation failure is reported after complete_wake has already
+            # finalized the handoff and released the wake.  Reclaim the exact
+            # original wake only after the fresh paused/undelivered successor
+            # readback above has passed; otherwise authorize() would reject
+            # recovery for lacking ownership.
+            state["active_wake_id"] = wake_id
+            state["wake_phase"] = "retirement_recovery"
         state["failure_latch"] = None
     rearm = record["rearm"]
     recovered_action = rearm.get("action")
@@ -3167,7 +3216,7 @@ def complete_wake(
         state["wake_completed_at"] = now
         state["active_wake_id"] = None
         state["next_not_before"] = None
-        state["scheduled_task_disposition"] = "PAUSED"
+        state["scheduled_task_disposition"] = "NONE"
         state["wake_phase"] = "terminal"
         state["last_wake_id"] = wake_id
         result = _decision(
@@ -4117,8 +4166,28 @@ def parse_args() -> argparse.Namespace:
     )
     recover_retirement.add_argument("--action", required=True, choices=["authorize", "finalize"])
     recover_retirement.add_argument("--task-readback", required=True, type=Path)
-    recover_retirement.add_argument("--delivery-observed", action="store_true")
-    recover_retirement.add_argument("--activation-confirmed", action="store_true")
+    delivery_evidence = recover_retirement.add_mutually_exclusive_group(required=True)
+    delivery_evidence.add_argument(
+        "--delivery-observed",
+        action="store_true",
+        help="Explicitly report that the successor was delivered (blocks recovery)",
+    )
+    delivery_evidence.add_argument(
+        "--delivery-not-observed",
+        action="store_true",
+        help="Explicitly confirm that no successor delivery was observed",
+    )
+    activation_evidence = recover_retirement.add_mutually_exclusive_group(required=True)
+    activation_evidence.add_argument(
+        "--activation-confirmed",
+        action="store_true",
+        help="Explicitly report that successor activation was confirmed (blocks recovery)",
+    )
+    activation_evidence.add_argument(
+        "--activation-not-confirmed",
+        action="store_true",
+        help="Explicitly confirm that successor activation was not confirmed",
+    )
     parser.add_argument(
         "--policy-json",
         dest="root_policy_json",

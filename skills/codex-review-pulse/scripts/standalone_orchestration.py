@@ -425,8 +425,13 @@ def create_initial_setup_task(
     nonce = creation_nonce or secrets.token_urlsafe(18)
     now = _iso(host.now_utc())
     intent = record_setup_intent(now, nonce)
-    if intent.get("next_action") != "CREATION_INTENT_RECORDED":
-        raise StandaloneInvocationError("Setup creation intent was not persisted")
+    if (
+        intent.get("next_action") != "CREATION_INTENT_RECORDED"
+        or intent.get("reason_code") != "creation_intent_persisted_before_create"
+    ):
+        raise StandaloneInvocationError(
+            "Setup creation intent was not freshly persisted; recover the exact pending task"
+        )
     response = host.schedule_standalone_task(
         prompt=prompt,
         cadence_seconds=cadence_seconds,
