@@ -134,6 +134,7 @@ class InMemoryHost:
         cleanup_completion_time: str | None = None,
         pause_succeeds: bool = True,
         pause_results: tuple[bool, ...] | None = None,
+        authorize_callback_raises: bool = False,
         complete_raises: bool = False,
         complete_returns_invalid: bool = False,
     ) -> None:
@@ -160,6 +161,7 @@ class InMemoryHost:
         self.pause_succeeds = pause_succeeds
         self.pause_results = pause_results
         self.pause_calls = 0
+        self.authorize_callback_raises = authorize_callback_raises
         self.complete_raises = complete_raises
         self.complete_returns_invalid = complete_returns_invalid
         self.created_tasks: dict[str, dict[str, object]] = {}
@@ -325,6 +327,8 @@ class InMemoryHost:
                 scheduled_first_run=first_run,
                 scheduled_task_id=task_id,
             )
+            if self.authorize_callback_raises:
+                raise RuntimeError("authorization callback lost after persistence")
         return self.authorize_succeeds
 
     def activate_task(self, task_id: str) -> bool:
@@ -1149,6 +1153,31 @@ class DefaultHostWakeContractTests(unittest.TestCase):
         self.assertIn(("authorize-successor", "task-2"), host.operations)
         self.assertNotIn(("activate-task", "task-2"), host.operations)
         self.assertIn(("pause-task", "task-2"), host.operations)
+
+    def test_durable_successor_authorization_survives_lost_callback(self) -> None:
+        host = InMemoryHost(
+            state=strict_waiting_checkpoint(),
+            created_at="2026-08-26T00:37:00+00:00",
+            authorize_callback_raises=True,
+        )
+        handoff = pulse.build_standalone_task_handoff("Owner/Repo", 17)
+        invocation = HostInvocation(
+            host,
+            scheduled=True,
+            now="2026-08-26T00:36:00+00:00",
+            task_id="task-1",
+            prompt=handoff["prompt"],
+            retirement=True,
+        )
+        invocation.begin()
+        invocation.snapshot()
+
+        result = invocation.complete(reanchor_succeeds=True)
+
+        self.assertEqual(result["next_action"], "WAIT_REVIEW")
+        self.assertEqual(host.created_tasks["task-2"]["status"], "ACTIVE")
+        self.assertNotIn(("pause-task", "task-2"), host.operations)
+        self.assertEqual(host.authorized_task_ids, ["task-2"])
 
     def test_successor_model_readback_mismatch_is_unverified(self) -> None:
         host = InMemoryHost(

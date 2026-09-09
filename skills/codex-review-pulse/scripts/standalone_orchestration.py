@@ -1268,59 +1268,64 @@ class StandaloneInvocation:
                             readback_failed = False
                     except Exception:
                         authorization_confirmed = False
-                if successor_id is not None:
-                    pause_confirmed = self._pause_successor(successor_id)
-                    if retirement_enabled:
-                        try:
-                            self.record_successor_pause(  # type: ignore[misc]
-                                self.wake_id,
-                                completion_now,
-                                successor_id,
-                                pause_confirmed,
-                                {"readback_failed": readback_failed},
-                            )
-                        except Exception:
-                            pause_confirmed = False
-                    if not pause_confirmed:
+                # If a checkpoint reread proves durable authorization, the
+                # exact successor is already safe to finalize.  Skip this
+                # cleanup/fallback block so a lost callback cannot pause or
+                # discard its identity.
+                if not authorization_confirmed:
+                    if successor_id is not None:
+                        pause_confirmed = self._pause_successor(successor_id)
+                        if retirement_enabled:
+                            try:
+                                self.record_successor_pause(  # type: ignore[misc]
+                                    self.wake_id,
+                                    completion_now,
+                                    successor_id,
+                                    pause_confirmed,
+                                    {"readback_failed": readback_failed},
+                                )
+                            except Exception:
+                                pause_confirmed = False
+                        if not pause_confirmed:
+                            completion_failure = {
+                                "reason_code": "successor_cleanup_unconfirmed",
+                                "evidence": {
+                                    "successor_task_id": successor_id,
+                                    "pause_confirmed": False,
+                                },
+                            }
+                    if (
+                        completion_failure is None
+                        and authorization_attempted
+                        and not authorization_confirmed
+                    ):
                         completion_failure = {
-                            "reason_code": "successor_cleanup_unconfirmed",
+                            "reason_code": "successor_authorization_unconfirmed",
                             "evidence": {
                                 "successor_task_id": successor_id,
-                                "pause_confirmed": False,
                             },
                         }
-                if (
-                    completion_failure is None
-                    and authorization_attempted
-                    and not authorization_confirmed
-                ):
-                    completion_failure = {
-                        "reason_code": "successor_authorization_unconfirmed",
-                        "evidence": {
-                            "successor_task_id": successor_id,
-                        },
-                    }
-                if completion_failure is None:
-                    if retirement_enabled:
-                        try:
-                            recorded = self.record_successor_creation(  # type: ignore[misc]
-                                self.wake_id,
-                                completion_now,
-                                "SUCCESSOR_CREATION_UNKNOWN",
-                                None,
-                                None,
-                                {"creation_response": "unavailable"},
-                            )
-                            return self._end(recorded)
-                        except Exception:
-                            pass
-                    successor_id = None
-                if first_run_mismatch:
-                    actual_first_run = observed_first_run
-                elif readback_failed:
-                    actual_first_run = ""
-                else:
-                    actual_first_run = None
+                    if completion_failure is None:
+                        if retirement_enabled:
+                            try:
+                                recorded = self.record_successor_creation(  # type: ignore[misc]
+                                    self.wake_id,
+                                    completion_now,
+                                    "SUCCESSOR_CREATION_UNKNOWN",
+                                    None,
+                                    None,
+                                    {"creation_response": "unavailable"},
+                                )
+                                return self._end(recorded)
+                            except Exception:
+                                pass
+                        successor_id = None
+                    if first_run_mismatch:
+                        actual_first_run = observed_first_run
+                    elif readback_failed:
+                        actual_first_run = ""
+                    else:
+                        actual_first_run = None
 
             if not authorization_confirmed:
                 return self._finish_completion(

@@ -36,6 +36,21 @@ class RepositoryValidationTests(unittest.TestCase):
         self.assertIn("PRE_PAUSE_READBACK", content)
         self.assertIn("POST_PAUSE_READBACK", content)
 
+    def test_skill_binds_successor_authorization_result_before_checking_it(self) -> None:
+        content = (ROOT / "skills" / "codex-review-pulse" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        start = content.index(
+            "AUTHORIZATION_RESULT = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID"
+        )
+        end = content.index("completion = PULSE", start)
+        authorization_path = content[start:end]
+        self.assertIn(
+            "require AUTHORIZATION_RESULT.next_action == SUCCESSOR_AUTHORIZED",
+            authorization_path,
+        )
+        self.assertNotIn("require result.next_action", authorization_path)
+
     def test_markdown_validation_detects_missing_links_and_open_fences(self) -> None:
         with tempfile.TemporaryDirectory() as directory_name:
             root = Path(directory_name)

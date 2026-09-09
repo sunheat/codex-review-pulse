@@ -2688,7 +2688,11 @@ def record_retirement_successor_creation(
     if record.get("successor") is not None:
         raise DefaultWakeError("A known successor must be reused rather than recreated")
     intent = state.get("creation_intent")
-    if isinstance(intent, Mapping) and (
+    if not isinstance(intent, Mapping):
+        raise DefaultWakeError(
+            "Successor creation requires a matching pending intent"
+        )
+    if (
         intent.get("role") != "successor"
         or intent.get("wake_id") != wake_id
         or intent.get("status") not in {"PENDING", "ID_RECORDED"}

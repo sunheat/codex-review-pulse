@@ -483,10 +483,10 @@ if successor_result is success:
         require SUCCESSOR_READBACK_RESULT.next_action == SUCCESSOR_READY
         # Authorization is setup evidence only. The wake remains active and
         # the task remains paused until complete-wake durably finalizes it.
-        PULSE CHECKPOINT_TARGET --wake-id WAKE_ID --now COMPLETION_NOW authorize-successor \
+        AUTHORIZATION_RESULT = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID --now COMPLETION_NOW authorize-successor \
           --schedule-reanchored --scheduled-created-at SUCCESSOR.created_at \
           --scheduled-first-run SUCCESSOR.first_run --scheduled-task-id SUCCESSOR_ID
-        require result.next_action == SUCCESSOR_AUTHORIZED
+        require AUTHORIZATION_RESULT.next_action == SUCCESSOR_AUTHORIZED
         completion = PULSE CHECKPOINT_TARGET --wake-id WAKE_ID --now COMPLETION_NOW complete-wake \
           --schedule-reanchored --scheduled-created-at SUCCESSOR.created_at \
           --scheduled-first-run SUCCESSOR.first_run \

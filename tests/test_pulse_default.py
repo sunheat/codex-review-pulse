@@ -111,6 +111,25 @@ class DefaultLifecycleTests(unittest.TestCase):
         return state, "2026-08-26T00:26:00+00:00"
 
     def _record_verified_successor(self, state: dict, anchor: str) -> dict:
+        if state.get("failure_latch") is None:
+            state, intent = pulse.record_creation_intent(
+                state,
+                role="successor",
+                now=anchor,
+                creation_nonce="successor-create-nonce",
+                wake_id="wake-1",
+            )
+            self.assertEqual(intent["next_action"], "CREATION_INTENT_RECORDED")
+        else:
+            # Recovery tests model a successor whose creation intent was
+            # durably recorded before the predecessor latch was observed.
+            state["creation_intent"] = pulse._creation_intent(
+                state,
+                role="successor",
+                wake_id="wake-1",
+                now=anchor,
+                creation_nonce="recovery-successor-create-nonce",
+            )
         state, created = pulse.record_retirement_successor_creation(
             state,
             wake_id="wake-1",
@@ -140,6 +159,22 @@ class DefaultLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(ready["next_action"], "SUCCESSOR_READY")
         return state
+
+    def test_successor_creation_requires_a_persisted_intent(self) -> None:
+        state, anchor = self._retirement_ready_state()
+
+        with self.assertRaisesRegex(
+            pulse.DefaultWakeError,
+            "Successor creation requires a matching pending intent",
+        ):
+            pulse.record_retirement_successor_creation(
+                state,
+                wake_id="wake-1",
+                now=anchor,
+                outcome="CREATED_EXACT_ID",
+                task_id="successor-task",
+                completion_anchor=anchor,
+            )
 
     @staticmethod
     def _delivered_provenance(state: dict, task_id: str = "successor-task") -> dict:
