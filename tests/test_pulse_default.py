@@ -221,6 +221,97 @@ class DefaultLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(pulse.DefaultWakeError, "legacy_active_task_identity_unknown"):
             pulse.ensure_default_lifecycle(legacy)
 
+    def test_non_deletion_reconciliation_restores_handoff_recovery(self) -> None:
+        state, _ = pulse.begin_wake(
+            empty_checkpoint("Owner/Repo", 17),
+            wake_id="wake-1",
+            now=NOW,
+            pause_heartbeat=lambda: True,
+            setup_task_provenance=self._setup_provenance("setup-1"),
+        )
+        state, _ = pulse.record_snapshot(
+            state, snapshot(), wake_id="wake-1", now=NOW
+        )
+        state, _ = pulse.prepare_task_retirement(
+            state,
+            wake_id="wake-1",
+            now=NOW,
+            worktree_cleanup_confirmed=True,
+        )
+        state, blocked = pulse.confirm_task_retirement(
+            state,
+            wake_id="wake-1",
+            now=NOW,
+            task_id="setup-1",
+            role="setup",
+            outcome="non_deletion",
+        )
+        self.assertEqual(blocked["reason_code"], "task_retirement_not_confirmed")
+        self.assertIsNone(state["active_wake_id"])
+
+        state, confirmed = pulse.reconcile_task_retirement(
+            state,
+            wake_id="wake-1",
+            now=NOW,
+            task_id="setup-1",
+            role="setup",
+            lookup="AUTHORITATIVE_NOT_FOUND",
+        )
+        self.assertEqual(confirmed["next_action"], "RETIREMENT_CONFIRMED")
+        self.assertEqual(state["active_wake_id"], "wake-1")
+        self.assertEqual(
+            state["failure_latch"]["reason_code"], "task_retirement_not_confirmed"
+        )
+
+        state = self._record_verified_successor(
+            state, "2026-08-26T00:26:00+00:00"
+        )
+        task = state["task_retirement"]["successor"]["readback"]
+        state, recovered = pulse.recover_retirement_successor(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:27:00+00:00",
+            action="authorize",
+            task=task,
+            delivery_observed=False,
+            activation_confirmed=False,
+        )
+        self.assertEqual(recovered["next_action"], "SUCCESSOR_AUTHORIZED")
+        self.assertIsNone(state["failure_latch"])
+        self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
+
+    def test_malformed_completion_failure_is_recoverable_after_retirement(self) -> None:
+        state, anchor = self._retirement_ready_state()
+        state = self._record_verified_successor(state, anchor)
+        state, _ = pulse.authorize_successor(
+            state,
+            wake_id="wake-1",
+            now=anchor,
+            scheduled_created_at=anchor,
+            scheduled_first_run="2026-08-26T00:36:00+00:00",
+            scheduled_task_id="successor-task",
+        )
+
+        state, blocked = pulse.complete_wake(
+            state,
+            wake_id="wake-1",
+            now=anchor,
+            completion_failure={"evidence": {}},
+        )
+        self.assertEqual(blocked["reason_code"], "completion_failure_malformed")
+        task = state["task_retirement"]["successor"]["readback"]
+        state, recovered = pulse.recover_retirement_successor(
+            state,
+            wake_id="wake-1",
+            now="2026-08-26T00:27:00+00:00",
+            action="authorize",
+            task=task,
+            delivery_observed=False,
+            activation_confirmed=False,
+        )
+        self.assertEqual(recovered["next_action"], "SUCCESSOR_AUTHORIZED")
+        self.assertIsNone(state["failure_latch"])
+
     def test_recovered_authorized_successor_finalizes_without_replaying_pr_work(self) -> None:
         state, anchor = self._retirement_ready_state()
         state = self._record_verified_successor(state, anchor)
@@ -663,6 +754,34 @@ class DefaultLifecycleTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "successor_not_rearmable")
         self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
         self.assertIsNone(state.get("successor_authorization"))
+
+    def test_authorize_successor_requires_confirmed_predecessor_retirement(self) -> None:
+        state, _ = pulse.begin_wake(
+            empty_checkpoint("Owner/Repo", 17),
+            wake_id="wake-1",
+            now=NOW,
+            pause_heartbeat=lambda: True,
+            setup_task_provenance=self._setup_provenance("setup-1"),
+        )
+        state, _ = pulse.record_snapshot(
+            state, snapshot(), wake_id="wake-1", now=NOW
+        )
+
+        with self.assertRaisesRegex(
+            pulse.DefaultWakeError,
+            "confirmed predecessor retirement",
+        ):
+            pulse.authorize_successor(
+                state,
+                wake_id="wake-1",
+                now="2026-08-26T00:01:00+00:00",
+                scheduled_created_at="2026-08-26T00:01:00+00:00",
+                scheduled_first_run="2026-08-26T00:11:00+00:00",
+                scheduled_task_id="successor-task",
+            )
+
+        self.assertEqual(state["task_retirement"]["phase"], "registered")
+        self.assertEqual(state["task_retirement"]["task_id"], "setup-1")
 
     def test_authorize_successor_requires_completed_publication(self) -> None:
         state, _ = started()

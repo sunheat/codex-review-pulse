@@ -350,6 +350,7 @@ class HostInvocation:
         retirement: bool = False,
     ) -> None:
         self.host = host
+        self.retirement = retirement
         self.invocation = StandaloneInvocation(
             host,
             task_id=task_id,
@@ -395,6 +396,11 @@ class HostInvocation:
             setup_task_provenance=setup_task_provenance,
             delivered_task_provenance=delivered_task_provenance,
         )
+        if not self.retirement and delivered_task_id is not None:
+            # This test-only branch models the legacy direct callback path.
+            # The production standalone adapter retains and retires the exact
+            # registered predecessor through the supplied callbacks.
+            self.host.state["task_retirement"] = None
         return result
 
     def _complete_wake(

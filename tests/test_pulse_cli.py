@@ -211,6 +211,15 @@ class CliHarness:
     def graphql_count(self) -> int:
         return int(self.calls_path.read_text(encoding="utf-8")) if self.calls_path.exists() else 0
 
+    def use_legacy_direct_callback_fixture(self) -> None:
+        """Model only the pre-retirement injected callback compatibility path."""
+        path = checkpoint_path("owner/repo", 17, repository_path=self.checkout)
+        state = load_checkpoint(path)
+        if state is None:
+            raise AssertionError("test fixture requires a persisted checkpoint")
+        state["task_retirement"] = None
+        save_checkpoint(path, state)
+
     def run(
         self,
         *command: str,
@@ -388,6 +397,7 @@ class PulseCliTests(unittest.TestCase):
         }]
         h = CliHarness(self, fixture=fixture)
         path = h.begin_and_snapshot()
+        h.use_legacy_direct_callback_fixture()
         schedule = (
             "--schedule-reanchored", "--scheduled-created-at", "2026-08-26T00:26:00Z",
             "--scheduled-first-run", "2026-08-26T00:36:00Z",
@@ -544,6 +554,7 @@ class PulseCliTests(unittest.TestCase):
     def test_public_begin_wake_authenticates_the_delivered_task(self) -> None:
         harness = CliHarness(self)
         harness.begin_and_snapshot()
+        harness.use_legacy_direct_callback_fixture()
         harness.json_output(
             harness.run(
                 "authorize-successor",
@@ -682,6 +693,62 @@ class PulseCliTests(unittest.TestCase):
         )
         self.assertEqual(state["scheduled_task_disposition"], "PAUSED")
 
+    def test_complete_wake_persists_malformed_authorized_failure(self) -> None:
+        fixture = CliHarness.default_fixture()
+        fixture["eyes"] = [{
+            "id": "EYES1",
+            "content": "EYES",
+            "createdAt": "2026-08-26T00:00:00+00:00",
+            "user": {"login": "chatgpt-codex-connector"},
+        }]
+        harness = CliHarness(self, fixture=fixture)
+        harness.begin_and_snapshot()
+        checkpoint = checkpoint_path("owner/repo", 17, repository_path=harness.checkout)
+        state = load_checkpoint(checkpoint)
+        # This isolates the historical direct-callback shape; strict production
+        # paths retain and confirm the exact predecessor before authorization.
+        state["task_retirement"] = None
+        save_checkpoint(checkpoint, state)
+        schedule = (
+            "--schedule-reanchored",
+            "--scheduled-created-at",
+            "2026-08-26T00:01:00+00:00",
+            "--scheduled-first-run",
+            "2026-08-26T00:11:00+00:00",
+            "--scheduled-task-id",
+            "task-1",
+        )
+        harness.json_output(
+            harness.run(
+                "authorize-successor",
+                *schedule,
+                now="2026-08-26T00:01:00+00:00",
+            )
+        )
+        failure_path = Path(harness.directory.name) / "malformed-completion-failure.json"
+        failure_path.write_text(json.dumps({"evidence": {}}), encoding="utf-8")
+
+        result = harness.json_output(
+            harness.run(
+                "complete-wake",
+                "--completion-failure",
+                str(failure_path),
+                now="2026-08-26T00:01:00+00:00",
+            )
+        )
+
+        self.assertEqual(result["next_action"], "PAUSE_RECOVERY")
+        self.assertEqual(result["reason_code"], "completion_failure_malformed")
+        state = load_checkpoint(checkpoint)
+        self.assertEqual(
+            state["failure_latch"]["reason_code"],
+            "completion_failure_malformed",
+        )
+        self.assertEqual(
+            state["failure_latch"]["evidence"]["completion_failure"],
+            {"evidence": {}},
+        )
+
     def test_prompt_policy_is_persisted_on_initial_wake_and_can_be_updated(self) -> None:
         harness = CliHarness(self)
         initial = harness.json_output(
@@ -694,6 +761,7 @@ class PulseCliTests(unittest.TestCase):
         )
         self.assertEqual(initial["next_action"], "WAKE_STARTED")
         harness.json_output(harness.run("snapshot"))
+        harness.use_legacy_direct_callback_fixture()
         harness.json_output(
             harness.run(
                 "authorize-successor",
@@ -893,6 +961,7 @@ class PulseCliTests(unittest.TestCase):
                 "test-failure",
             )
         )
+        harness.use_legacy_direct_callback_fixture()
         harness.json_output(
             harness.run(
                 "authorize-successor",
@@ -1080,6 +1149,7 @@ class PulseCliTests(unittest.TestCase):
 
         reanchored = CliHarness(self)
         reanchored.begin_and_snapshot()
+        reanchored.use_legacy_direct_callback_fixture()
         reanchored.json_output(
             reanchored.run(
                 "authorize-successor",
@@ -1115,6 +1185,7 @@ class PulseCliTests(unittest.TestCase):
 
         creation_anchored = CliHarness(self)
         creation_anchored.begin_and_snapshot()
+        creation_anchored.use_legacy_direct_callback_fixture()
         creation_anchored.json_output(
             creation_anchored.run(
                 "authorize-successor",
@@ -1146,6 +1217,7 @@ class PulseCliTests(unittest.TestCase):
 
         incident = CliHarness(self)
         incident.begin_and_snapshot()
+        incident.use_legacy_direct_callback_fixture()
         incident.json_output(
             incident.run(
                 "authorize-successor",
@@ -1177,6 +1249,7 @@ class PulseCliTests(unittest.TestCase):
 
         early = CliHarness(self)
         early.begin_and_snapshot()
+        early.use_legacy_direct_callback_fixture()
         early.json_output(
             early.run(
                 "authorize-successor",
