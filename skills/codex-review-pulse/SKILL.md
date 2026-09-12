@@ -1,9 +1,20 @@
 ---
 name: codex-review-pulse
-description: Safely remediate GitHub Codex pull-request review threads in supervised or bounded recurring frozen batches, with PR-scoped leases, current-head approval proof, exact resolution, and one aggregate commit and push. Use for GitHub PRs reviewed by Codex, not ordinary one-time review, indefinite unattended operation, generic reviewers, or other forges. Requires git, authenticated GitHub CLI, and Python 3.
+description: Retained legacy Codex Review Pulse 0.3.1 implementation, kept for explicit historical legacy requests; it is not the accepted v2 architecture. GitHub Codex PR review-thread remediation in supervised or bounded recurring frozen batches, with PR-scoped leases, current-head approval proof, exact resolution, and one aggregate commit and push. Do not select for ordinary repository development, as v2, or as authorization for a live run; a live legacy run needs explicit operator authorization bound to an exact immutable artifact. Requires git, authenticated GitHub CLI, and Python 3.
 ---
 
 # Codex Review Pulse
+
+> **Legacy 0.3.1 implementation — not v2.** This document describes the
+> retained legacy 0.3.1 runtime. The accepted v2 repository contract is
+> [`AGENTS.md`](../../AGENTS.md), and
+> [ADR 0008](../../docs/adr/0008-v2-runtime-architecture-reset.md) records the
+> v2 architecture reset; v2 is not implemented by the runtime described here.
+> Do not invoke this skill during ordinary repository development or treat
+> discovery metadata as v2 or as authorization for a live run. An explicitly
+> authorized live legacy run must bind to an exact immutable artifact, such as
+> `a697032b4103c1cb909324001add8fb8f429f23e`; the `VERSION` value alone is not
+> artifact identity in this Phase 0 transitional tree.
 
 Run one transaction-safe remediation cycle for an explicitly identified GitHub
 pull request reviewed by Codex. Authoritative GraphQL review threads are the

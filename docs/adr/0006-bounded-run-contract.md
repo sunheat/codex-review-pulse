@@ -1,7 +1,13 @@
 # ADR 0006: Make recurring authority an explicit bounded run contract
 
-- Status: Accepted
+- Status: Superseded by [ADR 0008](0008-v2-runtime-architecture-reset.md)
 - Date: 2026-08-25
+
+> Superseded on 2026-09-13 by
+> [ADR 0008](0008-v2-runtime-architecture-reset.md) in the v2 architecture
+> reset. Retained as historical evidence for the legacy 0.3.1 implementation;
+> it is current v2 authority only where restated in `AGENTS.md`, ADR 0008, or a
+> later accepted v2 decision.
 
 ## Decision
 

@@ -1,5 +1,13 @@
 # Core state model
 
+> **Legacy 0.3.1 design.** This document describes the retained legacy 0.3.1
+> checkpoint and frozen-batch implementation. It is not the governing v2
+> architecture: [`AGENTS.md`](../../AGENTS.md) is the accepted v2 repository
+> contract and [ADR 0008](../adr/0008-v2-runtime-architecture-reset.md) records
+> the reset. Persisted frozen batches, recovery checkpoints, and reaction-epoch
+> state described here are legacy mechanisms; the v2 runtime is not implemented
+> by them.
+
 ## Scope
 
 The core model answers two narrow questions from an authoritative GitHub

@@ -1,5 +1,12 @@
 # Related work
 
+> **Scope qualifier (v2 architecture reset):** the Codex Review Pulse behavior
+> compared below — frozen-batch transaction semantics, partial-publication
+> recovery, heartbeat recurrence, and Pi scheduled execution — is the retained
+> **legacy 0.3.1** implementation, not the accepted v2 architecture. See
+> [`AGENTS.md`](AGENTS.md) and
+> [ADR 0008](docs/adr/0008-v2-runtime-architecture-reset.md).
+
 ## djm204/codex-review
 
 [`djm204/codex-review`](https://github.com/djm204/codex-review) is a focused
