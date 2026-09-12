@@ -1,5 +1,14 @@
 # Usage
 
+> **Legacy 0.3.1 documentation.** This guide describes the retained legacy
+> 0.3.1 implementation, not the accepted v2 architecture. The accepted v2
+> contract is [`AGENTS.md`](../../../AGENTS.md), and
+> [ADR 0008](../../../docs/adr/0008-v2-runtime-architecture-reset.md) records
+> the architecture reset; v2 is not implemented by the runtime described here.
+> These commands pertain only to an explicitly authorized legacy 0.3.1 run
+> bound to an exact immutable artifact, not to v2, and they do not themselves
+> authorize a live run.
+
 ## Release-candidate boundary
 
 The core model, immutable installation, supervised preflight, and manually

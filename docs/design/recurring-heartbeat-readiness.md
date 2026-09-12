@@ -1,5 +1,13 @@
 # Bounded recurring heartbeat readiness
 
+> **Legacy 0.3.1 design and historical pilot evidence.** This document
+> describes the retained legacy 0.3.1 recurring runtime — bounded run
+> contracts, renewable leases, recovery latches, and heartbeat ticks — not the
+> accepted v2 architecture. [`AGENTS.md`](../../AGENTS.md) is the accepted v2
+> repository contract and
+> [ADR 0008](../adr/0008-v2-runtime-architecture-reset.md) records the reset.
+> v2 is not implemented by the mechanisms described here.
+
 ## Scope and evidence baseline
 
 This phase promotes one verified supervised cycle into a release candidate for

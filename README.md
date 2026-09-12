@@ -2,16 +2,41 @@
 
 [![CI](https://github.com/sunheat/codex-review-pulse/actions/workflows/ci.yml/badge.svg)](https://github.com/sunheat/codex-review-pulse/actions/workflows/ci.yml)
 
-Codex Review Pulse is a GitHub-specific Codex skill for transaction-safe,
-thread-aware remediation of pull requests reviewed by the GitHub Codex
-connector. It treats each authoritative review snapshot as a frozen batch and
-applies conservative transaction boundaries around edits, publication, and
-exact thread resolution.
+The retained Codex Review Pulse 0.3.1 runtime in this tree is a
+GitHub-specific Codex skill for transaction-safe, thread-aware remediation of
+pull requests reviewed by the GitHub Codex connector. It treats each
+authoritative review snapshot as a frozen batch and applies conservative
+transaction boundaries around edits, publication, and exact thread
+resolution.
 
 This project is intentionally not a generic multi-reviewer or multi-forge
 framework.
 
-## Current release-candidate scope
+## Repository status: v2 architecture reset (Phase 0, unreleased)
+
+This repository currently contains three distinct states:
+
+1. **Retained legacy 0.3.1 implementation** — the executable runtime, skill,
+   and scripts currently in this tree, from the public release-candidate
+   lineage at baseline `a697032b4103c1cb909324001add8fb8f429f23e`. The release
+   and pilot evidence below is retained as historical record.
+2. **Accepted v2 architecture** — a greenfield runtime redesign governed by
+   [`AGENTS.md`](AGENTS.md) and
+   [ADR 0008](docs/adr/0008-v2-runtime-architecture-reset.md). The v2 runtime
+   has **not** been implemented.
+3. **Phase 0 transitional tree (this unreleased state)** — the retained 0.3.1
+   runtime with updated contract, documentation, and discovery surfaces. It is
+   not byte-identical to the published 0.3.1 baseline and is not a runnable v2
+   release.
+
+This documentation reset does not authorize a live v2 campaign, canary, or
+pilot. Discovery metadata never authorizes a live run. An explicitly authorized
+live legacy run must bind itself to an exact immutable 0.3.1 artifact, such as
+`a697032b4103c1cb909324001add8fb8f429f23e`; the retained `VERSION` value alone
+is not artifact identity. Ordinary repository development must not implicitly
+invoke the product against a live pull request.
+
+## Retained legacy 0.3.1 release-candidate scope
 
 The core state model, immutable installation, supervised preflight, and two
 manually reviewed bounded live pilots are complete. Version `0.3.1` is a
@@ -75,6 +100,13 @@ completed scheduled task without a third wake. See the
 - one operator supervising the first bounded recurring wakes
 
 ## Use
+
+The commands below install and operate the **retained legacy 0.3.1** runtime.
+For an explicitly authorized legacy run, check out an exact immutable artifact
+such as `a697032b4103c1cb909324001add8fb8f429f23e`; this Phase 0 transitional
+tree intentionally keeps version `0.3.1` while changing documentation and
+discovery surfaces, so `git rev-parse HEAD` here is not a published 0.3.1
+artifact.
 
 Install an exact clean commit into OpenAI's documented user skill location
 (`$HOME/.agents/skills`) without linking to the development checkout:

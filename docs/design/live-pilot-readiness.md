@@ -1,5 +1,12 @@
 # Controlled live-pilot readiness
 
+> **Historical legacy 0.3.1 evidence.** This document records the retained
+> legacy 0.3.1 single-cycle pilot design and its completed pilot evidence. It
+> is not the governing v2 architecture: [`AGENTS.md`](../../AGENTS.md) is the
+> accepted v2 repository contract and
+> [ADR 0008](../adr/0008-v2-runtime-architecture-reset.md) records the reset.
+> v2 is not implemented by the runtime described here.
+
 ## Scope
 
 This phase turned the completed core state model into a release candidate for

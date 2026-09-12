@@ -1,4 +1,4 @@
 interface:
-  display_name: "Codex Review Pulse"
-  short_description: "Run safe supervised or bounded Codex PR review cycles"
-  default_prompt: "Use $codex-review-pulse for one supervised cycle, or prepare an explicitly bounded recurring pilot for this GitHub pull request."
+  display_name: "Codex Review Pulse (legacy 0.3.1)"
+  short_description: "Retained legacy 0.3.1 Codex PR remediation skill; not v2; explicit legacy requests only"
+  default_prompt: "Legacy 0.3.1 Codex Review Pulse, retained for an explicit historical legacy request bound to an exact immutable artifact. It is not the accepted v2 architecture, must not be used for ordinary repository development, and this discovery metadata does not authorize a live run."

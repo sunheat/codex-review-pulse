@@ -1,5 +1,18 @@
 # Roadmap
 
+## v2 architecture reset accepted; v2 runtime not implemented (current)
+
+[`AGENTS.md`](AGENTS.md) is the accepted v2 repository contract and
+[ADR 0008](docs/adr/0008-v2-runtime-architecture-reset.md) records the v2
+architecture reset and the supersession of ADR 0001 through ADR 0007. The v2
+runtime is a greenfield redesign and has not been implemented; this Phase 0
+contract/discovery reset is not a v2 release and does not authorize any live
+campaign or canary.
+
+The milestones below record the retained legacy 0.3.1 lineage. They remain
+historical and implementation evidence, but are superseded as governing
+architecture by ADR 0008.
+
 ## Completed core model
 
 The core state phase implements Codex-only thread targeting, current-head

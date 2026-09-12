@@ -1,5 +1,14 @@
 # Bounded recurring pilot
 
+> **Legacy 0.3.1 documentation and historical pilot evidence.** This reference
+> describes the retained legacy 0.3.1 recurring runtime — run contracts,
+> renewable leases, and heartbeat ticks — not the accepted v2 architecture.
+> The accepted v2 contract is [`AGENTS.md`](../../../AGENTS.md), and
+> [ADR 0008](../../../docs/adr/0008-v2-runtime-architecture-reset.md) records
+> the architecture reset; v2 is not implemented by the mechanisms described
+> here. Use it only for an explicitly authorized legacy 0.3.1 run bound to an
+> exact immutable artifact.
+
 Read this reference only for a recurring/heartbeat request. Ordinary supervised
 single-cycle work uses [usage.md](usage.md).
 
