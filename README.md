@@ -2,11 +2,12 @@
 
 [![CI](https://github.com/sunheat/codex-review-pulse/actions/workflows/ci.yml/badge.svg)](https://github.com/sunheat/codex-review-pulse/actions/workflows/ci.yml)
 
-Codex Review Pulse is a GitHub-specific Codex skill for transaction-safe,
-thread-aware remediation of pull requests reviewed by the GitHub Codex
-connector. It treats each authoritative review snapshot as a frozen batch and
-applies conservative transaction boundaries around edits, publication, and
-exact thread resolution.
+The retained Codex Review Pulse 0.3.1 runtime in this tree is a
+GitHub-specific Codex skill for transaction-safe, thread-aware remediation of
+pull requests reviewed by the GitHub Codex connector. It treats each
+authoritative review snapshot as a frozen batch and applies conservative
+transaction boundaries around edits, publication, and exact thread
+resolution.
 
 This project is intentionally not a generic multi-reviewer or multi-forge
 framework.
