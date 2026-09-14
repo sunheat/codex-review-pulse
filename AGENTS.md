@@ -34,6 +34,17 @@ That is an accepted design tradeoff, not a defect that must be hidden behind aut
 If a proposed change appears to require durable recovery phases, transaction journals, TTL leases, heartbeat protocols, successor scheduling, persisted batches, or similar machinery, first identify the concrete safety invariant that cannot be preserved by the simpler design.
 Availability, convenience, or more transparent automatic recovery alone is not sufficient justification.
 
+## Supported host
+
+The only currently supported end-to-end v2 host is the Codex app / Codex desktop runtime using native Codex Automations and packaged Agent Skills.
+
+The launcher is primarily model-executed packaged-skill instructions that configure the native Codex Automation capability exposed by the Codex app.
+Repository-side deterministic CLI helpers support the skill and its tests; they are not an alternative end-to-end runtime.
+
+Codex CLI, Pi, OMP, ordinary ChatGPT scheduled tasks, cron, GitHub Actions, Windows Task Scheduler, and generic scheduler systems are not alternative v2 hosts.
+Do not build a repository-side scheduler client, private HTTP API, automation SDK, generic scheduler adapter, or mock adapter to substitute for native host integration.
+If the native host does not expose, cannot validate, or rejects requested configuration, report an explicit native-host limitation; do not emulate the configuration by merely storing requested values in campaign state.
+
 ## Authority and runtime truth
 
 Tracked repository files are authoritative for product architecture, implementation, tests, packaging, and documented behavior.
@@ -418,10 +429,6 @@ Do not duplicate the same review-request attempt.
 
 Do not post another request while an earlier current-head request remains outstanding or while its creation result remains ambiguous.
 
-Once an earlier current-head review lifecycle is definitively complete without approval and no applicable unresolved threads remain, campaign policy may allow a later `@codex review` request for the same head as a new effective round.
-
-This is a new review attempt, not a duplicate of an outstanding one.
-
 Review-request creation must support authoritative re-observation and deterministic identity where the platform permits it.
 
 An ambiguous result must never trigger a blind automatic repost.
@@ -431,6 +438,28 @@ If the system still cannot determine whether the request mutation occurred, fail
 If campaign policy forbids automatic review requests, wait for user or external action rather than overriding that policy.
 
 Do not add retry phases or waiting state solely to manage review-request timing.
+
+### Durable per-head request policy
+
+The following decisions are durable product policy for v2 campaigns.
+
+1. For each combination of campaign and authoritative PR head OID, the campaign may begin at most one automatic `@codex review` request-creation attempt.
+   A later completed lifecycle without approval does not authorize a second automatic request for the same campaign and head.
+2. The attempt begins when the campaign durably commits to it, before the external mutation: consume the effective round and reserve the per-head allowance.
+   Neither is restored merely because final revalidation prevents the POST, creation definitively fails, or the creation result is ambiguous.
+   A consumed request attempt must not be repurposed into a remediation batch or another effective action.
+3. Manual requests and requests created by another campaign neither consume nor block the current campaign's per-head allowance.
+   Cross-request and cross-campaign coordination are outside the supported product scope.
+4. A completed review lifecycle that predates the campaign's automatic request does not consume its allowance and does not by itself terminate the campaign as completed without approval.
+5. After the campaign creates its request, temporally eligible completion evidence with neither approval nor applicable unresolved feedback terminates as `review_completed_without_approval`.
+6. After at least one configured interval, an eligible observation with no attributable Codex response terminates as `codex_review_service_unresponsive`.
+7. The per-head request guard survives head changes and explicit manual recovery.
+   Returning to a previously used head does not restore its allowance, and a superseded request response window does not reactivate.
+8. Reaching the effective-round limit prevents new effective actions.
+   It does not prevent non-counting observation of an asynchronous request already started within the budget.
+9. The product does not establish provenance among overlapping external review requests.
+   Negative request outcomes require authoritative temporal eligibility within the campaign request's response window.
+   The runtime may use bounded temporal attribution supported by platform evidence without claiming exact request causality.
 
 ## Failure semantics
 
