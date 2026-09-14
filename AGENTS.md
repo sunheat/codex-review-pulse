@@ -107,7 +107,9 @@ Do not silently substitute a stale installed copy when the user intends to test 
 Authorization applies only to the requested campaign and its required product behavior.
 It is not blanket authorization for unrelated repository or GitHub cleanup.
 
-## Development skills
+## Agent skills
+
+### Development skills
 
 Before non-trivial design, implementation, debugging, refactoring, or review, inspect the development skills available in the current harness.
 
