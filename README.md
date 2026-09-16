@@ -23,9 +23,11 @@ The tree now contains the first usable v2 implementation:
 - a skill-driven launcher and scheduled-worker path for the Codex app;
 - deterministic helpers for observation, ownership, round accounting,
   publication, deferred issues, exact thread resolution, and review requests;
+- Phase 3 externalization boundaries that turn committed actions into final
+  revalidated, classified mutations;
 - network-free tests for the high-frequency branches and safety invariants.
 
-`VERSION` is `2.0.0`, but **no v2 release has been published or tagged**. This
+`VERSION` is `2.1.0`, but **no v2 release has been published or tagged**. This
 is an unreleased development build. Native Codex Automation creation and
 scheduled execution have **not** been exercised in the Codex app; that requires
 a separately authorized live canary. Network-free tests do not prove native

@@ -329,7 +329,7 @@ Product mutations flow through a few narrow deterministic owned boundaries, not 
 
 **Response grace.** A request may become `codex_review_service_unresponsive` only at or after `max(interval_minutes, 20)` minutes of authoritative elapsed grace, independent of the scheduler cadence. Effective-round exhaustion prevents new effective actions but never erases an already-started asynchronous review lifecycle: active request windows, applicable 👀, approval, and attributable completion keep precedence over generic exhaustion, and observing them consumes no round.
 
-External Git/GitHub mutation-boundary hardening (final request revalidation, publication, issue creation, thread resolution, post-mutation ambiguity handling) remains explicitly incomplete later work; completing these boundaries does not make the runtime canary-ready.
+Phase 3 completes the external Git/GitHub mutation boundaries (final request revalidation and POST classification, one-commit one-push Fix-now publication, deferred-issue ensure/create with marker plus evidence-fingerprint identity, and independent target-specific review-thread resolution). Each boundary performs its own fresh evidence revalidation and final ownership check immediately before the mutation, classifies results as confirmed, definitively failed, or ambiguous, and retains ownership on ambiguity. The runtime is canary-ready only after a separately authorized live canary.
 
 ## Applicable Codex evidence
 

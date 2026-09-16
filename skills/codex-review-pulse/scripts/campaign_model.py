@@ -690,6 +690,14 @@ def terminate(
 def applicable_unresolved_threads(
     snapshot: dict[str, Any], reviewer_logins: Iterable[str]
 ) -> list[dict[str, Any]]:
+    """Applicable unresolved threads with their frozen identity fields.
+
+    Emitted fields are the Python-owned frozen evidence the Phase 3 mutation
+    boundaries revalidate before every externalization: exact thread path,
+    root review-comment ID, normalized root-author identity, exact root body,
+    and root ``updatedAt``. Boundaries derive these fields from the snapshot
+    themselves; the model never supplies or retypes them.
+    """
     keys = set(reviewer_logins)
     threads: list[dict[str, Any]] = []
     for thread in snapshot.get("threads", []):
@@ -702,6 +710,9 @@ def applicable_unresolved_threads(
                     "path": thread.get("path"),
                     "url": thread.get("url"),
                     "body": thread.get("body"),
+                    "root_comment_id": thread.get("root_comment_id"),
+                    "root_author": thread.get("root_login"),
+                    "root_updated_at": thread.get("root_updated_at"),
                 }
             )
     return threads

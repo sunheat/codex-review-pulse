@@ -3,24 +3,29 @@
 
 The durable RESERVED guard is the authoritative handoff from the owned-worker
 boundary (which consumed the round and reserved the per-head allowance) to
-this executor. Ordering is safety-critical:
+this Phase 3 boundary. Ordering is safety-critical:
 
   1. establish current authority from durable state: matching campaign and
      lock identity, active campaign, exactly one committed RESERVED guard;
   2. authoritatively revalidate the request conditions;
-  3. post the comment;
-  4. immediately re-observe and bind a response window only when the
-     pre/post head OIDs agree.
+  3. revalidate matching local ownership as the final local authority
+     operation immediately before the mutation;
+  4. post the comment, at most once;
+  5. immediately re-observe and bind a response window only when the
+     pre/post head OIDs agree;
+  6. classify the result and persist every campaign transition through the
+     guarded Phase 1 stale-write protection;
+  7. complete the local ownership disposition: release only after the durable
+     result is confirmed, retain on ambiguity.
 
-This executor never reserves or consumes again: it creates no second guard,
+This boundary never reserves or consumes again: it creates no second guard,
 consumes no second round, and treats the committed action as durable. The
 request snapshot is not re-played as reservation proof; the guard's own
-baseline is authoritative. Definitive failure with proven absence of any
-created comment terminates cleanly and releases ownership. Anything
-unknowable fails closed and retains the permanent lock for manual recovery.
-
-Final mutation-boundary revalidation, POST outcome classification, and
-post-mutation guarded persistence hardening remain Phase 3 work.
+baseline is authoritative. A transport-level POST failure with no visible
+comment is never definitive on its own: the mutation may still complete.
+Definitive failure requires a server-authoritative rejection or proven
+absence of any created comment. Anything unknowable fails closed and retains
+the permanent lock for manual recovery.
 """
 
 from __future__ import annotations
@@ -58,22 +63,170 @@ def committed_request_guard(campaign: dict[str, Any]) -> dict[str, Any]:
     return reserved[0]
 
 
-def _find_unexpected_request_comment(
-    snapshot: dict[str, Any], baseline_comment_ids: set[str]
-) -> dict[str, Any] | None:
-    """A viewer-authored @codex comment not present in the complete baseline."""
-    viewer = snapshot.get("viewer")
-    for comment in snapshot.get("comments", []):
-        if not isinstance(comment, dict):
-            continue
-        if comment.get("id") in baseline_comment_ids:
-            continue
-        if comment.get("login") != viewer:
-            continue
-        if github_api.normalize_comment_body(comment.get("body")) != REQUEST_BODY:
-            continue
-        return comment
-    return None
+def _fail_closed(outcome: str, reason: str) -> dict[str, Any]:
+    return {
+        "outcome": outcome,
+        "reason": reason,
+        "terminal": False,
+        "ownership": "retained",
+        "scheduler_cleanup_authorized": False,
+    }
+
+
+def run_committed_request(
+    *,
+    repository: str,
+    pr_number: int,
+    owner_token: str,
+    repository_path: str | Path = ".",
+    observer: Callable[[], dict[str, Any]] | None = None,
+    commenter: Callable[[str, str], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """The Phase 3 committed-request execution boundary.
+
+    Derives the durable handoff (exact campaign identity, owner lock/token,
+    one exact RESERVED guard) itself, performs final pre-POST ownership
+    revalidation, persists every transition through guarded stale-write
+    protection, and completes the local ownership disposition before
+    returning. The returned ``ownership`` field is the actual completed
+    disposition, never a recommendation.
+    """
+    canonical = model.canonical_repository(repository)
+    if observer is None:
+        observer = lambda: github_api.fetch_snapshot(canonical, pr_number)  # noqa: E731
+    if commenter is None:
+        commenter = github_api.add_comment
+
+    # 1. Establish the durable handoff from current local state.
+    try:
+        metadata = storage.ensure_active_campaign_owner(
+            repository, pr_number, owner_token, repository_path=repository_path
+        )
+        campaign_path = storage.campaign_path(
+            repository, pr_number, repository_path=repository_path
+        )
+        campaign = storage.load_json(campaign_path)
+        if campaign is None:
+            raise RuntimeError(f"Campaign record does not exist: {campaign_path}")
+        model.validate_campaign(
+            campaign, repository=repository, pull_request_number=pr_number
+        )
+        if campaign["campaign_id"] != metadata["campaign_id"]:
+            raise RuntimeError(
+                "Ownership lock belongs to a different campaign; refusing mutation"
+            )
+        guard = committed_request_guard(campaign)
+    except Exception as error:  # noqa: BLE001 - fail closed without mutation
+        return _fail_closed("local_fail_closed", storage.error_text(error))
+
+    head_oid = guard["head_oid"]
+    reserved_at = guard["reserved_at"]
+    baseline_comment_ids = set(guard.get("baseline", {}).get("comment_ids", []))
+    state = {"campaign": campaign}
+
+    def persist_transition(transition: Callable[[dict[str, Any]], dict[str, Any]]) -> dict[str, Any]:
+        """Guarded stale-write persistence of one operation-specific transition."""
+        persisted = storage.apply_campaign_transition_if_current(
+            repository,
+            pr_number,
+            owner_token=owner_token,
+            expected_source=state["campaign"],
+            transition=transition,
+            repository_path=repository_path,
+        )
+        state["campaign"] = persisted
+        return persisted
+
+    def final_authority_check() -> None:
+        """The final local authority operation before the POST.
+
+        Re-proves the exact matching ownership and that the committed RESERVED
+        guard for this head is still the campaign's single committed request.
+        """
+        current_metadata = storage.ensure_active_campaign_owner(
+            repository, pr_number, owner_token, repository_path=repository_path
+        )
+        current = storage.load_json(campaign_path)
+        if current is None:
+            raise RuntimeError("Campaign record disappeared before the request POST")
+        model.validate_campaign(
+            current, repository=repository, pull_request_number=pr_number
+        )
+        if current["campaign_id"] != current_metadata["campaign_id"]:
+            raise RuntimeError(
+                "Ownership lock belongs to a different campaign before the POST"
+            )
+        current_guard = committed_request_guard(current)
+        if current_guard["head_oid"] != head_oid:
+            raise RuntimeError("The committed request guard changed before the POST")
+
+    try:
+        result = execute_request_attempt(
+            campaign=state["campaign"],
+            head_oid=head_oid,
+            reserved_at=reserved_at,
+            baseline_comment_ids=baseline_comment_ids,
+            observer=observer,
+            commenter=commenter,
+            persist_transition=persist_transition,
+            final_authority_check=final_authority_check,
+        )
+    except Exception as error:  # noqa: BLE001 - post-mutation state is uncertain
+        return _fail_closed(
+            "local_fail_closed",
+            "request execution failed and the campaign state is uncertain: "
+            + storage.error_text(error),
+        )
+    return _dispose(
+        repository,
+        pr_number,
+        owner_token,
+        repository_path=repository_path,
+        result=result,
+    )
+
+
+def _dispose(
+    repository: str,
+    pr_number: int,
+    owner_token: str,
+    *,
+    repository_path: str | Path,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Complete the boundary-owned local ownership disposition."""
+    campaign = result["campaign"]
+    printable = {
+        "outcome": result["outcome"],
+        "detail": result.get("detail"),
+        "terminal": result["terminal"],
+        "guard_state": (model.guard_for_head(campaign, result["head_oid"]) or {}).get("state"),
+        "campaign_status": campaign["status"],
+        "rounds_used": campaign["rounds_used"],
+    }
+    if result["retain_lock"]:
+        return {**printable, "ownership": "retained", "scheduler_cleanup_authorized": False}
+    try:
+        storage.release_lock(
+            repository, pr_number, owner_token, repository_path=repository_path
+        )
+    except Exception as error:  # noqa: BLE001 - release must never be guessed
+        return {
+            **printable,
+            "outcome": "local_fail_closed",
+            "reason": (
+                f"request outcome {result['outcome']} completed but release "
+                "could not be confirmed: " + storage.error_text(error)
+            ),
+            "terminal": True,
+            "ownership": "release_unconfirmed",
+            "scheduler_cleanup_authorized": False,
+        }
+    return {
+        **printable,
+        "ownership": "released",
+        "scheduler_cleanup_authorized": result["terminal"],
+    }
 
 
 def execute_request_attempt(
@@ -84,12 +237,14 @@ def execute_request_attempt(
     baseline_comment_ids: set[str],
     observer: Callable[[], dict[str, Any]],
     commenter: Callable[[str, str], dict[str, Any]],
-    persist: Callable[[dict[str, Any]], None],
+    persist_transition: Callable[[Callable[[dict[str, Any]], dict[str, Any]]], dict[str, Any]],
+    final_authority_check: Callable[[], None],
 ) -> dict[str, Any]:
-    """Return an outcome dict. ``campaign`` already carries the committed guard.
+    """Return an outcome dict; ``campaign`` is the latest persisted record.
 
-    Every model transition is handed to ``persist`` before any further external
-    call, so the guard state on disk never trails the mutation order.
+    Every model transition is handed to ``persist_transition`` so the guard
+    state on disk never trails the mutation order and stale writes are
+    refused by the Phase 1 guarded primitive.
     """
     result: dict[str, Any] = {
         "outcome": None,
@@ -103,13 +258,11 @@ def execute_request_attempt(
     reobserved = observer()
     invalidation = _revalidation_reason(campaign, reobserved, head_oid)
     if invalidation is not None:
-        campaign = model.invalidate_reserved_request(
-            campaign,
-            head_oid=head_oid,
-            at=reobserved["server_time"],
-            reason=invalidation,
+        campaign = persist_transition(
+            lambda record: model.invalidate_reserved_request(
+                record, head_oid=head_oid, at=reobserved["server_time"], reason=invalidation
+            )
         )
-        persist(campaign)
         result.update(
             outcome="invalidated",
             campaign=campaign,
@@ -118,7 +271,10 @@ def execute_request_attempt(
         )
         return result
 
-    # 3. External mutation.
+    # 3. Final local authority operation immediately before the mutation.
+    final_authority_check()
+
+    # 4. The one external mutation attempt.
     try:
         created = commenter(reobserved["node_id"], REQUEST_BODY)
     except Exception as mutation_error:  # noqa: BLE001 - classification follows
@@ -130,25 +286,26 @@ def execute_request_attempt(
             baseline_comment_ids=baseline_comment_ids,
             observer=observer,
             mutation_error=mutation_error,
-            persist=persist,
+            persist_transition=persist_transition,
         )
 
-    # 4. Immediate post-mutation head bracket.
+    # 5. Immediate post-mutation head bracket.
     post_snapshot = observer()
     if (
         post_snapshot.get("complete") is not True
         or post_snapshot.get("head_oid") != head_oid
     ):
-        campaign = model.mark_unbracketed_request(
-            campaign,
-            head_oid=head_oid,
-            post_head_oid=post_snapshot.get("head_oid"),
-            request_node_id=created["node_id"],
-            request_created_at=created["created_at"],
-            request_url=created.get("url") or "",
-            at=post_snapshot.get("server_time") or created["created_at"],
+        campaign = persist_transition(
+            lambda record: model.mark_unbracketed_request(
+                record,
+                head_oid=head_oid,
+                post_head_oid=post_snapshot.get("head_oid"),
+                request_node_id=created["node_id"],
+                request_created_at=created["created_at"],
+                request_url=created.get("url") or "",
+                at=post_snapshot.get("server_time") or created["created_at"],
+            )
         )
-        persist(campaign)
         result.update(
             outcome="unbracketed",
             campaign=campaign,
@@ -157,15 +314,16 @@ def execute_request_attempt(
         )
         return result
 
-    campaign = model.open_request_window(
-        campaign,
-        head_oid=head_oid,
-        post_head_oid=post_snapshot["head_oid"],
-        request_node_id=created["node_id"],
-        request_created_at=created["created_at"],
-        request_url=created.get("url") or "",
+    campaign = persist_transition(
+        lambda record: model.open_request_window(
+            record,
+            head_oid=head_oid,
+            post_head_oid=post_snapshot["head_oid"],
+            request_node_id=created["node_id"],
+            request_created_at=created["created_at"],
+            request_url=created.get("url") or "",
+        )
     )
-    persist(campaign)
     result.update(outcome="window_open", campaign=campaign, retain_lock=False)
     return result
 
@@ -198,31 +356,33 @@ def _classify_creation_failure(
     baseline_comment_ids: set[str],
     observer: Callable[[], dict[str, Any]],
     mutation_error: Exception,
-    persist: Callable[[dict[str, Any]], None],
+    persist_transition: Callable[[Callable[[dict[str, Any]], dict[str, Any]]], dict[str, Any]],
 ) -> dict[str, Any]:
     try:
         post_snapshot = observer()
     except Exception:  # noqa: BLE001 - cannot establish anything -> fail closed
-        campaign = model.mark_request_ambiguous(
-            campaign,
-            head_oid=head_oid,
-            at=reserved_at,
-            detail=f"creation error and re-observation failed: {mutation_error}",
+        campaign = persist_transition(
+            lambda record: model.mark_request_ambiguous(
+                record,
+                head_oid=head_oid,
+                at=reserved_at,
+                detail=f"creation error and re-observation failed: {mutation_error}",
+            )
         )
-        persist(campaign)
         result.update(
             outcome="ambiguous", campaign=campaign, retain_lock=True, terminal=True
         )
         return result
 
     if post_snapshot.get("complete") is not True:
-        campaign = model.mark_request_ambiguous(
-            campaign,
-            head_oid=head_oid,
-            at=reserved_at,
-            detail="creation error and post evidence is incomplete",
+        campaign = persist_transition(
+            lambda record: model.mark_request_ambiguous(
+                record,
+                head_oid=head_oid,
+                at=reserved_at,
+                detail="creation error and post evidence is incomplete",
+            )
         )
-        persist(campaign)
         result.update(
             outcome="ambiguous", campaign=campaign, retain_lock=True, terminal=True
         )
@@ -231,14 +391,40 @@ def _classify_creation_failure(
     unexpected = _find_unexpected_request_comment(
         post_snapshot, baseline_comment_ids
     )
-    if unexpected is None:
-        campaign = model.mark_request_creation_failed(
-            campaign,
-            head_oid=head_oid,
-            at=post_snapshot["server_time"],
-            detail=f"request creation definitively failed; no request created: {mutation_error}",
+    if unexpected is not None:
+        # A new viewer comment exists but the mutation reported failure: creation is
+        # not provably ours, and equality/earlier timestamps cannot settle it either.
+        campaign = persist_transition(
+            lambda record: model.mark_request_ambiguous(
+                record,
+                head_oid=head_oid,
+                at=post_snapshot["server_time"],
+                detail=(
+                    "creation error but an unaccounted viewer request comment exists: "
+                    + str(unexpected.get("id"))
+                ),
+            )
         )
-        persist(campaign)
+        result.update(
+            outcome="ambiguous", campaign=campaign, retain_lock=True, terminal=True
+        )
+        return result
+
+    # No comment is visible. Only a server-authoritative rejection proves the
+    # request was not created and cannot later complete from this attempt; a
+    # transport-level failure (timeout, nonzero exit) may still complete.
+    if isinstance(mutation_error, github_api.GithubRejectionError):
+        campaign = persist_transition(
+            lambda record: model.mark_request_creation_failed(
+                record,
+                head_oid=head_oid,
+                at=post_snapshot["server_time"],
+                detail=(
+                    "request creation definitively failed; GitHub rejected the "
+                    f"mutation and no request exists: {mutation_error}"
+                ),
+            )
+        )
         result.update(
             outcome="creation_failed",
             campaign=campaign,
@@ -247,22 +433,39 @@ def _classify_creation_failure(
         )
         return result
 
-    # A new viewer comment exists but the mutation reported failure: creation is
-    # not provably ours, and equality/earlier timestamps cannot settle it either.
-    campaign = model.mark_request_ambiguous(
-        campaign,
-        head_oid=head_oid,
-        at=post_snapshot["server_time"],
-        detail=(
-            "creation error but an unaccounted viewer request comment exists: "
-            + str(unexpected.get("id"))
-        ),
+    campaign = persist_transition(
+        lambda record: model.mark_request_ambiguous(
+            record,
+            head_oid=head_oid,
+            at=post_snapshot["server_time"],
+            detail=(
+                "creation error with no visible request comment; the mutation "
+                f"may still complete: {mutation_error}"
+            ),
+        )
     )
-    persist(campaign)
     result.update(
         outcome="ambiguous", campaign=campaign, retain_lock=True, terminal=True
     )
     return result
+
+
+def _find_unexpected_request_comment(
+    snapshot: dict[str, Any], baseline_comment_ids: set[str]
+) -> dict[str, Any] | None:
+    """A viewer-authored @codex comment not present in the complete baseline."""
+    viewer = snapshot.get("viewer")
+    for comment in snapshot.get("comments", []):
+        if not isinstance(comment, dict):
+            continue
+        if comment.get("id") in baseline_comment_ids:
+            continue
+        if comment.get("login") != viewer:
+            continue
+        if github_api.normalize_comment_body(comment.get("body")) != REQUEST_BODY:
+            continue
+        return comment
+    return None
 
 
 def main() -> None:
@@ -275,61 +478,18 @@ def main() -> None:
     parser.add_argument("--owner-token", required=True)
     args = parser.parse_args()
 
-    lock_metadata = storage.verify_owner(
-        args.repo, args.pr, args.owner_token,
+    result = run_committed_request(
+        repository=args.repo,
+        pr_number=args.pr,
+        owner_token=args.owner_token,
         repository_path=args.repository_path,
     )
-    campaign_path = storage.campaign_path(
-        args.repo, args.pr, repository_path=args.repository_path
-    )
-    campaign = storage.load_json(campaign_path)
-    if campaign is None:
-        raise RuntimeError(f"Campaign record does not exist: {campaign_path}")
-    model.validate_campaign(
-        campaign, repository=args.repo, pull_request_number=args.pr
-    )
-    if lock_metadata["campaign_id"] != campaign["campaign_id"]:
-        raise RuntimeError(
-            "Ownership lock belongs to a different campaign; refusing mutation"
-        )
-    if model.is_terminal(campaign):
-        raise RuntimeError("Campaign is terminal; a request attempt cannot begin")
-
-    # Durable handoff identity: matching campaign + owner + one exact
-    # RESERVED guard. No snapshot replay, no second reservation.
-    guard = committed_request_guard(campaign)
-    head_oid = guard["head_oid"]
-    reserved_at = guard["reserved_at"]
-    baseline_comment_ids = set(guard.get("baseline", {}).get("comment_ids", []))
-
-    def observer() -> dict[str, Any]:
-        return github_api.fetch_snapshot(args.repo, args.pr)
-
-    def commenter(subject_id: str, body: str) -> dict[str, Any]:
-        return github_api.add_comment(subject_id, body)
-
-    outcome = execute_request_attempt(
-        campaign=campaign,
-        head_oid=head_oid,
-        reserved_at=reserved_at,
-        baseline_comment_ids=baseline_comment_ids,
-        observer=observer,
-        commenter=commenter,
-        persist=lambda record: storage.save_json(campaign_path, record),
-    )
-    storage.save_json(campaign_path, outcome["campaign"])
-    print(json.dumps({k: v for k, v in outcome.items() if k != "campaign"} | {
-        "campaign_status": outcome["campaign"]["status"],
-        "guard_state": (
-            model.guard_for_head(outcome["campaign"], head_oid) or {}
-        ).get("state"),
-        "rounds_used": outcome["campaign"]["rounds_used"],
-    }, indent=2))
+    print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        print(str(error), file=sys.stderr)
+        print(storage.error_text(error), file=sys.stderr)
         raise SystemExit(1) from error

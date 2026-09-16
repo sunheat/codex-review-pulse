@@ -85,6 +85,8 @@ Manual recovery of the permanent lock is an explicit human boundary; see
   20 minutes, independent of the scheduler cadence.
 - Discovery metadata never authorizes a live run. Development work on this
   repository is not a product run.
-- Phase 2 hardens the deterministic owned boundaries; external Git/GitHub
-  mutation-boundary hardening is still pending later work, so the runtime is
-  not canary-ready.
+- Phase 3 externalizes only already-committed actions through deterministic
+  mutation-specific boundaries: final evidence and ownership revalidation, at
+  most one mutation attempt per boundary, and authoritative confirmed /
+  definitively-failed / ambiguous classification. Raw transport mutators are
+  not alternate packaged product paths.

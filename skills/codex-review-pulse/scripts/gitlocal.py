@@ -5,6 +5,9 @@ The user's primary worktree is never modified. Remediation runs in detached
 temporary worktrees under the repository-associated v2 state directory. A batch
 creates at most one commit and one push, never an empty commit, never a
 force-push, and a remote head advancement aborts publication.
+
+``publish_batch`` is the internal one-commit/one-push engine used by the Phase 3
+Fix-now publication boundary; it is not an alternate product-facing push path.
 """
 
 from __future__ import annotations
@@ -189,10 +192,15 @@ def publish_batch(
     repository_path: str | Path = ".",
     remote: str = "origin",
     runner: Callable[..., subprocess.CompletedProcess[str]] = git,
+    before_push: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
-    """Publish one batch: at most one commit, one push, never force.
+    """Internal one-commit, one-push publication engine, never force.
 
-    Returns a dict with published status. Ambiguous publication fails closed.
+    This is not a product-facing boundary: the Phase 3 Fix-now publication
+    boundary (``externalize.py publish-fix-now``) wraps it with frozen-evidence
+    revalidation, current-PR-head validation, and the final ownership check.
+    ``before_push`` runs as the final local authority operation immediately
+    before the push attempt. Ambiguous publication fails closed.
     """
     storage.ensure_active_campaign_owner(
         repository, pr_number, owner_token, repository_path=repository_path
@@ -240,6 +248,8 @@ def publish_batch(
             "local_commit": local_head,
         }
 
+    if before_push is not None:
+        before_push()
     push = runner(
         "push", remote, f"HEAD:refs/heads/{branch}", cwd=wt
     )
@@ -299,13 +309,6 @@ def main() -> None:
     remove_parser.add_argument("--path", required=True)
     remove_parser.add_argument("--force", action="store_true")
 
-    publish_parser = subparsers.add_parser("publish", parents=[owned])
-    publish_parser.add_argument("--worktree", required=True)
-    publish_parser.add_argument("--branch", required=True)
-    publish_parser.add_argument("--path", action="append", required=True, dest="paths")
-    publish_parser.add_argument("--message", required=True)
-    publish_parser.add_argument("--expected-head", required=True)
-
     args = parser.parse_args()
     import json
 
@@ -336,21 +339,6 @@ def main() -> None:
                 pr_number=args.pr,
                 owner_token=args.owner_token,
                 repository_path=args.repository_path, force=args.force,
-            ),
-            indent=2,
-        ))
-    elif args.command == "publish":
-        print(json.dumps(
-            publish_batch(
-                worktree=args.worktree,
-                branch=args.branch,
-                paths=args.paths,
-                commit_message=args.message,
-                expected_head=args.expected_head,
-                repository=args.repo,
-                pr_number=args.pr,
-                owner_token=args.owner_token,
-                repository_path=args.repository_path,
             ),
             indent=2,
         ))

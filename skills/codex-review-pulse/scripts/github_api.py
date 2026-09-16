@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""GitHub observation and mutation primitives for the v2 worker.
+"""GitHub observation and mutation primitives for the v2 runtime.
 
 All evidence comes from authoritative GitHub responses through the authenticated
 GitHub CLI. Connections are fully paginated and head-bracketed; an error, a
 partial connection, or a head move during observation raises instead of being
 normalized into "absent".
+
+The transport functions here are internal implementation details and unit-test
+seams. Product-facing external mutations go through the deterministic Phase 3
+mutation boundaries (``externalize.py`` and ``review_request.py``), never by
+composing these primitives directly.
 """
 
 from __future__ import annotations
@@ -13,7 +18,6 @@ import argparse
 from email.utils import parsedate_to_datetime
 import json
 from datetime import UTC
-from pathlib import Path
 import re
 import subprocess
 import sys
@@ -21,6 +25,16 @@ from typing import Any, Callable
 
 import storage
 from campaign_model import normalize_login
+
+
+class GithubRejectionError(RuntimeError):
+    """Server-authoritative rejection of one mutation attempt.
+
+    Raised only when GitHub itself returned an error payload for the mutation,
+    which proves the mutation was rejected and cannot later complete from that
+    attempt. Transport-level failures (timeouts, nonzero CLI exits) raise plain
+    RuntimeErrors instead: those are never definitive on their own.
+    """
 
 
 def run(command: list[str], stdin: str | None = None) -> str:
@@ -73,7 +87,9 @@ def graphql(query: str, variables: dict[str, object] | None = None) -> dict[str,
     command.extend(_graphql_arguments(variables or {}))
     payload = run_json(command, query)
     if isinstance(payload, dict) and payload.get("errors"):
-        raise RuntimeError(f"GitHub GraphQL errors: {json.dumps(payload['errors'])}")
+        raise GithubRejectionError(
+            f"GitHub GraphQL errors: {json.dumps(payload['errors'])}"
+        )
     return payload
 
 
@@ -310,8 +326,10 @@ def normalize_snapshot(
                 "is_resolved": thread.get("isResolved") is True,
                 "is_outdated": thread.get("isOutdated") is True,
                 "path": thread.get("path"),
+                "root_comment_id": root.get("id"),
                 "root_login": normalize_login((root.get("author") or {}).get("login")),
                 "body": root.get("body"),
+                "root_updated_at": root.get("updatedAt"),
                 "url": root.get("url"),
             }
         )
@@ -428,20 +446,6 @@ mutation($threadId: ID!) {
 }
 """
 
-VERIFY_THREADS_QUERY = """
-query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      number headRefOid
-      reviewThreads(first: 100, after: $cursor) {
-        pageInfo { hasNextPage endCursor }
-        nodes { id isResolved comments(first: 1) { nodes { author { login } } } }
-      }
-    }
-  }
-}
-"""
-
 
 def add_comment(subject_id: str, body: str, *, graphql_call: Callable[..., dict[str, Any]] = graphql) -> dict[str, Any]:
     payload = graphql_call(ADD_COMMENT_MUTATION, {"subjectId": subject_id, "body": body})
@@ -454,124 +458,13 @@ def add_comment(subject_id: str, body: str, *, graphql_call: Callable[..., dict[
     }
 
 
-def fetch_all_thread_heads(
-    repository: str, number: int, *, graphql_call: Callable[..., dict[str, Any]] = graphql
-) -> tuple[str, list[dict[str, Any]]]:
-    """Re-observe thread roots with a stable head for pre-resolution checks."""
-    owner, repo = repository.split("/", 1)
-    nodes: list[dict[str, Any]] = []
-    head_oid: str | None = None
-    cursor: str | None = None
-    while True:
-        payload = graphql_call(
-            VERIFY_THREADS_QUERY,
-            {"owner": owner, "repo": repo, "number": number, "cursor": cursor},
-        )
-        pull_request = payload["data"]["repository"]["pullRequest"]
-        if pull_request is None:
-            raise RuntimeError(f"Pull request not found: {repository}#{number}")
-        page_head = pull_request["headRefOid"]
-        if head_oid is not None and page_head != head_oid:
-            raise RuntimeError("Pull request head moved while re-observing threads")
-        head_oid = page_head
-        connection = pull_request["reviewThreads"]
-        nodes.extend(connection.get("nodes") or [])
-        page_info = connection["pageInfo"]
-        if not page_info["hasNextPage"]:
-            break
-        cursor = page_info["endCursor"]
-        if not cursor:
-            raise RuntimeError("reviewThreads pagination did not return a cursor")
-    if head_oid is None:
-        raise RuntimeError("GitHub did not return a head OID")
-    return head_oid, nodes
-
-
-def verify_and_resolve_thread(
-    *,
-    repository: str,
-    number: int,
-    thread_id: str,
-    batch_thread_ids: list[str],
-    reviewer_logins: list[str],
-    owner_token: str,
-    repository_path: str | Path = ".",
-    graphql_call: Callable[..., dict[str, Any]] = graphql,
-) -> dict[str, Any]:
-    """Re-observe, verify scope/identity/unresolved state, then resolve exactly."""
-    storage.ensure_active_campaign_owner(
-        repository, number, owner_token, repository_path=repository_path
-    )
-    if thread_id not in batch_thread_ids or not batch_thread_ids:
-        raise RuntimeError("Thread is not part of this in-memory remediation batch")
-    _, nodes = fetch_all_thread_heads(repository, number, graphql_call=graphql_call)
-    by_id = {node.get("id"): node for node in nodes}
-    missing = sorted(set(batch_thread_ids) - set(by_id))
-    if missing:
-        raise RuntimeError("Batch thread IDs are not all present on this pull request: " + ", ".join(missing))
-    target = by_id[thread_id]
-    root_nodes = (target.get("comments") or {}).get("nodes") or []
-    root_login = normalize_login((root_nodes[0].get("author") or {}).get("login")) if root_nodes else None
-    if root_login not in set(reviewer_logins):
-        raise RuntimeError("Thread root author is not an applicable Codex identity")
-    if target.get("isResolved") is True:
-        return {"id": thread_id, "isResolved": True, "already_resolved": True}
+def resolve_thread(thread_id: str, *, graphql_call: Callable[..., dict[str, Any]] = graphql) -> dict[str, Any]:
+    """Internal transport for one review-thread resolution mutation."""
     payload = graphql_call(RESOLVE_MUTATION, {"threadId": thread_id})
     thread = payload["data"]["resolveReviewThread"]["thread"]
     if thread.get("id") != thread_id or thread.get("isResolved") is not True:
         raise RuntimeError("GitHub did not confirm the thread resolution")
-    return {"id": thread_id, "isResolved": True, "already_resolved": False}
-
-
-def deferred_issue_marker(repository: str, number: int, thread_id: str) -> str:
-    safe_thread = thread_id.replace("--", "-")
-    return f"<!-- codex-review-pulse: {repository.casefold()}#{number}/{safe_thread} -->"
-
-
-def ensure_deferred_issue(
-    *,
-    repository: str,
-    number: int,
-    thread_id: str,
-    title: str,
-    body: str,
-    owner_token: str,
-    repository_path: str | Path = ".",
-    searcher: Callable[[str, str], list[dict[str, Any]]] | None = None,
-    creator: Callable[[str, str, str], str] | None = None,
-) -> dict[str, Any]:
-    """Find an open issue carrying the deterministic marker, or create one.
-
-    Identity is the marker string itself, not model judgment about titles.
-    """
-    storage.ensure_active_campaign_owner(
-        repository, number, owner_token, repository_path=repository_path
-    )
-    marker = deferred_issue_marker(repository, number, thread_id)
-    if searcher is None:
-        def searcher(repo: str, query: str) -> list[dict[str, Any]]:
-            return run_json(
-                ["gh", "issue", "list", "--repo", repo, "--state", "open",
-                 "--search", query, "--json", "number,title,body,url"]
-            )
-    matches = [
-        issue
-        for issue in searcher(repository, f'"{marker}"')
-        if isinstance(issue, dict) and marker in (issue.get("body") or "")
-    ]
-    if matches:
-        issue = matches[0]
-        return {"number": issue.get("number"), "url": issue.get("url"), "created": False}
-    full_body = body.rstrip() + "\n\n" + marker + "\n"
-    if creator is None:
-        def creator(repo: str, issue_title: str, issue_body: str) -> str:
-            return run(
-                ["gh", "issue", "create", "--repo", repo,
-                 "--title", issue_title, "--body-file", "-"],
-                issue_body,
-            ).strip()
-    url = creator(repository, title, full_body)
-    return {"number": url.rstrip("/").split("/")[-1], "url": url, "created": True}
+    return {"id": thread_id, "isResolved": True}
 
 
 def normalize_comment_body(body: object) -> str:
@@ -581,7 +474,13 @@ def normalize_comment_body(body: object) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="v2 GitHub observation and mutation helpers")
+    parser = argparse.ArgumentParser(
+        description=(
+            "v2 GitHub observation helpers. External product mutations go "
+            "through the deterministic Phase 3 boundaries "
+            "(externalize.py, review_request.py), not this CLI."
+        )
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     snapshot = subparsers.add_parser("snapshot", help="Read-only head-bracketed PR observation")
@@ -590,54 +489,11 @@ def main() -> None:
 
     subparsers.add_parser("viewer", help="Print the authenticated GitHub login")
 
-    resolve = subparsers.add_parser("resolve-thread", help="Verify and resolve one batch thread")
-    resolve.add_argument("--repo", required=True)
-    resolve.add_argument("--pr", required=True, type=int)
-    resolve.add_argument("--repository-path", default=".")
-    resolve.add_argument("--owner-token", required=True)
-    resolve.add_argument("--thread-id", required=True)
-    resolve.add_argument("--batch-thread", action="append", required=True, dest="batch_threads")
-    resolve.add_argument("--reviewer-login", action="append", dest="reviewer_logins")
-
-    issue = subparsers.add_parser("ensure-issue", help="Idempotently create/reuse a deferred issue")
-    issue.add_argument("--repo", required=True)
-    issue.add_argument("--pr", required=True, type=int)
-    issue.add_argument("--repository-path", default=".")
-    issue.add_argument("--owner-token", required=True)
-    issue.add_argument("--thread-id", required=True)
-    issue.add_argument("--title", required=True)
-    issue.add_argument("--body-file", required=True, type=Path)
-
     args = parser.parse_args()
     if args.command == "snapshot":
         print(json.dumps(fetch_snapshot(args.repo, args.pr), indent=2))
     elif args.command == "viewer":
         print(run(["gh", "api", "user", "--jq", ".login"]).strip())
-    elif args.command == "resolve-thread":
-        from campaign_model import unique_logins
-
-        result = verify_and_resolve_thread(
-            repository=args.repo,
-            number=args.pr,
-            thread_id=args.thread_id,
-            batch_thread_ids=args.batch_threads,
-            reviewer_logins=unique_logins(args.reviewer_logins, label="reviewer"),
-            owner_token=args.owner_token,
-            repository_path=args.repository_path,
-        )
-        print(json.dumps(result, indent=2))
-    elif args.command == "ensure-issue":
-        body = args.body_file.read_text(encoding="utf-8") if str(args.body_file) != "-" else sys.stdin.read()
-        result = ensure_deferred_issue(
-            repository=args.repo,
-            number=args.pr,
-            thread_id=args.thread_id,
-            title=args.title,
-            body=body,
-            owner_token=args.owner_token,
-            repository_path=args.repository_path,
-        )
-        print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":

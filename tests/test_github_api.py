@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import subprocess
 import sys
-import tempfile
 import unittest
 
 
@@ -13,55 +11,7 @@ SCRIPTS = ROOT / "skills" / "codex-review-pulse" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 FIXTURES = ROOT / "tests" / "fixtures"
 
-import campaign_model as model  # noqa: E402
 import github_api  # noqa: E402
-import storage  # noqa: E402
-
-
-def git(cwd: Path, *args: str) -> str:
-    process = subprocess.run(
-        ["git", *args], cwd=str(cwd), capture_output=True, text=True
-    )
-    if process.returncode != 0:
-        raise RuntimeError(f"git {args} failed: {process.stderr.strip()}")
-    return process.stdout.strip()
-
-
-class OwnedRepository:
-    def __init__(self, root: Path) -> None:
-        self.path = root / "repo"
-        self.path.mkdir()
-        git(self.path, "init", "-b", "main")
-        git(self.path, "config", "user.email", "t@e.test")
-        git(self.path, "config", "user.name", "T")
-        (self.path / "f").write_text("x", encoding="utf-8")
-        git(self.path, "add", "f")
-        git(self.path, "commit", "-m", "init")
-        acquired = storage.acquire_setup_lock(
-            "owner/repo", 7,
-            campaign_id="crp-20260914T120000Z-abc123",
-            acquired_at="2026-09-14T12:00:00Z",
-            repository_path=self.path,
-        )
-        self.token = acquired["owner_token"]
-        # Ordinary mutation authority requires a valid matching active campaign.
-        storage.initialize_campaign(
-            "owner/repo", 7,
-            owner_token=self.token,
-            campaign=model.new_campaign(
-                campaign_id="crp-20260914T120000Z-abc123",
-                repository="owner/repo",
-                pull_request_number=7,
-                created_at="2026-09-14T12:00:00Z",
-                max_rounds=6,
-                model="a-model",
-                reasoning_level="medium",
-                interval_minutes=30,
-                reviewer_logins=["chatgpt-codex-connector"],
-                approval_logins=["chatgpt-codex-connector"],
-            ),
-            repository_path=self.path,
-        )
 
 
 SERVER_TIME = "2026-09-14T12:00:00Z"
@@ -220,6 +170,11 @@ class SnapshotTests(unittest.TestCase):
         self.assertIsNone(by_id["T_UNKNOWN"]["root_login"])
         self.assertTrue(by_id["T_RESOLVED"]["is_resolved"])
         self.assertFalse(by_id["T_CODEX"]["is_resolved"])
+        # Frozen-evidence identity fields the Phase 3 boundaries derive.
+        self.assertEqual(by_id["T_CODEX"]["root_comment_id"], "C1")
+        self.assertEqual(by_id["T_CODEX"]["body"], "Fix the null check here.")
+        self.assertEqual(by_id["T_CODEX"]["root_updated_at"], "2026-09-14T12:00:00Z")
+        self.assertEqual(by_id["T_CODEX"]["path"], "src/core.py")
 
     def test_pagination_with_next_page_collects_all_nodes(self) -> None:
         pages = [
@@ -258,146 +213,35 @@ def T_PLUS(minutes: int) -> str:
     return f"2026-09-14T12:{minutes:02d}:00Z"
 
 
-def thread_node(thread_id: str, login: str = CODEX, resolved: bool = False) -> dict:
-    return {
-        "id": thread_id,
-        "isResolved": resolved,
-        "comments": {"nodes": [{"id": f"{thread_id}-c1", "author": {"login": login}}]},
-    }
+class RejectionClassificationTests(unittest.TestCase):
+    def test_graphql_error_payload_is_a_server_authoritative_rejection(self) -> None:
+        original = github_api.run_json
+        github_api.run_json = lambda *a, **k: {"errors": [{"message": "bad"}]}
+        try:
+            with self.assertRaises(github_api.GithubRejectionError):
+                github_api.graphql("mutation { noop }")
+        finally:
+            github_api.run_json = original
 
+    def test_rejection_is_distinct_from_transport_failures(self) -> None:
+        self.assertTrue(issubclass(github_api.GithubRejectionError, RuntimeError))
+        # Transport-level failures stay plain RuntimeErrors so classification
+        # can distinguish "GitHub rejected the mutation" from "the call may
+        # still complete".
+        self.assertNotIsInstance(RuntimeError("timeout"), github_api.GithubRejectionError)
 
-class ResolveTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.owned = OwnedRepository(Path(self._tmp.name))
-
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
-
-    def _call(self, fake, thread_id="T1", batch=("T1",)):
-        return github_api.verify_and_resolve_thread(
-            repository="owner/repo",
-            number=7,
-            thread_id=thread_id,
-            batch_thread_ids=list(batch),
-            reviewer_logins=[CODEX],
-            owner_token=self.owned.token,
-            repository_path=self.owned.path,
-            graphql_call=fake,
-        )
-
-    def test_resolution_requires_ownership(self) -> None:
-        fake = FakeGraphQL()
-        fake.threads = [thread_node("T1")]
-        with self.assertRaisesRegex(RuntimeError, "owner|lock|token"):
-            github_api.verify_and_resolve_thread(
-                repository="owner/repo",
-                number=7,
-                thread_id="T1",
-                batch_thread_ids=["T1"],
-                reviewer_logins=[CODEX],
-                owner_token="wrong-token",
-                repository_path=self.owned.path,
-                graphql_call=fake,
-            )
-
-    def test_resolves_applicable_batch_thread(self) -> None:
-        fake = FakeGraphQL()
-        fake.threads = [thread_node("T1"), thread_node("T2", login="human")]
-        result = self._call(fake, batch=("T1",))
-        self.assertTrue(result["isResolved"])
-        self.assertFalse(result["already_resolved"])
-        self.assertEqual(fake.mutations[-1], ("resolve", {"threadId": "T1"}))
-
-    def test_already_resolved_is_confirmed_without_second_mutation(self) -> None:
-        fake = FakeGraphQL()
-        fake.threads = [thread_node("T1", resolved=True)]
-        result = self._call(fake)
-        self.assertTrue(result["already_resolved"])
-        self.assertEqual(fake.mutations, [])
-
-    def test_non_codex_root_author_refuses(self) -> None:
-        fake = FakeGraphQL()
-        fake.threads = [thread_node("T1", login="human")]
-        with self.assertRaisesRegex(RuntimeError, "not an applicable Codex identity"):
-            self._call(fake)
-
-    def test_thread_outside_batch_refuses(self) -> None:
-        fake = FakeGraphQL()
-        fake.threads = [thread_node("T1"), thread_node("T2")]
-        with self.assertRaisesRegex(
-            RuntimeError, "not part of this in-memory remediation batch"
-        ):
-            self._call(fake, thread_id="T2", batch=("T1",))
-
-    def test_batch_thread_missing_from_pr_refuses(self) -> None:
-        fake = FakeGraphQL()
-        fake.threads = [thread_node("T1")]
-        with self.assertRaisesRegex(RuntimeError, "not all present"):
-            self._call(fake, batch=("T1", "T9"))
-
-
-class IssueTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.owned = OwnedRepository(Path(self._tmp.name))
-
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
-
-    def _issue(self, **kwargs):
-        return github_api.ensure_deferred_issue(
-            repository="owner/repo",
-            number=7,
-            owner_token=self.owned.token,
-            repository_path=self.owned.path,
-            **kwargs,
-        )
-
-    def test_reuses_issue_with_exact_marker_in_body(self) -> None:
-        marker = github_api.deferred_issue_marker("owner/repo", 7, "T1")
-        created: list = []
-        result = self._issue(
-            thread_id="T1",
-            title="Fix later",
-            body="details",
-            searcher=lambda repo, query: [
-                {"number": 42, "url": "https://x/42", "title": "Fix later",
-                 "body": f"text\n{marker}"},
-            ],
-            creator=lambda *a: created.append(a) or "https://x/created",
-        )
-        self.assertFalse(result["created"])
-        self.assertEqual(result["number"], 42)
-        self.assertEqual(created, [])
-
-    def test_title_match_without_marker_creates_new_issue(self) -> None:
-        bodies: list[str] = []
-        result = self._issue(
-            thread_id="T1",
-            title="Fix later",
-            body="details",
-            searcher=lambda repo, query: [
-                {"number": 9, "url": "https://x/9", "title": "Fix later", "body": "no marker"},
-            ],
-            creator=lambda repo, title, body: (bodies.append(body) or "https://x/10"),
-        )
-        self.assertTrue(result["created"])
-        marker = github_api.deferred_issue_marker("owner/repo", 7, "T1")
-        self.assertIn(marker, bodies[0])
-
-    def test_issue_creation_requires_ownership(self) -> None:
-        with self.assertRaises(RuntimeError):
-            github_api.ensure_deferred_issue(
-                repository="owner/repo",
-                number=7,
-                thread_id="T1",
-                title="Fix later",
-                body="details",
-                owner_token="wrong",
-                repository_path=self.owned.path,
-                searcher=lambda repo, query: [],
-            )
+    def test_resolve_thread_transport_confirms_resolution(self) -> None:
+        original = github_api.run_json
+        seen: list = []
+        github_api.run_json = lambda *a, **k: seen.append(a) or {
+            "data": {"resolveReviewThread": {"thread": {"id": "T1", "isResolved": True}}}
+        }
+        try:
+            result = github_api.resolve_thread("T1")
+        finally:
+            github_api.run_json = original
+        self.assertEqual(result, {"id": "T1", "isResolved": True})
+        self.assertTrue(seen)
 
 
 class GraphQLArgumentTests(unittest.TestCase):

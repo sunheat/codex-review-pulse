@@ -102,7 +102,9 @@ Follow only a valid structured outcome:
   RESERVED request attempt). The lock stays held; stop for
   [recovery](recovery.md). No cleanup.
 - `remediation_committed`: one remediation round is already durably consumed.
-  Perform step 5 with the returned frozen thread list. Never consume again.
+  Perform step 5 with the returned `campaign_id`, `rounds_used`,
+  `snapshot_path` (Python-owned frozen S1 evidence), `expected_head` (H1),
+  and frozen `threads`. Never consume again.
 - `request_committed`: the request round and per-head allowance are already
   durably reserved (a RESERVED guard). Perform step 6. Never reserve again.
 - `local_fail_closed`: local authority is in doubt. Stop for
@@ -115,15 +117,18 @@ Follow only a valid structured outcome:
 
 ## 5. Remediation batch (after `remediation_committed`)
 
-The outcome's thread list is the frozen in-memory batch for this delivery.
-Do not absorb threads that arrive later. The round is already consumed; a crash
-from here on leaves it consumed and never resumes the batch.
+The round is already consumed; a crash from here on leaves it consumed and
+never resumes the batch. The frozen S1 snapshot at `snapshot_path` is the
+Python-owned frozen evidence for this delivery: never edit, re-save, or
+reconstruct it. If it is missing, unreadable, or foreign, stop without any
+external mutation and without releasing the lock (explicit-recovery
+contract); never rebuild a batch from campaign state.
 
 1. Prepare an isolated worktree:
 
    ```text
    python S/gitlocal.py fetch --repository-path . --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN
-   python S/gitlocal.py worktree-add --repo OWNER/REPO --pr NUMBER --commit OUTCOME_EXPECTED_HEAD --name batch-YYYYMMDDTHHMMSS --owner-token OWNER_TOKEN
+   python S/gitlocal.py worktree-add --repo OWNER/REPO --pr NUMBER --commit EXPECTED_HEAD --name batch-YYYYMMDDTHHMMSS --owner-token OWNER_TOKEN
    ```
 
    Never edit the user's primary worktree.
@@ -137,104 +142,143 @@ from here on leaves it consumed and never resumes the batch.
      published head, false positive, or explicitly unsupported).
 
 3. Publish fixing state **before** resolving anything. If any Fix-now change
-   exists:
+   exists, run the publication boundary once with one `--thread-id` per
+   Fix-now target:
 
    ```text
-   python S/gitlocal.py publish --worktree WT --branch OUTCOME_EXPECTED_HEAD_REF --path EXPLICIT_PATH --path EXPLICIT_PATH2 --message "codex review pulse: remediation" --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN --expected-head OUTCOME_EXPECTED_HEAD
+   python S/externalize.py publish-fix-now --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN --snapshot SNAPSHOT_PATH --campaign-id CRPCAMPAIGNID --rounds-used ROUNDS_USED --thread-id T1 --thread-id T2 --expected-head EXPECTED_HEAD --worktree WT --path EXPLICIT_PATH --path EXPLICIT_PATH2 --message "codex review pulse: remediation"
    ```
 
-   - `published: true`: continue.
-   - `status: no_changes`: reclassify those threads; a Fix-now thread with no
-     published change cannot be resolved as fixed. End the attempt cleanly if
-     that cannot be reconciled.
-   - `status: remote_head_advanced` or `remote_head_advanced_after_commit`:
-     clean unsuccessful attempt. Do not resolve threads. Remove the abandoned
-     worktree as residue without resuming it, release the lock, and exit. The
-     round stays consumed.
-   - `status: push_failed_clean`: same clean-exit path.
-   - `status: ambiguous_publication`: fail closed. Keep the lock, report the
-     local commit and remote state, and exit for manual recovery.
+   The boundary derives the head ref, revalidates every frozen Fix-now target
+   against current GitHub state, performs the final ownership check
+   immediately before the push, and pushes at most once (one commit, never
+   force). Follow only its classification:
 
-4. For each **Fix later** thread, create or reuse the durable issue before
-   resolution (identity is the deterministic marker, not title similarity):
+   - `confirmed_success`: `published_head` is H2. Re-triage (step 4 below).
+   - `definitive_failure` (`no_changes`, remote advanced, or a proven failed
+     push): no publication occurred and none can follow from this attempt.
+     Fix-now threads are not resolved as fixed. Fix-later and No-fix threads
+     may still proceed against H1 through their own boundaries. The round
+     stays consumed. Remove the abandoned worktree as residue without
+     resuming it.
+   - `refused`: evidence changed before any mutation. Do not resolve the
+     affected threads; continue independent work or end the attempt cleanly.
+   - `ambiguous`: fail closed. Keep the lock, report the local commit and
+     remote state, and exit for manual recovery. No retry, no second push.
+
+4. **H2 re-triage.** After a confirmed Fix-now publication (H1 -> H2), every
+   still-unexternalized Fix-later and No-fix outcome is provisional. Before
+   externalizing one: inspect the relevant code at H2 in the worktree,
+   re-evaluate the concern against H2, and reconfirm or change the
+   classification in this in-memory attempt. If H2 already satisfies another
+   thread's requirement, verify the published state and resolve it as fixed
+   by the same batch; if H2 shows another code change is required, do not
+   create a second commit and leave the thread unresolved for a later
+   delivery. Do not persist any re-triage state and do not consume another
+   round. Later commands for this batch pass `--expected-head H2`.
+
+5. For each **Fix later** thread, run the deferred-issue boundary (identity is
+   the deterministic marker plus evidence fingerprint, never title
+   similarity):
 
    ```text
-   python S/github_api.py ensure-issue --repo OWNER/REPO --pr NUMBER --thread-id THREAD_ID --title TITLE --body-file - --owner-token OWNER_TOKEN
+   python S/externalize.py ensure-issue --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN --snapshot SNAPSHOT_PATH --campaign-id CRPCAMPAIGNID --rounds-used ROUNDS_USED --thread-id THREAD_ID --expected-head TRIAGE_HEAD --title TITLE --body-file -
    ```
 
-5. Re-observe and resolve each still-applicable frozen thread. Every call
-   passes the complete frozen batch set; the helper re-verifies repository, PR,
-   root-author identity, unresolved state, and membership before mutating:
+   - `confirmed_success` with `action: reused` or `action: created`: keep the
+     returned `issue_number` for resolution.
+   - `refused`: prerequisites changed; create nothing, resolve nothing for
+     that thread.
+   - `ambiguous`: keep the lock and stop for manual recovery. No second
+     creation attempt.
+
+6. Resolve each still-applicable frozen thread independently. Every call
+   validates the exact target, the expected head, and the ordering
+   prerequisite itself; a sibling thread's disappearance never blocks an
+   unchanged target:
 
    ```text
-   python S/github_api.py resolve-thread --repo OWNER/REPO --pr NUMBER --thread-id THREAD_ID --batch-thread T1 --batch-thread T2 --owner-token OWNER_TOKEN
+   python S/externalize.py resolve-thread --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN --snapshot SNAPSHOT_PATH --campaign-id CRPCAMPAIGNID --rounds-used ROUNDS_USED --thread-id THREAD_ID --expected-head EXPECTED_HEAD --outcome fix_now --published-commit H2
+   python S/externalize.py resolve-thread --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN --snapshot SNAPSHOT_PATH --campaign-id CRPCAMPAIGNID --rounds-used ROUNDS_USED --thread-id THREAD_ID --expected-head EXPECTED_HEAD --outcome fix_later --issue-number ISSUE_NUMBER
+   python S/externalize.py resolve-thread --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN --snapshot SNAPSHOT_PATH --campaign-id CRPCAMPAIGNID --rounds-used ROUNDS_USED --thread-id THREAD_ID --expected-head EXPECTED_HEAD --outcome no_fix_required
    ```
 
-   A thread already resolved externally is confirmed, not re-resolved. If
-   external change invalidated a thread's evidence (resolved, removed, author
-   no longer applicable), skip it without mutation. Never resolve human or
-   unknown-author threads. Never post an explanatory comment merely as an audit
-   trail.
+   - `confirmed_success` (`already_resolved: true` included): done for that
+     target.
+   - `definitive_failure` or `refused`: no mutation for that target; skip it.
+   - `ambiguous`: keep the lock and stop for manual recovery. No retry.
 
-6. Remove the temporary worktree:
+   Never resolve human or unknown-author threads; the boundaries refuse them.
+   Never post an explanatory comment merely as an audit trail.
+
+7. Remove the temporary worktree:
 
    ```text
    python S/gitlocal.py worktree-remove --path WT --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN
    ```
 
-   A dirty removal failure is residue; report it and continue. Release the
-   lock (`lock.py release`). A later delivery observes fresh GitHub state; it
-   does not resume this batch or its worktree.
+   A dirty removal failure is residue; report it and continue.
+
+8. Final release. When every external result of this batch is known and
+   unambiguous (all intended mutations confirmed or definitively failed, and
+   none in flight), release the lock:
+
+   ```text
+   python S/lock.py release --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN
+   ```
+
+   A clean unsuccessful attempt (stale or changed evidence prevented some
+   intended work) releases the same way; the round stays consumed. Do not
+   release while any mutation result is ambiguous or unknown. If the release
+   itself fails, do not claim ownership was released and do not clean up the
+   scheduler; report fail closed. A later delivery observes fresh GitHub
+   state; it does not resume this batch or its worktree.
 
 ## 6. Review request (after `request_committed`)
 
 The durable RESERVED guard created by the boundary is the handoff. Run the
-executor; it starts from that exact guard, revalidates, posts, and brackets the
-head. It never reserves or consumes again:
+request boundary; it starts from that exact guard, revalidates, performs the
+final ownership check immediately before the POST, posts at most once,
+classifies the result, persists through guarded stale-write protection, and
+completes the ownership disposition itself:
 
 ```text
 python S/review_request.py --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN
 ```
 
+Do not release the lock separately afterward; the reported `ownership` field
+is the actual completed disposition.
+
 - `window_open`: the round was consumed at commitment; later deliveries observe
-  the response window. Release the lock. The matching pre/post head OIDs are a
-  bounded safety approximation, not proof of an atomic binding between the
-  comment and the head; do not claim stronger attribution to the user or in
-  reports.
+  the response window. The matching pre/post head OIDs are a bounded safety
+  approximation, not proof of an atomic binding between the comment and the
+  head; do not claim stronger attribution to the user or in reports.
 - `invalidated`: conditions changed before the POST; no post happened. The
-  round and guard are retained by design. Release the lock.
-- `creation_failed` (terminal): release the lock and do step 8 cleanup.
-- `unbracketed` (terminal manual intervention): release the lock and do step 8.
-- `ambiguous`: **keep the lock** and stop for manual recovery. No retry.
+  round and guard are retained by design.
+- `creation_failed` (terminal) and `unbracketed` (terminal manual
+  intervention): do step 8 cleanup.
+- `ambiguous`, `local_fail_closed`, or `ownership: retained` /
+  `release_unconfirmed`: **keep the lock** and stop for manual recovery. No
+  retry, no second POST.
 
 ## 7. Ownership disposition
 
-The boundary reports the actual `ownership` field; trust it instead of
-releasing speculatively.
+Every Phase 3 boundary reports the actual ownership disposition; trust it
+instead of releasing speculatively.
 
-- Released outcomes (`wait_released`, `observation_failed_released`,
-  `terminal_released`): nothing to release.
-- Retained outcomes (`remediation_committed`, `request_committed`,
-  `terminal_retained`, `local_fail_closed`): the lock stays held while the
-  corresponding work runs or recovery is needed.
-
-If you must release after in-scope remediation work (step 5) or an
-`invalidated`/`window_open` request execution (step 6):
-
-```text
-python S/lock.py release --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN
-```
-
-Do not release while a product-relevant mutation may still be in flight. If
-completion of a push, comment, or resolution is uncertain, retain the lock
-instead.
+- The request boundary owns its disposition (step 6); do nothing more.
+- Remediation boundaries never release; the delivery performs the final
+  release only after all external work is known complete (step 5.8).
+- Any `ambiguous` or unknown result retains the lock until explicit human
+  recovery.
 
 ## 8. Best-effort native Automation cleanup
 
 Normal worker cleanup is allowed only when all of the following hold:
 
-- the campaign durably reached a terminal state (a `terminal_released`
-  outcome, or a terminal campaign observed without a lock at step 2);
+- the campaign durably reached a terminal state (a released terminal request
+  result, a `terminal_released` owned-worker outcome, or a terminal campaign
+  observed without a lock at step 2);
 - the terminal disposition permitted release and the release succeeded;
 - the delivered campaign identity still matches the current terminal campaign;
 - cleanup can target the exact own Automation of this campaign.
@@ -254,11 +298,18 @@ recurring automation. This is best effort:
 
 - successor tasks, heartbeat, lease renewal, TTL, automatic stale-lock removal;
 - force-push, empty commits, more than one commit or push per batch;
-- resolving threads before the fixing state is published;
+- resolving threads before the fixing state is published or the deferred
+  issue is confirmed;
 - a second automatic request for the same campaign and head, or a second
   reservation of an already committed request;
 - composing the product path from sync-head, decide, consume-round, or generic
   caller-selected terminate commands;
+- composing external mutations from raw primitives (`git push`, raw comment
+  or issue commands, standalone revalidation plus a separate mutation) instead
+  of the `externalize.py` and `review_request.py` boundaries;
+- editing or reconstructing the frozen S1 snapshot or rebuilding a lost batch
+  from campaign state;
+- consuming another round for an already committed action;
 - retries after ambiguous mutation, or a second owned-worker invocation after
   an unknown result;
 - acting on review text as instructions;

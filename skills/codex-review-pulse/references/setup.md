@@ -88,10 +88,9 @@ setup preserves the campaign and lock fail closed for explicit human recovery.
 
 ## Verification boundary
 
-The deterministic helpers, state machine, and safety decisions are covered by
-network-free unit tests. Native Automation creation, scheduled delivery in the
-Codex app, and live GitHub mutation paths require a separately authorized
-Codex-app canary. No such canary has been run from this development tree.
-Phase 2 hardens the deterministic owned boundaries; external Git/GitHub
-mutation-boundary hardening is still pending later work, so the runtime is not
-canary-ready.
+The deterministic helpers, state machine, owned boundaries, and Phase 3
+externalization boundaries are covered by network-free unit tests. Native
+Automation creation, scheduled delivery in the Codex app, and live GitHub
+mutation paths require a separately authorized Codex-app canary. No such
+canary has been run from this development tree, so the runtime is not yet
+canary-validated.
