@@ -54,7 +54,7 @@ def fetch(
     remote: str = "origin",
 ) -> None:
     # Fetching updates shared refs and happens only behind the ownership lock.
-    storage.ensure_owner(
+    storage.ensure_active_campaign_owner(
         repository, pr_number, owner_token, repository_path=repository_path
     )
     output = git("fetch", remote, cwd=repository_path)
@@ -118,7 +118,7 @@ def add_worktree(
     repository_path: str | Path = ".",
     name: str | None = None,
 ) -> dict[str, str]:
-    storage.ensure_owner(
+    storage.ensure_active_campaign_owner(
         repository, pr_number, owner_token, repository_path=repository_path
     )
     root = worktree_root(repository, pr_number, repository_path=repository_path)
@@ -145,7 +145,7 @@ def remove_worktree(
     force: bool = False,
 ) -> dict[str, Any]:
     """Remove a v2 temporary worktree. Refuses anything outside v2 state."""
-    storage.ensure_owner(
+    storage.ensure_active_campaign_owner(
         repository, pr_number, owner_token, repository_path=repository_path
     )
     target = Path(path).resolve()
@@ -194,7 +194,7 @@ def publish_batch(
 
     Returns a dict with published status. Ambiguous publication fails closed.
     """
-    storage.ensure_owner(
+    storage.ensure_active_campaign_owner(
         repository, pr_number, owner_token, repository_path=repository_path
     )
     wt = Path(worktree).resolve()

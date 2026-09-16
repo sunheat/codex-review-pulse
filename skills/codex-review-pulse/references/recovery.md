@@ -32,10 +32,29 @@ interrupted batch, worktree, or reasoning.
 python scripts/lock.py recover --repo OWNER/REPO --pr NUMBER --user-authorized-recovery --expected-campaign-id CRPCAMPAIGNID
 ```
 
-The expected-campaign guard prevents accidentally clearing a replacement
-owner's lock. Recovery deletes only the lock; it never modifies the campaign
-record. There is no non-interactive shortcut and this command must never be
-called automatically by a worker.
+The expected-campaign guard is mandatory for any lock with a readable
+campaign identity — valid or corrupt-but-parseable — and prevents
+accidentally clearing a replacement owner's lock. Recovery deletes only the
+lock; it never modifies the campaign record. There is no non-interactive
+shortcut and this command must never be called automatically by a worker.
+
+Exact rules:
+
+- Lock absent: a harmless no-op; no expected identity is needed.
+- Valid lock: `--expected-campaign-id` is required and must match exactly.
+- Corrupt but parseable lock with a readable campaign id: the raw id grants
+  no authority and need not satisfy campaign-id syntax; it is used only as a
+  conservative mismatch guard, so `--expected-campaign-id` is still required
+  and must equal the raw id exactly.
+- Unreadable lock (not JSON, not an object, or no usable campaign id): a
+  supplied `--expected-campaign-id` can never be verified, so recovery
+  refuses. Omitting it removes the lock only after you established that the
+  previous owner can no longer mutate.
+
+Partial rollover state (`lock = C2`, `campaign = terminal C1`) recovers with
+`--expected-campaign-id C2`, because the expected identity refers to the lock
+being removed. The terminal C1 record stays in place afterwards; it may then
+be preserved, rolled over, or retired.
 
 If the campaign record itself is malformed or unsupported, leave the file in
 place for inspection (`<git-common-dir>/codex-review-pulse/v2/`). A runtime
@@ -46,6 +65,47 @@ that does not understand the state must not overwrite it.
 The next scheduled delivery re-acquires the lock and reconstructs authority.
 If you want to stop all deliveries, also pause or delete the bound native Codex
 Automation using the Codex app controls.
+
+## Campaign retirement
+
+Retirement is the explicit human handling path for a valid supported campaign
+that must not continue: an active interrupted campaign, an active
+fully-consumed campaign the user chooses not to continue, `ambiguous_interruption`,
+`manual_intervention_required`, `request_creation_failed`, `target_unavailable`,
+an early `succeeded` campaign with unused rounds, or an unused active
+scheduler-setup orphan. It is never automatic.
+
+Before retiring, confirm that every previous owner and product-mutating
+operation for this campaign can no longer continue. Then choose one mode:
+
+Retained-lock retirement, when the campaign's valid matching permanent lock
+still exists:
+
+```text
+python scripts/campaign.py retire --repo OWNER/REPO --pr NUMBER --expected-campaign-id CRPCAMPAIGNID --retained-lock --user-authorized-retirement
+```
+
+Lock-absent retirement, after lock recovery or when no permanent lock remains:
+
+```text
+python scripts/campaign.py retire --repo OWNER/REPO --pr NUMBER --expected-campaign-id CRPCAMPAIGNID --lock-absent --user-authorized-retirement
+```
+
+Retirement deletes the campaign record (and, in retained-lock mode, the
+matching lock after it). Afterwards old or late deliveries are stale: they
+cannot recreate the retired campaign or regain ownership, and a later launcher
+may create a new campaign through normal setup. Retiring a rolled-over C2
+campaign never restores or reconstructs C1.
+
+Retirement must not be used to bypass protection boundaries:
+
+- An invalid lock, a lock belonging to another campaign, or a
+  partial-transition mismatch is refused; recover the lock explicitly first.
+- Lock-absent retirement refuses while any permanent lock file exists.
+- Malformed or unsupported campaign state is preserved for inspection and is
+  never silently retired.
+- Native Automation cleanup remains a separate best-effort step in the Codex
+  app; no retirement step depends on it succeeding.
 
 ## Abandoned worktrees
 

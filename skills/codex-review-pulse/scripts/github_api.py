@@ -499,7 +499,7 @@ def verify_and_resolve_thread(
     graphql_call: Callable[..., dict[str, Any]] = graphql,
 ) -> dict[str, Any]:
     """Re-observe, verify scope/identity/unresolved state, then resolve exactly."""
-    storage.ensure_owner(
+    storage.ensure_active_campaign_owner(
         repository, number, owner_token, repository_path=repository_path
     )
     if thread_id not in batch_thread_ids or not batch_thread_ids:
@@ -544,7 +544,7 @@ def ensure_deferred_issue(
 
     Identity is the marker string itself, not model judgment about titles.
     """
-    storage.ensure_owner(
+    storage.ensure_active_campaign_owner(
         repository, number, owner_token, repository_path=repository_path
     )
     marker = deferred_issue_marker(repository, number, thread_id)

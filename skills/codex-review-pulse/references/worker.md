@@ -44,13 +44,15 @@ when the delivery ends.
 ## 2. Acquire ownership
 
 ```text
-python S/lock.py acquire --repo OWNER/REPO --pr NUMBER --campaign-id CRPCAMPAIGNID --acquired-at SERVER_TIME
+python S/lock.py acquire --repo OWNER/REPO --pr NUMBER --campaign-id CRPCAMPAIGNID --acquired-at SERVER_TIME --purpose worker
 ```
 
 `SERVER_TIME` is the envelope's `server_time`.
 
-- `{"acquired": false, ...}` (active or invalid lock): exit immediately. Do not
-  mutate anything, do not consume a round, do not inspect or steal.
+- `{"acquired": false, ...}` (busy, invalid lock, or a refused worker
+  predicate such as campaign absent/terminal/identity mismatch): exit
+  immediately. Do not mutate anything, do not consume a round, do not inspect
+  or steal.
 - On success keep the returned `owner_token` for this delivery only. Every
   later mutating command must pass it; deterministic owner checks are enforced.
 

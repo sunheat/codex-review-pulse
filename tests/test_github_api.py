@@ -13,6 +13,7 @@ SCRIPTS = ROOT / "skills" / "codex-review-pulse" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 FIXTURES = ROOT / "tests" / "fixtures"
 
+import campaign_model as model  # noqa: E402
 import github_api  # noqa: E402
 import storage  # noqa: E402
 
@@ -36,13 +37,31 @@ class OwnedRepository:
         (self.path / "f").write_text("x", encoding="utf-8")
         git(self.path, "add", "f")
         git(self.path, "commit", "-m", "init")
-        acquired = storage.acquire_lock(
+        acquired = storage.acquire_setup_lock(
             "owner/repo", 7,
             campaign_id="crp-20260914T120000Z-abc123",
             acquired_at="2026-09-14T12:00:00Z",
             repository_path=self.path,
         )
         self.token = acquired["owner_token"]
+        # Ordinary mutation authority requires a valid matching active campaign.
+        storage.initialize_campaign(
+            "owner/repo", 7,
+            owner_token=self.token,
+            campaign=model.new_campaign(
+                campaign_id="crp-20260914T120000Z-abc123",
+                repository="owner/repo",
+                pull_request_number=7,
+                created_at="2026-09-14T12:00:00Z",
+                max_rounds=6,
+                model="a-model",
+                reasoning_level="medium",
+                interval_minutes=30,
+                reviewer_logins=["chatgpt-codex-connector"],
+                approval_logins=["chatgpt-codex-connector"],
+            ),
+            repository_path=self.path,
+        )
 
 
 SERVER_TIME = "2026-09-14T12:00:00Z"

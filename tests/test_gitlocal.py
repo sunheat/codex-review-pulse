@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "codex-review-pulse" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import campaign_model as model  # noqa: E402
 import gitlocal  # noqa: E402
 import storage  # noqa: E402
 
@@ -61,13 +62,31 @@ class PublishTests(unittest.TestCase):
         self.env = GitEnvironment(Path(self._tmp.name))
         self.repo = "owner/repo"
         self.pr = 7
-        acquired = storage.acquire_lock(
+        acquired = storage.acquire_setup_lock(
             self.repo, self.pr,
             campaign_id="crp-20260914T120000Z-abc123",
             acquired_at="2026-09-14T12:00:00Z",
             repository_path=self.env.clone,
         )
         self.token = acquired["owner_token"]
+        # Ordinary mutation authority requires a valid matching active campaign.
+        storage.initialize_campaign(
+            self.repo, self.pr,
+            owner_token=self.token,
+            campaign=model.new_campaign(
+                campaign_id="crp-20260914T120000Z-abc123",
+                repository=self.repo,
+                pull_request_number=self.pr,
+                created_at="2026-09-14T12:00:00Z",
+                max_rounds=6,
+                model="a-model",
+                reasoning_level="medium",
+                interval_minutes=30,
+                reviewer_logins=["chatgpt-codex-connector"],
+                approval_logins=["chatgpt-codex-connector"],
+            ),
+            repository_path=self.env.clone,
+        )
         gitlocal.fetch(
             self.env.clone,
             repository=self.repo,

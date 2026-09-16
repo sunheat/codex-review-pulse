@@ -34,6 +34,16 @@ def main() -> None:
         required=True,
         help="Authoritative timestamp to record (use the snapshot server time)",
     )
+    acquire.add_argument(
+        "--purpose",
+        choices=["setup", "worker", "rollover"],
+        default="setup",
+        help=(
+            "setup: launcher before the campaign exists; worker: ordinary "
+            "delivery for an active campaign; rollover: fully-consumed "
+            "allowlisted terminal campaign"
+        ),
+    )
 
     subparsers.add_parser("inspect", parents=[common])
 
@@ -51,7 +61,7 @@ def main() -> None:
     recover.add_argument("--user-authorized-recovery", action="store_true", required=True)
     recover.add_argument(
         "--expected-campaign-id",
-        help="Refuse when the active lock belongs to a different campaign",
+        help="Required for any lock with a readable campaign identity",
     )
 
     args = parser.parse_args()
@@ -61,40 +71,24 @@ def main() -> None:
                 "Provide exactly one of --campaign-id or --generate-campaign-id"
             )
         campaign_id = args.campaign_id or model.new_campaign_id(args.acquired_at)
-        # Stale-delivery guard: a delivery for an obsolete campaign must never
-        # drive a newer campaign record targeting the same PR.
-        campaign_file = storage.campaign_path(
-            args.repo, args.pr, repository_path=args.repository_path
+        acquire = {
+            "setup": storage.acquire_setup_lock,
+            "worker": storage.acquire_worker_lock,
+            "rollover": storage.acquire_rollover_lock,
+        }[args.purpose]
+        result = acquire(
+            args.repo,
+            args.pr,
+            campaign_id=campaign_id,
+            acquired_at=args.acquired_at,
+            repository_path=args.repository_path,
         )
-        if campaign_file.exists():
-            record = storage.load_json(campaign_file)
-            if not isinstance(record, dict) or record.get("campaign_id") != campaign_id:
-                print(
-                    json.dumps(
-                        {
-                            "acquired": False,
-                            "status": "campaign_identity_mismatch",
-                            "delivered_campaign_id": campaign_id,
-                        }
-                    )
-                )
-                raise SystemExit(2)
-        try:
-            result = storage.acquire_lock(
-                args.repo,
-                args.pr,
-                campaign_id=campaign_id,
-                acquired_at=args.acquired_at,
-                repository_path=args.repository_path,
-            )
-        except storage.LockHeld as error:
-            print(
-                json.dumps(
-                    {"acquired": False, "status": error.status, "metadata": error.metadata}
-                )
-            )
-            raise SystemExit(2) from error
         print(json.dumps(result, indent=2))
+        if not result.get("acquired"):
+            # Expected not-acquired outcomes (busy, invalid lock, purpose
+            # predicate refusal) stay machine-interpretable; nothing was
+            # consumed and no error is thrown on top of them.
+            raise SystemExit(2)
     elif args.command == "inspect":
         print(
             json.dumps(

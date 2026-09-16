@@ -60,6 +60,25 @@ EYES = "EYES"
 
 CAMPAIN_ID_RE = re.compile(r"^crp-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{6}$")
 
+GUARD_STATES = {
+    RESERVED,
+    GUARD_ACTIVE,
+    INVALIDATED,
+    SUPERSEDED,
+    CREATION_FAILED,
+    UNBRACKETED,
+    GUARD_AMBIGUOUS,
+    CLOSED,
+}
+
+# Terminal statuses from which a later campaign may automatically roll over.
+ROLLOVER_TERMINAL_STATUSES = {
+    ROUNDS_EXHAUSTED,
+    SUCCEEDED,
+    REVIEW_COMPLETED_WITHOUT_APPROVAL,
+    CODEX_REVIEW_SERVICE_UNRESPONSIVE,
+}
+
 
 def canonical_repository(repository: str) -> str:
     value = repository.strip()
@@ -100,9 +119,17 @@ def unique_logins(
 
 
 def parse_timestamp(value: object) -> datetime:
+    """Parse one persisted timestamp; naive times are always rejected.
+
+    Creation, transitions, and loaded-state validation share this one rule so
+    every timestamp used for ordering or elapsed arithmetic is offset-aware.
+    """
     if not isinstance(value, str) or not value:
         raise ValueError("Timestamp must be a non-empty ISO 8601 string")
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("Timestamp must be offset-aware")
+    return parsed
 
 
 def strictly_after(event_time: object, floor_time: object) -> bool:
@@ -155,7 +182,7 @@ def new_campaign(
         raise ValueError("model must be a non-empty string")
     if not isinstance(reasoning_level, str) or not reasoning_level.strip():
         raise ValueError("reasoning_level must be a non-empty string")
-    if not isinstance(pull_request_number, int) or pull_request_number < 1:
+    if not _is_int(pull_request_number) or pull_request_number < 1:
         raise ValueError("pull_request_number must be a positive integer")
     return {
         "schema_version": SCHEMA_VERSION,
@@ -179,57 +206,159 @@ def new_campaign(
     }
 
 
+def _is_int(value: object) -> bool:
+    """True for a real integer; Python booleans are never accepted."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_nonempty_str(value: object) -> bool:
+    return isinstance(value, str) and value.strip() != ""
+
+
+def _validate_guard(guard: object, seen_heads: set[str]) -> None:
+    """Validate one request guard against its actual state.
+
+    This accepts exactly the states and field shapes produced by the real
+    transition helpers (reserve, open window, invalidate, supersede, fail,
+    unbracket, ambiguous, close) and rejects everything else.
+    """
+    if not isinstance(guard, dict):
+        raise ValueError("Request guard is invalid")
+    head = guard.get("head_oid")
+    if not _is_nonempty_str(head):
+        raise ValueError("Request guard head is invalid")
+    if head in seen_heads:
+        raise ValueError("More than one request guard exists for one head")
+    seen_heads.add(head)
+    state = guard.get("state")
+    if state not in GUARD_STATES:
+        raise ValueError(f"Request guard state is invalid: {state}")
+    parse_timestamp(guard.get("reserved_at"))
+    superseded_at = guard.get("superseded_at")
+    if superseded_at is not None:
+        parse_timestamp(superseded_at)
+    if state == SUPERSEDED and not isinstance(superseded_at, str):
+        raise ValueError("Superseded guard requires a superseded_at timestamp")
+    invalidation_reason = guard.get("invalidation_reason")
+    if invalidation_reason is not None and not _is_nonempty_str(invalidation_reason):
+        raise ValueError("Request guard invalidation reason is invalid")
+    if state == INVALIDATED and not _is_nonempty_str(invalidation_reason):
+        raise ValueError("Invalidated guard requires an invalidation reason")
+    request = guard.get("request")
+    if request is not None:
+        if not isinstance(request, dict):
+            raise ValueError("Request guard request shape is invalid")
+        if not _is_nonempty_str(request.get("node_id")):
+            raise ValueError("Request node id is invalid")
+        parse_timestamp(request.get("created_at"))
+        # The helper contract permits an empty URL when GitHub returns none.
+        if not isinstance(request.get("url"), str):
+            raise ValueError("Request url is invalid")
+        post_head_oid = request.get("post_head_oid")
+        if post_head_oid is not None and not _is_nonempty_str(post_head_oid):
+            raise ValueError("Request post_head_oid is invalid")
+    window_opened_at = guard.get("window_opened_at")
+    if window_opened_at is not None:
+        parse_timestamp(window_opened_at)
+    baseline = guard.get("baseline")
+    if not isinstance(baseline, dict):
+        raise ValueError("Request guard baseline is missing")
+    for key in ("reaction_ids", "review_ids", "thread_ids", "comment_ids"):
+        ids = baseline.get(key)
+        if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
+            raise ValueError(f"Request guard baseline {key} is invalid")
+    # State-specific requirements match what the transition helpers produce.
+    if state in (GUARD_ACTIVE, SUPERSEDED, CLOSED):
+        if request is None or not isinstance(window_opened_at, str):
+            raise ValueError(
+                f"Request guard state {state} requires a bound request and window"
+            )
+    if state == UNBRACKETED:
+        if request is None or "post_head_oid" not in request:
+            raise ValueError("Unbracketed guard requires its post-head request record")
+        if isinstance(window_opened_at, str):
+            raise ValueError("Request guard state unbracketed must not claim a window")
+    if state in (RESERVED, INVALIDATED, CREATION_FAILED, GUARD_AMBIGUOUS):
+        if request is not None or isinstance(window_opened_at, str):
+            raise ValueError(
+                f"Request guard state {state} must not claim a request or window"
+            )
+        if superseded_at is not None or (
+            invalidation_reason is not None and state != INVALIDATED
+        ):
+            raise ValueError(
+                f"Request guard state {state} must not carry supersession or invalidation data"
+            )
+
+
 def validate_campaign(
     campaign: dict[str, Any], *, repository: str, pull_request_number: int
 ) -> None:
     """Fail closed on any malformed, foreign, or unsupported campaign record."""
-    if campaign.get("schema_version") != SCHEMA_VERSION:
+    version = campaign.get("schema_version")
+    if not _is_int(version) or version != SCHEMA_VERSION:
         raise ValueError("Unsupported campaign schema version")
+    campaign_id = campaign.get("campaign_id")
+    if not isinstance(campaign_id, str) or not CAMPAIN_ID_RE.fullmatch(campaign_id):
+        raise ValueError("Campaign id is invalid")
     if campaign.get("repository") != canonical_repository(repository):
         raise ValueError("Campaign repository does not match the requested repository")
-    if campaign.get("pull_request_number") != pull_request_number:
+    number = campaign.get("pull_request_number")
+    if not _is_int(number) or number < 1 or number != pull_request_number:
         raise ValueError("Campaign pull request does not match the requested pull request")
-    if not isinstance(campaign.get("campaign_id"), str) or not campaign["campaign_id"]:
-        raise ValueError("Campaign id is invalid")
+    parse_timestamp(campaign.get("created_at"))
     config = campaign.get("config")
     if not isinstance(config, dict):
         raise ValueError("Campaign config is missing")
     max_rounds = config.get("max_rounds")
-    if not isinstance(max_rounds, int) or not MIN_ROUNDS <= max_rounds <= MAX_ROUNDS_CAP:
+    if not _is_int(max_rounds) or not MIN_ROUNDS <= max_rounds <= MAX_ROUNDS_CAP:
         raise ValueError("Campaign max_rounds is invalid")
     rounds_used = campaign.get("rounds_used")
-    if (
-        not isinstance(rounds_used, int)
-        or isinstance(rounds_used, bool)
-        or rounds_used < 0
-        or rounds_used > max_rounds
-    ):
+    if not _is_int(rounds_used) or rounds_used < 0 or rounds_used > max_rounds:
         raise ValueError("Campaign rounds_used is invalid")
-    if campaign.get("status") not in TERMINAL_STATUSES | {ACTIVE}:
-        raise ValueError("Campaign status is invalid")
+    interval_minutes = config.get("interval_minutes")
+    if not _is_int(interval_minutes) or interval_minutes < MIN_INTERVAL_MINUTES:
+        raise ValueError("Campaign interval_minutes is invalid")
+    for key in ("model", "reasoning_level"):
+        if not _is_nonempty_str(config.get(key)):
+            raise ValueError(f"Campaign {key} is invalid")
     for key in ("reviewer_logins", "approval_logins"):
         logins = config.get(key)
         if not isinstance(logins, list) or not logins or not all(
-            isinstance(item, str) and item for item in logins
+            isinstance(item, str) and normalize_login(item) == item for item in logins
         ):
             raise ValueError(f"Campaign {key} is invalid")
+    status = campaign.get("status")
+    if status not in TERMINAL_STATUSES | {ACTIVE}:
+        raise ValueError("Campaign status is invalid")
+    detail = campaign.get("status_detail")
+    if detail is not None and not isinstance(detail, str):
+        raise ValueError("Campaign status_detail is invalid")
+    terminal_at = campaign.get("terminal_at")
+    if status == ACTIVE:
+        if terminal_at is not None or detail is not None:
+            raise ValueError("Active campaign must not carry terminal metadata")
+    else:
+        parse_timestamp(terminal_at)
     guards = campaign.get("guards")
     if not isinstance(guards, list):
         raise ValueError("Campaign guards must be a list")
     seen_heads: set[str] = set()
     for guard in guards:
-        if not isinstance(guard, dict):
-            raise ValueError("Request guard is invalid")
-        head = guard.get("head_oid")
-        if not isinstance(head, str) or not head:
-            raise ValueError("Request guard head is invalid")
-        if head in seen_heads:
-            raise ValueError("More than one request guard exists for one head")
-        seen_heads.add(head)
+        _validate_guard(guard, seen_heads)
 
 
 def is_terminal(campaign: dict[str, Any]) -> bool:
     return campaign.get("status") in TERMINAL_STATUSES
+
+
+def is_rollover_eligible(campaign: dict[str, Any]) -> bool:
+    """True when a durably terminal campaign may be rolled over automatically."""
+    return (
+        is_terminal(campaign)
+        and campaign.get("rounds_used") == campaign.get("config", {}).get("max_rounds")
+        and campaign.get("status") in ROLLOVER_TERMINAL_STATUSES
+    )
 
 
 def guard_for_head(campaign: dict[str, Any], head_oid: str) -> dict[str, Any] | None:
@@ -368,6 +497,33 @@ def open_request_window(
     return result
 
 
+def _apply_terminal_invariant(
+    result: dict[str, Any],
+    *,
+    status: str,
+    at: str,
+    detail: str | None,
+) -> None:
+    """The one common terminal-state behavior every terminal transition shares.
+
+    Requires a supported terminal status, stamps the terminal fields, and
+    closes every request guard still claiming an active response window.
+    Diagnostic guard states (RESERVED retained as evidence, CREATION_FAILED,
+    UNBRACKETED, GUARD_AMBIGUOUS, INVALIDATED, SUPERSEDED) are preserved.
+    """
+    if status not in TERMINAL_STATUSES:
+        raise ValueError(f"Unknown terminal status: {status}")
+    if detail is not None and not isinstance(detail, str):
+        raise ValueError("Terminal status detail must be a string or None")
+    parse_timestamp(at)
+    result["status"] = status
+    result["status_detail"] = detail
+    result["terminal_at"] = at
+    for guard in result["guards"]:
+        if guard.get("state") == GUARD_ACTIVE:
+            guard["state"] = CLOSED
+
+
 def mark_request_creation_failed(
     campaign: dict[str, Any], *, head_oid: str, at: str, detail: str
 ) -> dict[str, Any]:
@@ -375,9 +531,7 @@ def mark_request_creation_failed(
     result = deepcopy(campaign)
     guard = _mutable_guard(result, head_oid, RESERVED)
     guard["state"] = CREATION_FAILED
-    result["status"] = REQUEST_CREATION_FAILED
-    result["status_detail"] = detail
-    result["terminal_at"] = at
+    _apply_terminal_invariant(result, status=REQUEST_CREATION_FAILED, at=at, detail=detail)
     return result
 
 
@@ -402,9 +556,12 @@ def mark_unbracketed_request(
         "url": request_url,
         "post_head_oid": post_head_oid,
     }
-    result["status"] = MANUAL_INTERVENTION_REQUIRED
-    result["status_detail"] = "review_request_head_bracket_failed"
-    result["terminal_at"] = at
+    _apply_terminal_invariant(
+        result,
+        status=MANUAL_INTERVENTION_REQUIRED,
+        at=at,
+        detail="review_request_head_bracket_failed",
+    )
     return result
 
 
@@ -415,9 +572,7 @@ def mark_request_ambiguous(
     result = deepcopy(campaign)
     guard = _mutable_guard(result, head_oid, RESERVED)
     guard["state"] = GUARD_AMBIGUOUS
-    result["status"] = AMBIGUOUS_INTERRUPTION
-    result["status_detail"] = detail
-    result["terminal_at"] = at
+    _apply_terminal_invariant(result, status=AMBIGUOUS_INTERRUPTION, at=at, detail=detail)
     return result
 
 
@@ -442,25 +597,14 @@ def terminate(
     status: str,
     at: str,
     detail: str | None = None,
-    guard_head_oid: str | None = None,
 ) -> dict[str, Any]:
-    if status not in TERMINAL_STATUSES or status == ACTIVE:
-        raise ValueError(f"Unknown terminal status: {status}")
-    parse_timestamp(at)
-    result = deepcopy(campaign)
-    if result["status"] == status:
-        return result
-    if result["status"] != ACTIVE:
+    """Generic terminalization through the common terminal-state invariant."""
+    if campaign.get("status") != ACTIVE:
         raise RuntimeError(
-            f"Campaign already terminal as {result['status']}; refusing {status}"
+            f"Campaign already terminal as {campaign.get('status')}; refusing {status}"
         )
-    result["status"] = status
-    result["status_detail"] = detail
-    result["terminal_at"] = at
-    if guard_head_oid is not None:
-        guard = guard_for_head(result, guard_head_oid)
-        if guard is not None and guard.get("state") == GUARD_ACTIVE:
-            guard["state"] = CLOSED
+    result = deepcopy(campaign)
+    _apply_terminal_invariant(result, status=status, at=at, detail=detail)
     return result
 
 

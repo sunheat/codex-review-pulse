@@ -247,16 +247,26 @@ Except for the safely scoped best-effort terminal scheduler cleanup described un
 
 If the completion or outcome of such a product-relevant mutating operation remains uncertain, the attempt is ambiguous and the lock remains held.
 
-### Manual recovery
+### Manual recovery and retirement
 
-A permanent lock is cleared only through explicit user-authorized recovery.
+A permanent lock is removed automatically only by its proven current owner through a clean product transition.
 
-Manual clearing is a human safety boundary, not automatic stale-lock detection and not fencing.
+Outside normal owner release, a permanent lock may be removed only through an explicit user-authorized recovery or campaign-retirement operation.
+
+Both are human safety boundaries. Neither is automatic stale-owner detection, automatic recovery, or fencing.
+
+Before either operation may remove ownership, the user must establish that the previous owner and every product-mutating child, subprocess, and in-flight operation can no longer continue.
 
 Where the platform exposes reliable cancellation or execution-state controls, use them.
 Where it does not, do not invent heartbeat, provenance, timing, or conversation-liveness machinery to manufacture certainty.
 
-The user must be told that clearing is safe only when the previous owner can no longer continue mutating the campaign.
+Lock-only recovery preserves the campaign. A later matching worker may start from fresh authoritative GitHub and Git state; it never resumes prior model reasoning or an abandoned in-memory batch.
+
+Campaign retirement removes campaign authority. Old or late deliveries are stale and must not recreate the retired campaign or ownership. A later launcher may create a new campaign through normal setup.
+
+Malformed or unsupported campaign state is preserved for inspection and cannot be retired through the normal retirement primitive.
+
+An invalid, mismatched, or partial-transition lock cannot be bypassed through campaign retirement. Recover the lock explicitly first, then inspect the surviving campaign and choose preservation, rollover, or retirement.
 
 A valid lock with incomplete or missing ownership metadata or incomplete campaign initialization remains recoverable through the same explicit human process.
 

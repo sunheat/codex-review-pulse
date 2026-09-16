@@ -77,13 +77,17 @@ class WorkerCliFlowTests(unittest.TestCase):
         token = acquire_payload["owner_token"]
         self.assertTrue(campaign_id.startswith("crp-20260914T120000Z-"))
 
-        # A second delivery is blocked without consuming anything.
+        # A second delivery is blocked without consuming anything. The lock is
+        # held, so a worker delivery is classified busy before any campaign
+        # diagnosis, and never acquires.
         blocked = self.cli(
             "lock.py", "acquire", "--repo", "owner/repo", "--pr", "7",
             "--campaign-id", campaign_id,
             "--acquired-at", SNAPSHOT["server_time"],
+            "--purpose", "worker",
         )
         self.assertEqual(blocked.returncode, 2)
+        self.assertEqual(json.loads(blocked.stdout)["status"], "busy")
 
         init = self.cli(
             "campaign.py", "init", "--repo", "owner/repo", "--pr", "7",
