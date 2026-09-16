@@ -48,7 +48,9 @@ with all of the following and the Codex app accepts that configuration:
 
 1. the worker model;
 2. the reasoning / thinking level;
-3. a recurring schedule at the requested interval;
+3. a recurring schedule at the requested interval, recurring indefinitely —
+   never an occurrence limit (RRULE `COUNT`, end date, or similar) derived
+   from the effective-round budget, because delivery count is not round count;
 4. the project/folder binding to the intended local repository installation;
 5. the packaged Codex Review Pulse skill available to the delivery;
 6. a fixed delivery prompt that names the campaign, repository, PR number, and
@@ -60,9 +62,36 @@ settings. If the host does not expose a setting, cannot validate it, or rejects
 it, stop and report the exact native-host limitation instead of creating the
 Automation.
 
+## Native setup-result classification
+
+The launcher classifies the recurring-Automation setup only from authoritative
+native-host operation results:
+
+- **Confirmed compliant** — the host definitively reports successful creation
+  and every required setting is established by a validated input to the
+  successful native operation or by authoritative output/readback. A
+  successful validated native creation is authoritative without a mandatory
+  separate readback.
+- **Definitive failure** — the host definitively rejects creation, or
+  authoritative output proves a required setting is wrong, unsupported, or
+  bound to the wrong target.
+- **Ambiguous** — the result cannot establish whether creation occurred, the
+  operation may still complete later, host output is incomplete or
+  contradictory, or a required effective setting is neither established by the
+  operation contract nor observable. Locally stored requested values,
+  conversation text, model confidence, UI assumptions, or reconstructed
+  configuration are not authoritative native-host evidence.
+
+There is no scheduler adapter, receipt, polling, retry phase, or
+reconciliation mechanism that turns ambiguity into confirmation. Ambiguous
+setup preserves the campaign and lock fail closed for explicit human recovery.
+
 ## Verification boundary
 
 The deterministic helpers, state machine, and safety decisions are covered by
 network-free unit tests. Native Automation creation, scheduled delivery in the
 Codex app, and live GitHub mutation paths require a separately authorized
 Codex-app canary. No such canary has been run from this development tree.
+Phase 2 hardens the deterministic owned boundaries; external Git/GitHub
+mutation-boundary hardening is still pending later work, so the runtime is not
+canary-ready.

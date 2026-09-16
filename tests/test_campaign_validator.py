@@ -253,6 +253,33 @@ class ValidatorRejectsCorruption(unittest.TestCase):
         self.corrupt(lambda c: c.update(pull_request_number=True))
         self.corrupt(lambda c: c.update(schema_version=True))
 
+    def test_malformed_creation_baseline_is_rejected(self) -> None:
+        self.corrupt(lambda c: c.pop("creation_baseline"))
+        self.corrupt(lambda c: c.update(creation_baseline=[]))
+        self.corrupt(lambda c: c.update(creation_baseline={"reaction_ids": "x"}))
+        self.corrupt(lambda c: c.update(creation_baseline={"reaction_ids": [1]}))
+        self.corrupt(lambda c: c.update(creation_baseline={"reaction_ids": ["b", "a"]}))
+        self.corrupt(lambda c: c.update(creation_baseline={"reaction_ids": ["a", "a"]}))
+        self.corrupt(
+            lambda c: c.update(creation_baseline={"reaction_ids": ["a"], "extra": []})
+        )
+        # The canonical sorted unique shape from the real constructor passes.
+        validate(
+            m.new_campaign(
+                campaign_id="crp-20260914T120000Z-abc123",
+                repository="owner/repo",
+                pull_request_number=7,
+                created_at=T0,
+                max_rounds=6,
+                model="m",
+                reasoning_level="medium",
+                interval_minutes=30,
+                reviewer_logins=[CODEX],
+                approval_logins=[CODEX],
+                creation_baseline=["b", "a", "b"],
+            )
+        )
+
     def test_malformed_campaign_id_is_rejected(self) -> None:
         self.corrupt(lambda c: c.update(campaign_id="crp-bad"))
         self.corrupt(lambda c: c.update(campaign_id=""))

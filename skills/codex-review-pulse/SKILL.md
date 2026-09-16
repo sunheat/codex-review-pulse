@@ -51,12 +51,15 @@ launcher conversation or working directory.
 
 - **Launcher** — runs in the user's Codex app conversation after the
   one-sentence instruction: validates inputs as far as the native host permits,
-  creates the campaign record, and configures exactly one recurring native
-  Codex Automation. Follow [the launcher guide](references/launcher.md).
+  creates the campaign through the deterministic owned-creation boundary, and
+  configures exactly one recurring native Codex Automation, classifying the
+  native result as confirmed, definitively failed, or ambiguous. Follow
+  [the launcher guide](references/launcher.md).
 - **Scheduled worker** — runs on each delivery with no conversational context:
-  acquires the PR-scoped lock, reconstructs authority from GitHub, remote Git,
-  and the small campaign record, performs at most one effective action, and
-  exits. Follow [the worker guide](references/worker.md).
+  inspects the lock first, acquires the PR-scoped lock, then invokes the
+  deterministic owned-worker decision boundary exactly once before any
+  effective action, and externalizes committed actions only afterward. Follow
+  [the worker guide](references/worker.md).
 
 Manual recovery of the permanent lock is an explicit human boundary; see
 [recovery](references/recovery.md).
@@ -71,7 +74,17 @@ Manual recovery of the permanent lock is an explicit human boundary; see
   push; publish fixing state before resolving a thread.
 - One automatic `@codex review` attempt per campaign and head; its round and
   allowance are consumed before the external mutation and are never restored.
+- The durable RESERVED guard is the handoff to the request executor; the
+  executor never reserves or consumes again.
 - Unknown or incomplete evidence is never treated as absence.
 - Ambiguous external mutation fails closed and keeps the ownership lock.
+- An active fully-consumed campaign stays scheduled for non-counting
+  asynchronous-lifecycle observation; it is not cleaned just because
+  `rounds_used == max_rounds`.
+- The review-response grace is at least the configured interval and never under
+  20 minutes, independent of the scheduler cadence.
 - Discovery metadata never authorizes a live run. Development work on this
   repository is not a product run.
+- Phase 2 hardens the deterministic owned boundaries; external Git/GitHub
+  mutation-boundary hardening is still pending later work, so the runtime is
+  not canary-ready.

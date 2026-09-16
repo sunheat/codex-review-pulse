@@ -62,9 +62,34 @@ that does not understand the state must not overwrite it.
 
 ## After recovery
 
-The next scheduled delivery re-acquires the lock and reconstructs authority.
-If you want to stop all deliveries, also pause or delete the bound native Codex
-Automation using the Codex app controls.
+Recovery does not by itself resume anything. What happens next depends on the
+durable campaign state.
+
+- **Active scheduler-setup ambiguity**: when the campaign stays active, the
+  only ambiguity concerns the native recurring Automation, no durable
+  RESERVED ambiguity or other campaign-level blocker exists, the previous
+  launcher and every mutation-capable child can no longer continue, the
+  intended compliant recurring Automation exists, the required effective
+  configuration is established, and the earlier ambiguous setup cannot later
+  create or reconfigure another Automation, lock-only recovery is a resume:
+  remove only the expected lock, preserve the active campaign, and a later
+  matching delivery acquires and continues.
+- **Terminal `ambiguous_interruption`**: the campaign is durably terminal and
+  there is no ordinary resume. Lock-only recovery removes only the expected
+  lock; it does not reactivate the campaign, refund a round, restore request
+  allowance, or authorize another effective action. To start a new campaign,
+  explicitly retire the terminal one, then perform normal setup.
+- **Active RESERVED ambiguity**: an active campaign that carries an
+  unresolved durable RESERVED request guard is not safely resumed merely by
+  deleting its lock. The next worker will acquire, detect the campaign-wide
+  RESERVED ambiguity, terminalize as `ambiguous_interruption`, and retain
+  ownership again. Prefer explicit campaign retirement after quiescence
+  rather than a pointless recover/acquire/reterminalize cycle; retirement is
+  never automatic.
+
+There is no automatic choice between resume and retirement. If you want to
+stop all deliveries, also pause or delete the bound native Codex Automation
+using the Codex app controls.
 
 ## Campaign retirement
 
@@ -125,7 +150,7 @@ A later delivery creates a fresh worktree and never resumes an abandoned one.
 | --- | --- | --- |
 | `succeeded` | Applicable current-head approval and zero applicable unresolved threads | released |
 | `review_completed_without_approval` | Eligible post-request completion, no approval or feedback | released |
-| `codex_review_service_unresponsive` | At least one interval elapsed, complete evidence shows no Codex response | released |
+| `codex_review_service_unresponsive` | Response grace elapsed (at least the configured interval, never under 20 minutes), complete evidence shows no Codex response | released |
 | `rounds_exhausted` | No effective round remains and no asynchronous result is pending | released |
 | `request_creation_failed` | Request creation definitively failed with proven absence of a comment | released |
 | `manual_intervention_required` | E.g. unbracketed request, inconclusive temporal evidence, no automatic action remains | released |

@@ -313,6 +313,24 @@ An operation that updates refs, fetch metadata, worktrees, campaign files, sched
 
 Do not treat a command as read-only merely because its purpose is observation.
 
+## Deterministic product boundaries
+
+Product mutations flow through a few narrow deterministic owned boundaries, not composable mutating CLIs.
+
+**Owned campaign creation.** Normal setup and rollover derive all creation evidence themselves from one fresh post-acquisition authoritative GitHub snapshot taken while setup or rollover ownership is held. Callers cannot select the snapshot, its `created_at`, lifecycle-reaction baselines, canonical target evidence, or head evidence. Campaign identity is preallocated on the setup lock and is never regenerated from snapshot server time. A creation lifecycle-reaction baseline of pre-existing applicable reactions neither proves review-in-progress, nor approves, nor creates attribution waiting, nor blocks the request allowance; unresolved review threads remain immediately actionable.
+
+**Owned worker decision.** Each acquired delivery makes one deterministic decision through a single owned boundary: campaign-wide durable-local preflight, one fresh owned S1 observation, guarded head synchronization, the pure decision from the post-sync campaign, then effective-action commitment, terminal confirmation, or safe local release/retention. The pre-ownership admission snapshot is S0 and authorizes only cheap rejection, preliminary validation, and diagnostics — never synchronization, decisions, commitment, or terminalization, even at a matching head. The boundary performs the ownership disposition itself and reports facts, not recommendations. An unknown caller-visible result allows no compensating action and no second invocation.
+
+**Effective-action commitment before external work.** Remediation rounds and request reservations are durably committed inside the owned boundary before any external remediation or request work begins. A crash after commitment leaves the round consumed and never resumes an in-memory batch.
+
+**RESERVED durable handoff.** The durable per-head RESERVED guard is the authoritative handoff to the request executor, identified by matching campaign identity, owner lock, and the exact guard — no action IDs, reservation tokens, or handoff tokens. The executor establishes authority from durable state and never reserves or consumes again.
+
+**Terminal proof and disposition.** Terminal decisions carry a deterministic basis: `durable_local` when current durable campaign state alone proves terminality (for example campaign-wide RESERVED ambiguity, inspected across every guard), `observation` when the conclusion also depends on current GitHub state. Observation-derived terminalization is confirmed by exactly one bounded fresh confirmation snapshot; a contradicting or failed confirmation does not terminalize. Callers cannot choose terminal status, proof basis, or disposition. Scheduler cleanup is authorized only after a release-permitted terminal outcome and confirmed matching release.
+
+**Response grace.** A request may become `codex_review_service_unresponsive` only at or after `max(interval_minutes, 20)` minutes of authoritative elapsed grace, independent of the scheduler cadence. Effective-round exhaustion prevents new effective actions but never erases an already-started asynchronous review lifecycle: active request windows, applicable 👀, approval, and attributable completion keep precedence over generic exhaustion, and observing them consumes no round.
+
+External Git/GitHub mutation-boundary hardening (final request revalidation, publication, issue creation, thread resolution, post-mutation ambiguity handling) remains explicitly incomplete later work; completing these boundaries does not make the runtime canary-ready.
+
 ## Applicable Codex evidence
 
 Only unresolved review threads whose root review author can be attributed through stable GitHub identity to the configured Codex reviewer are applicable for automatic remediation.
@@ -546,6 +564,10 @@ Best-effort scheduler cleanup is appropriate after terminal or exhausted outcome
 Failure or ambiguity of best-effort scheduler cleanup does not by itself make an otherwise completed product attempt ambiguous and must not by itself retain the ownership lock.
 
 Cleanup must remain scoped to the current campaign, and stale-delivery guards must make either cleanup outcome safe.
+
+Normal worker cleanup additionally requires durable terminality whose disposition permits release plus a confirmed matching ownership release; an active fully-consumed campaign stays scheduled for non-counting lifecycle observation, and a terminal campaign with retained ambiguity is never cleaned.
+
+Recurring-Automation setup results are classified only from authoritative native-host evidence as confirmed compliant, definitively failed, or ambiguous. Ambiguous setup preserves the active campaign and matching lock fail closed; lock-only recovery after it is a resume only when the campaign is active and the conditions for a compliant existing Automation are established. A durably terminal `ambiguous_interruption` campaign has no resume path: recovery removes only the lock, and a new campaign requires explicit retirement first. An active campaign carrying unresolved durable RESERVED state is not safely resumed by lock deletion alone; the next worker re-detects the ambiguity and terminalizes again.
 
 The effective-round cap limits product attempts, not necessarily non-counting wakes such as:
 

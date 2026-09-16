@@ -1,4 +1,10 @@
-"""End-to-end CLI glue for the deterministic delivery skeleton (no network)."""
+"""End-to-end CLI glue for the narrowed v2 product surface (no network).
+
+The product mutation paths live behind the deterministic owned boundaries
+(``owned.py``). This file exercises the remaining campaign/lock CLI surface:
+read-only inspection, owner-authorized local operations, and the recovery
+boundaries.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "codex-review-pulse" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import campaign_model as model  # noqa: E402
+import storage  # noqa: E402
+
 
 def git(cwd: Path, *args: str) -> str:
     process = subprocess.run(
@@ -24,21 +33,8 @@ def git(cwd: Path, *args: str) -> str:
     return process.stdout.strip()
 
 
-SNAPSHOT = {
-    "complete": True,
-    "server_time": "2026-09-14T12:00:00Z",
-    "pr_state": "OPEN",
-    "head_oid": "H1",
-    "head_ref_name": "feature",
-    "node_id": "PR1",
-    "viewer": "operator",
-    "repository": "owner/repo",
-    "pr_number": 7,
-    "threads": [],
-    "reactions": [],
-    "reviews": [],
-    "comments": [],
-}
+CAMPAIGN_ID = "crp-20260914T120000Z-abc123"
+ACQUIRED_AT = "2026-09-14T12:00:00Z"
 
 
 class WorkerCliFlowTests(unittest.TestCase):
@@ -52,8 +48,6 @@ class WorkerCliFlowTests(unittest.TestCase):
         (self.repo / "f.txt").write_text("x", encoding="utf-8")
         git(self.repo, "add", "f.txt")
         git(self.repo, "commit", "-m", "init")
-        self.snapshot_file = self.repo / "snapshot.json"
-        self.snapshot_file.write_text(json.dumps(SNAPSHOT), encoding="utf-8")
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -66,106 +60,134 @@ class WorkerCliFlowTests(unittest.TestCase):
             text=True,
         )
 
-    def test_delivery_skeleton_acquire_decide_terminate_release(self) -> None:
+    def save_campaign(self, pr: int = 7, **kwargs) -> dict:
+        campaign = model.new_campaign(
+            campaign_id=CAMPAIGN_ID,
+            repository="owner/repo",
+            pull_request_number=pr,
+            created_at=ACQUIRED_AT,
+            max_rounds=2,
+            model="m",
+            reasoning_level="low",
+            interval_minutes=30,
+            reviewer_logins=["chatgpt-codex-connector"],
+            approval_logins=["chatgpt-codex-connector"],
+            **kwargs,
+        )
+        storage.save_json(
+            storage.campaign_path("owner/repo", pr, repository_path=self.repo),
+            campaign,
+        )
+        return campaign
+
+    def test_old_product_mutation_bypasses_are_not_exposed(self) -> None:
+        for command in ("init", "consume-round", "sync-head", "terminate"):
+            result = self.cli("campaign.py", command, "--help")
+            self.assertNotEqual(result.returncode, 0)
+        help_text = self.cli("campaign.py", "--help").stdout
+        for command in ("init", "consume-round", "sync-head", "terminate"):
+            self.assertNotIn(command, help_text)
+
+    def test_show_reports_campaign_state_and_fails_closed(self) -> None:
+        missing = self.cli("campaign.py", "show", "--repo", "owner/repo", "--pr", "7")
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("does not exist", missing.stderr)
+
+        self.save_campaign()
+        shown = self.cli("campaign.py", "show", "--repo", "owner/repo", "--pr", "7")
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertEqual(
+            json.loads(shown.stdout)["campaign_id"], CAMPAIGN_ID
+        )
+
+    def test_setup_acquire_then_cancel_setup_releases_the_lock(self) -> None:
         acquired = self.cli(
             "lock.py", "acquire", "--repo", "owner/repo", "--pr", "7",
-            "--generate-campaign-id", "--acquired-at", SNAPSHOT["server_time"],
+            "--campaign-id", CAMPAIGN_ID, "--acquired-at", ACQUIRED_AT,
+            "--purpose", "setup",
         )
         self.assertEqual(acquired.returncode, 0, acquired.stderr)
-        acquire_payload = json.loads(acquired.stdout)
-        campaign_id = acquire_payload["campaign_id"]
-        token = acquire_payload["owner_token"]
-        self.assertTrue(campaign_id.startswith("crp-20260914T120000Z-"))
+        token = json.loads(acquired.stdout)["owner_token"]
 
-        # A second delivery is blocked without consuming anything. The lock is
-        # held, so a worker delivery is classified busy before any campaign
-        # diagnosis, and never acquires.
-        blocked = self.cli(
-            "lock.py", "acquire", "--repo", "owner/repo", "--pr", "7",
-            "--campaign-id", campaign_id,
-            "--acquired-at", SNAPSHOT["server_time"],
-            "--purpose", "worker",
+        cancelled = self.cli(
+            "campaign.py", "cancel-setup", "--repo", "owner/repo", "--pr", "7",
+            "--owner-token", token, "--expected-campaign-id", CAMPAIGN_ID,
         )
-        self.assertEqual(blocked.returncode, 2)
-        self.assertEqual(json.loads(blocked.stdout)["status"], "busy")
-
-        init = self.cli(
-            "campaign.py", "init", "--repo", "owner/repo", "--pr", "7",
-            "--snapshot", "snapshot.json", "--max-rounds", "2",
-            "--model", "m", "--reasoning-level", "low",
-            "--interval-minutes", "30", "--owner-token", token,
-        )
-        self.assertEqual(init.returncode, 0, init.stderr)
-        initialized = json.loads(init.stdout)["campaign"]
-        self.assertEqual(initialized["campaign_id"], campaign_id)
-        self.assertEqual(initialized["rounds_used"], 0)
-
-        self.cli(
-            "campaign.py", "sync-head", "--repo", "owner/repo", "--pr", "7",
-            "--head-oid", "H1", "--server-time", SNAPSHOT["server_time"],
-            "--owner-token", token,
-        )
-
-        directive = self.cli(
-            "decide.py", "--repo", "owner/repo", "--pr", "7",
-            "--snapshot", "snapshot.json",
-        )
-        self.assertEqual(directive.returncode, 0, directive.stderr)
-        self.assertEqual(json.loads(directive.stdout)["action"], "request_review")
-
-        # A wrong-identity token cannot drive the campaign.
-        bad = self.cli(
-            "campaign.py", "consume-round", "--repo", "owner/repo", "--pr", "7",
-            "--owner-token", "wrong",
-        )
-        self.assertNotEqual(bad.returncode, 0)
-
-        consumed = self.cli(
-            "campaign.py", "consume-round", "--repo", "owner/repo", "--pr", "7",
-            "--owner-token", token,
-        )
-        self.assertEqual(consumed.returncode, 0, consumed.stderr)
-        self.assertEqual(json.loads(consumed.stdout)["campaign"]["rounds_used"], 1)
-
-        terminated = self.cli(
-            "campaign.py", "terminate", "--repo", "owner/repo", "--pr", "7",
-            "--status", "manual_intervention_required",
-            "--at", "2026-09-14T12:05:00Z", "--owner-token", token,
-        )
-        self.assertEqual(terminated.returncode, 0, terminated.stderr)
-
-        # The next stale delivery sees a terminal campaign at show time.
-        show = self.cli("campaign.py", "show", "--repo", "owner/repo", "--pr", "7")
-        self.assertEqual(
-            json.loads(show.stdout)["status"], "manual_intervention_required"
-        )
-
-        released = self.cli(
-            "lock.py", "release", "--repo", "owner/repo", "--pr", "7",
-            "--owner-token", token,
-        )
-        self.assertEqual(released.returncode, 0, released.stderr)
+        self.assertEqual(cancelled.returncode, 0, cancelled.stderr)
         inspect = self.cli("lock.py", "inspect", "--repo", "owner/repo", "--pr", "7")
         self.assertEqual(json.loads(inspect.stdout)["status"], "absent")
 
     def test_abort_removes_unstarted_campaign_and_lock(self) -> None:
         acquired = self.cli(
             "lock.py", "acquire", "--repo", "owner/repo", "--pr", "8",
-            "--generate-campaign-id", "--acquired-at", SNAPSHOT["server_time"],
+            "--campaign-id", CAMPAIGN_ID, "--acquired-at", ACQUIRED_AT,
+            "--purpose", "setup",
         )
         token = json.loads(acquired.stdout)["owner_token"]
-        self.cli(
-            "campaign.py", "init", "--repo", "owner/repo", "--pr", "8",
-            "--snapshot", "snapshot.json", "--max-rounds", "3",
-            "--model", "m", "--reasoning-level", "medium",
-            "--interval-minutes", "15", "--owner-token", token,
-        )
+        self.save_campaign(pr=8)
         aborted = self.cli(
             "campaign.py", "abort", "--repo", "owner/repo", "--pr", "8",
             "--owner-token", token,
         )
         self.assertEqual(aborted.returncode, 0, aborted.stderr)
         inspect = self.cli("lock.py", "inspect", "--repo", "owner/repo", "--pr", "8")
+        self.assertEqual(json.loads(inspect.stdout)["status"], "absent")
+
+    def test_retired_campaign_cannot_be_recreated_by_stale_deliveries(self) -> None:
+        acquired = self.cli(
+            "lock.py", "acquire", "--repo", "owner/repo", "--pr", "9",
+            "--campaign-id", CAMPAIGN_ID, "--acquired-at", ACQUIRED_AT,
+            "--purpose", "setup",
+        )
+        token = json.loads(acquired.stdout)["owner_token"]
+        self.save_campaign(pr=9)
+
+        retired = self.cli(
+            "campaign.py", "retire", "--repo", "owner/repo", "--pr", "9",
+            "--expected-campaign-id", CAMPAIGN_ID, "--retained-lock",
+            "--user-authorized-retirement",
+        )
+        self.assertEqual(retired.returncode, 0, retired.stderr)
+
+        stale = self.cli(
+            "lock.py", "acquire", "--repo", "owner/repo", "--pr", "9",
+            "--campaign-id", CAMPAIGN_ID, "--acquired-at", ACQUIRED_AT,
+            "--purpose", "worker",
+        )
+        self.assertEqual(stale.returncode, 2)
+        self.assertEqual(json.loads(stale.stdout)["status"], "campaign_absent")
+
+        unauthorized = self.cli(
+            "campaign.py", "retire", "--repo", "owner/repo", "--pr", "9",
+            "--expected-campaign-id", CAMPAIGN_ID, "--retained-lock",
+        )
+        self.assertNotEqual(unauthorized.returncode, 0)
+
+    def test_terminal_campaign_releases_normally(self) -> None:
+        self.save_campaign(pr=10)
+        acquired = self.cli(
+            "lock.py", "acquire", "--repo", "owner/repo", "--pr", "10",
+            "--campaign-id", CAMPAIGN_ID, "--acquired-at", ACQUIRED_AT,
+            "--purpose", "worker",
+        )
+        self.assertEqual(acquired.returncode, 0, acquired.stderr)
+        token = json.loads(acquired.stdout)["owner_token"]
+        campaign = storage.load_json(
+            storage.campaign_path("owner/repo", 10, repository_path=self.repo)
+        )
+        terminal = model.terminate(
+            campaign, status=model.SUCCEEDED, at="2026-09-14T13:00:00Z"
+        )
+        storage.save_json(
+            storage.campaign_path("owner/repo", 10, repository_path=self.repo),
+            terminal,
+        )
+        released = self.cli(
+            "lock.py", "release", "--repo", "owner/repo", "--pr", "10",
+            "--owner-token", token,
+        )
+        self.assertEqual(released.returncode, 0, released.stderr)
+        inspect = self.cli("lock.py", "inspect", "--repo", "owner/repo", "--pr", "10")
         self.assertEqual(json.loads(inspect.stdout)["status"], "absent")
 
 

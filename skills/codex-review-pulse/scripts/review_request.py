@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
-"""Execute one automatic @codex review request-creation attempt.
+"""Execute one committed automatic @codex review request attempt.
 
-Ordering is safety-critical:
+The durable RESERVED guard is the authoritative handoff from the owned-worker
+boundary (which consumed the round and reserved the per-head allowance) to
+this executor. Ordering is safety-critical:
 
-  1. durably consume the round and reserve the per-head allowance (saved);
+  1. establish current authority from durable state: matching campaign and
+     lock identity, active campaign, exactly one committed RESERVED guard;
   2. authoritatively revalidate the request conditions;
   3. post the comment;
   4. immediately re-observe and bind a response window only when the
      pre/post head OIDs agree.
 
-Definitive failure with proven absence of any created comment terminates
-cleanly and releases ownership. Anything unknowable fails closed and retains
-the permanent lock for manual recovery.
+This executor never reserves or consumes again: it creates no second guard,
+consumes no second round, and treats the committed action as durable. The
+request snapshot is not re-played as reservation proof; the guard's own
+baseline is authoritative. Definitive failure with proven absence of any
+created comment terminates cleanly and releases ownership. Anything
+unknowable fails closed and retains the permanent lock for manual recovery.
+
+Final mutation-boundary revalidation, POST outcome classification, and
+post-mutation guarded persistence hardening remain Phase 3 work.
 """
 
 from __future__ import annotations
@@ -27,6 +36,26 @@ import github_api
 import storage
 
 REQUEST_BODY = "@codex review"
+
+
+def committed_request_guard(campaign: dict[str, Any]) -> dict[str, Any]:
+    """Locate the exact committed RESERVED guard from durable state.
+
+    Refuses unless the campaign carries exactly one guard in RESERVED: zero
+    means nothing was committed, and more than one is malformed state that
+    must not be driven blindly.
+    """
+    reserved = [
+        guard
+        for guard in campaign.get("guards", [])
+        if isinstance(guard, dict) and guard.get("state") == model.RESERVED
+    ]
+    if len(reserved) != 1:
+        raise RuntimeError(
+            "Request execution requires exactly one committed RESERVED guard; "
+            f"found {len(reserved)}"
+        )
+    return reserved[0]
 
 
 def _find_unexpected_request_comment(
@@ -49,35 +78,19 @@ def _find_unexpected_request_comment(
 
 def execute_request_attempt(
     *,
-    repository: str,
-    pr_number: int,
     campaign: dict[str, Any],
-    admission_snapshot: dict[str, Any],
+    head_oid: str,
+    reserved_at: str,
+    baseline_comment_ids: set[str],
     observer: Callable[[], dict[str, Any]],
     commenter: Callable[[str, str], dict[str, Any]],
     persist: Callable[[dict[str, Any]], None],
 ) -> dict[str, Any]:
-    """Return an outcome dict. ``campaign`` is mutated through model transitions.
+    """Return an outcome dict. ``campaign`` already carries the committed guard.
 
     Every model transition is handed to ``persist`` before any further external
-    call, so the round and guard state on disk never trail the mutation order.
+    call, so the guard state on disk never trails the mutation order.
     """
-    head_oid = admission_snapshot.get("head_oid")
-    reserved_at = admission_snapshot.get("server_time")
-    campaign = model.reserve_request(
-        campaign,
-        head_oid=head_oid,
-        reserved_at=reserved_at,
-        snapshot=admission_snapshot,
-    )
-    # The commitment is durable BEFORE the request mutation may begin. A crash
-    # from here on leaves a RESERVED guard that fails closed for manual recovery.
-    persist(campaign)
-    baseline_comment_ids = set(
-        (model.guard_for_head(campaign, head_oid) or {}).get("baseline", {}).get(
-            "comment_ids", []
-        )
-    )
     result: dict[str, Any] = {
         "outcome": None,
         "campaign": campaign,
@@ -254,13 +267,12 @@ def _classify_creation_failure(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Reserve, revalidate, post, and bracket one automatic review request"
+        description="Execute one committed @codex review request from its RESERVED guard"
     )
     parser.add_argument("--repo", required=True)
     parser.add_argument("--pr", required=True, type=int)
     parser.add_argument("--repository-path", default=".")
     parser.add_argument("--owner-token", required=True)
-    parser.add_argument("--snapshot", required=True, type=Path)
     args = parser.parse_args()
 
     lock_metadata = storage.verify_owner(
@@ -283,9 +295,12 @@ def main() -> None:
     if model.is_terminal(campaign):
         raise RuntimeError("Campaign is terminal; a request attempt cannot begin")
 
-    admission_snapshot = json.loads(args.snapshot.read_text(encoding="utf-8"))
-    if admission_snapshot.get("complete") is not True:
-        raise RuntimeError("The admission snapshot must be complete")
+    # Durable handoff identity: matching campaign + owner + one exact
+    # RESERVED guard. No snapshot replay, no second reservation.
+    guard = committed_request_guard(campaign)
+    head_oid = guard["head_oid"]
+    reserved_at = guard["reserved_at"]
+    baseline_comment_ids = set(guard.get("baseline", {}).get("comment_ids", []))
 
     def observer() -> dict[str, Any]:
         return github_api.fetch_snapshot(args.repo, args.pr)
@@ -294,10 +309,10 @@ def main() -> None:
         return github_api.add_comment(subject_id, body)
 
     outcome = execute_request_attempt(
-        repository=args.repo,
-        pr_number=args.pr,
         campaign=campaign,
-        admission_snapshot=admission_snapshot,
+        head_oid=head_oid,
+        reserved_at=reserved_at,
+        baseline_comment_ids=baseline_comment_ids,
         observer=observer,
         commenter=commenter,
         persist=lambda record: storage.save_json(campaign_path, record),
@@ -306,7 +321,7 @@ def main() -> None:
     print(json.dumps({k: v for k, v in outcome.items() if k != "campaign"} | {
         "campaign_status": outcome["campaign"]["status"],
         "guard_state": (
-            model.guard_for_head(outcome["campaign"], admission_snapshot["head_oid"]) or {}
+            model.guard_for_head(outcome["campaign"], head_oid) or {}
         ).get("state"),
         "rounds_used": outcome["campaign"]["rounds_used"],
     }, indent=2))

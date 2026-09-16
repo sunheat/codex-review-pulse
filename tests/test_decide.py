@@ -452,6 +452,29 @@ class DecisionTests(unittest.TestCase):
         )
         directive = m.decide(c, snapshot(server_time=T_PLUS_15))
         self.assertEqual(directive["status"], m.AMBIGUOUS_INTERRUPTION)
+        self.assertEqual(directive["basis"], "durable_local")
+
+    def test_reserved_guard_on_older_head_still_fails_closed(self) -> None:
+        # The campaign-wide preflight inspects every guard: a RESERVED guard on
+        # a head that is no longer current still terminalizes before any
+        # observation could hide it.
+        snap = snapshot()
+        c = m.reserve_request(
+            campaign(), head_oid=H2, reserved_at=T0, snapshot=snapshot(head=H2)
+        )
+        directive = m.decide(c, snapshot(head=H1, server_time=T_PLUS_15))
+        self.assertEqual(directive["status"], m.AMBIGUOUS_INTERRUPTION)
+        self.assertEqual(directive["guard_head"], H2)
+        self.assertEqual(directive["basis"], "durable_local")
+
+    def test_reserved_ambiguity_beats_incomplete_observation(self) -> None:
+        snap = snapshot()
+        c = m.reserve_request(
+            campaign(), head_oid=H1, reserved_at=T0, snapshot=snap
+        )
+        directive = m.decide(c, snapshot(complete=False))
+        self.assertEqual(directive["status"], m.AMBIGUOUS_INTERRUPTION)
+        self.assertEqual(directive["basis"], "durable_local")
 
     def test_invalidated_same_head_leads_to_manual_intervention(self) -> None:
         snap = snapshot()
@@ -479,6 +502,103 @@ class DecisionTests(unittest.TestCase):
             ),
         )
         self.assertEqual(directive["action"], "wait_review_in_progress")
+
+
+class CreationBaselineTests(unittest.TestCase):
+    """Pre-existing creation-baseline reactions prove nothing and block nothing."""
+
+    def baseline_campaign(self) -> dict:
+        return m.new_campaign(
+            campaign_id="crp-20260914T120000Z-abc123",
+            repository="owner/repo",
+            pull_request_number=7,
+            created_at=T0,
+            max_rounds=6,
+            model="a-model",
+            reasoning_level="medium",
+            interval_minutes=30,
+            reviewer_logins=[CODEX],
+            approval_logins=[CODEX],
+            creation_baseline=["r-EYES", "r-THUMBS_UP"],
+        )
+
+    def test_validator_accepts_the_creation_baseline_shape(self) -> None:
+        m.validate_campaign(
+            self.baseline_campaign(), repository="owner/repo", pull_request_number=7
+        )
+
+    def test_baseline_eyes_does_not_prove_review_in_progress(self) -> None:
+        # Without a guard the old EYES would be an attribution-unknown wait;
+        # from the creation baseline it is simply pre-campaign history.
+        c = self.baseline_campaign()
+        directive = m.decide(
+            c,
+            snapshot(
+                reactions=[reaction(m.EYES, rid="r-EYES", created_at="2026-09-14T09:00:00Z")]
+            ),
+        )
+        self.assertEqual(directive["action"], "request_review")
+
+    def test_baseline_thumbs_up_does_not_approve(self) -> None:
+        c = self.baseline_campaign()
+        directive = m.decide(
+            c,
+            snapshot(
+                reactions=[
+                    reaction(m.THUMBS_UP, rid="r-THUMBS_UP", created_at="2026-09-14T09:00:00Z")
+                ]
+            ),
+        )
+        self.assertEqual(directive["action"], "request_review")
+
+    def test_baseline_does_not_block_the_request_allowance(self) -> None:
+        c = self.baseline_campaign()
+        directive = m.decide(c, snapshot())
+        self.assertEqual(directive["action"], "request_review")
+        self.assertEqual(c["rounds_used"], 0)
+        self.assertEqual(c["guards"], [])
+
+    def test_baseline_reaction_ids_are_derived_from_one_snapshot(self) -> None:
+        snap = {
+            "reactions": [
+                {"id": "r-b", "content": m.EYES, "login": CODEX, "created_at": T0},
+                {"id": "r-a", "content": m.THUMBS_UP, "login": CODEX, "created_at": T0},
+                {"id": "r-human", "content": m.EYES, "login": "a-human", "created_at": T0},
+                {"id": "r-heart", "content": "HEART", "login": CODEX, "created_at": T0},
+            ]
+        }
+        self.assertEqual(
+            m.creation_baseline_reaction_ids(
+                snap,
+                reviewer_logins=[CODEX],
+                approval_logins=[CODEX],
+            ),
+            ["r-a", "r-b"],
+        )
+
+    def test_request_time_guard_baselines_stay_independent(self) -> None:
+        c = self.baseline_campaign()
+        guard_snapshot = snapshot(
+            reactions=[
+                reaction(m.EYES, rid="eyes-after", created_at=T_PLUS_15),
+            ]
+        )
+        c = m.reserve_request(
+            c, head_oid=H1, reserved_at=T0, snapshot=guard_snapshot
+        )
+        # The request-time baseline is the guard's own; the creation baseline
+        # is untouched by reservation.
+        self.assertEqual(
+            c["creation_baseline"], {"reaction_ids": ["r-EYES", "r-THUMBS_UP"]}
+        )
+        self.assertIn(
+            "eyes-after", c["guards"][0]["baseline"]["reaction_ids"]
+        )
+
+    def test_unresolved_threads_remain_actionable_despite_baseline(self) -> None:
+        c = self.baseline_campaign()
+        directive = m.decide(c, snapshot(threads=[thread("T1")]))
+        self.assertEqual(directive["action"], "remediation_batch")
 
 
 class GuardTransitionTests(unittest.TestCase):

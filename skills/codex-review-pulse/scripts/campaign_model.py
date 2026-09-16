@@ -15,12 +15,17 @@ import secrets
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_CODEX_LOGINS = ("chatgpt-codex-connector",)
 
 MIN_ROUNDS = 1
 MAX_ROUNDS_CAP = 10
 MIN_INTERVAL_MINUTES = 1
+
+# Authoritative floor for the review-response grace, independent of the
+# scheduler cadence. A request may become codex_review_service_unresponsive
+# only at or after max(interval_minutes, MIN_REVIEW_RESPONSE_GRACE_MINUTES).
+MIN_REVIEW_RESPONSE_GRACE_MINUTES = 20
 
 ACTIVE = "active"
 SUCCEEDED = "succeeded"
@@ -148,6 +153,47 @@ def new_campaign_id(created_at: str) -> str:
     return f"crp-{stamp}-{secrets.token_hex(3)}"
 
 
+def canonical_creation_baseline(reaction_ids: Iterable[str] | None) -> dict[str, Any]:
+    """Canonical sorted unique reaction-ID collection for a lifecycle baseline."""
+    ids: list[str] = []
+    seen: set[str] = set()
+    for item in reaction_ids or []:
+        if not isinstance(item, str) or not item:
+            raise ValueError("Creation baseline reaction ids must be non-empty strings")
+        if item not in seen:
+            seen.add(item)
+            ids.append(item)
+    return {"reaction_ids": sorted(ids)}
+
+
+def creation_baseline_reaction_ids(
+    snapshot: dict[str, Any],
+    *,
+    reviewer_logins: Iterable[str],
+    approval_logins: Iterable[str],
+) -> list[str]:
+    """Applicable pre-existing lifecycle reaction IDs for the creation baseline.
+
+    Collected from one complete owned snapshot captured before the campaign
+    record exists. Baseline reactions neither prove review-in-progress for the
+    new campaign, nor approve it, nor create lifecycle-attribution waiting, nor
+    consume or block its per-head request allowance.
+    """
+    reviewer_keys = set(reviewer_logins)
+    approval_keys = set(approval_logins)
+    ids: set[str] = set()
+    for reaction in snapshot.get("reactions", []):
+        if not isinstance(reaction, dict) or not isinstance(reaction.get("id"), str):
+            continue
+        content = reaction.get("content")
+        login = reaction.get("login")
+        if (content == EYES and login in reviewer_keys) or (
+            content == THUMBS_UP and login in approval_keys
+        ):
+            ids.add(reaction["id"])
+    return sorted(ids)
+
+
 def new_campaign(
     *,
     campaign_id: str,
@@ -160,6 +206,7 @@ def new_campaign(
     interval_minutes: int,
     reviewer_logins: Iterable[str],
     approval_logins: Iterable[str],
+    creation_baseline: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     if not CAMPAIN_ID_RE.fullmatch(campaign_id):
         raise ValueError("Campaign id must have the form crp-YYYYMMDDTHHMMSSZ-hex")
@@ -194,6 +241,7 @@ def new_campaign(
         "status_detail": None,
         "terminal_at": None,
         "rounds_used": 0,
+        "creation_baseline": canonical_creation_baseline(creation_baseline),
         "config": {
             "max_rounds": max_rounds,
             "model": model.strip(),
@@ -307,6 +355,18 @@ def validate_campaign(
     if not _is_int(number) or number < 1 or number != pull_request_number:
         raise ValueError("Campaign pull request does not match the requested pull request")
     parse_timestamp(campaign.get("created_at"))
+    baseline = campaign.get("creation_baseline")
+    if not isinstance(baseline, dict) or set(baseline.keys()) != {"reaction_ids"}:
+        raise ValueError("Campaign creation_baseline is invalid")
+    baseline_ids = baseline.get("reaction_ids")
+    if (
+        not isinstance(baseline_ids, list)
+        or not all(isinstance(item, str) and item for item in baseline_ids)
+        or any(baseline_ids[i] >= baseline_ids[i + 1] for i in range(len(baseline_ids) - 1))
+    ):
+        raise ValueError(
+            "Campaign creation_baseline reaction_ids must be sorted unique strings"
+        )
     config = campaign.get("config")
     if not isinstance(config, dict):
         raise ValueError("Campaign config is missing")
@@ -364,6 +424,21 @@ def is_rollover_eligible(campaign: dict[str, Any]) -> bool:
 def guard_for_head(campaign: dict[str, Any], head_oid: str) -> dict[str, Any] | None:
     for guard in campaign.get("guards", []):
         if guard.get("head_oid") == head_oid:
+            return guard
+    return None
+
+
+def reserved_guard_ambiguity(campaign: dict[str, Any]) -> dict[str, Any] | None:
+    """Campaign-wide durable-local ambiguity probe.
+
+    Any request guard still RESERVED proves one request round was consumed,
+    the per-head allowance was reserved, and the previous external request
+    result was never durably classified; blind continuation is unsafe. Every
+    guard is inspected, not only the guard for an observed current head, so
+    snapshot incompleteness or head movement cannot hide the ambiguity.
+    """
+    for guard in campaign.get("guards", []):
+        if isinstance(guard, dict) and guard.get("state") == RESERVED:
             return guard
     return None
 
@@ -653,11 +728,22 @@ def _temporal_floor(guard: dict[str, Any] | None) -> str | None:
     return None
 
 
-def _in_baseline(guard: dict[str, Any] | None, artifact_id: str) -> bool:
+def _in_baseline(
+    campaign: dict[str, Any], guard: dict[str, Any] | None, artifact_id: object
+) -> bool:
+    """True when the artifact predates the campaign or the guard's own baseline.
+
+    The campaign-level creation baseline excludes pre-existing lifecycle
+    reactions; the per-guard baseline excludes request-time evidence.
+    """
+    if not isinstance(artifact_id, str):
+        return False
+    baseline = campaign.get("creation_baseline") or {}
+    if artifact_id in (baseline.get("reaction_ids") or []):
+        return True
     if guard is None:
         return False
-    baseline = guard.get("baseline") or {}
-    for ids in baseline.values():
+    for ids in (guard.get("baseline") or {}).values():
         if artifact_id in (ids or []):
             return True
     return False
@@ -667,6 +753,7 @@ def _eligible(
     artifact: dict[str, Any],
     *,
     created_field: str,
+    campaign: dict[str, Any],
     guard: dict[str, Any] | None,
     floor: str | None,
 ) -> bool:
@@ -674,7 +761,7 @@ def _eligible(
     artifact_id = artifact.get("id")
     if not isinstance(artifact_id, str):
         return False
-    if _in_baseline(guard, artifact_id):
+    if _in_baseline(campaign, guard, artifact_id):
         return False
     created_at = artifact.get(created_field)
     if floor is None:
@@ -716,7 +803,11 @@ def evaluate(
                 and reaction.get("content") == EYES
                 and reaction.get("login") in reviewer_keys
                 and _eligible(
-                    reaction, created_field="created_at", guard=guard, floor=floor
+                    reaction,
+                    created_field="created_at",
+                    campaign=campaign,
+                    guard=guard,
+                    floor=floor,
                 )
             ):
                 eligible_eyes.append(
@@ -731,7 +822,11 @@ def evaluate(
                 and reaction.get("content") == THUMBS_UP
                 and reaction.get("login") in approval_keys
                 and _eligible(
-                    reaction, created_field="created_at", guard=guard, floor=floor
+                    reaction,
+                    created_field="created_at",
+                    campaign=campaign,
+                    guard=guard,
+                    floor=floor,
                 )
             ):
                 approval = {
@@ -750,7 +845,7 @@ def evaluate(
             continue
         if review.get("state") not in NON_APPROVAL_REVIEW_STATES:
             continue
-        if _in_baseline(guard, review.get("id")):
+        if _in_baseline(campaign, guard, review.get("id")):
             continue
         submitted_at = review.get("submitted_at")
         if floor is None:
@@ -772,7 +867,7 @@ def evaluate(
     for comment in snapshot.get("comments", []):
         if not isinstance(comment, dict) or comment.get("login") not in actor_keys:
             continue
-        if _in_baseline(guard, comment.get("id")):
+        if _in_baseline(campaign, guard, comment.get("id")):
             continue
         if floor is not None and strictly_after(comment.get("created_at"), floor):
             codex_comments.append(
@@ -784,7 +879,7 @@ def evaluate(
             isinstance(reaction, dict)
             and reaction.get("login") in actor_keys
             and reaction.get("content") in (THUMBS_UP, EYES)
-            and not _in_baseline(guard, reaction.get("id"))
+            and not _in_baseline(campaign, guard, reaction.get("id"))
             and floor is not None
             and not strictly_after(reaction.get("created_at"), floor)
             and not (
@@ -809,6 +904,8 @@ def evaluate(
     if guard is None:
         for reaction in snapshot.get("reactions", []):
             if not isinstance(reaction, dict) or not isinstance(reaction.get("id"), str):
+                continue
+            if _in_baseline(campaign, None, reaction.get("id")):
                 continue
             content = reaction.get("content")
             if (content == EYES and reaction.get("login") in reviewer_keys) or (
@@ -835,25 +932,52 @@ def evaluate(
     }
 
 
-def _interval_elapsed(campaign: dict[str, Any], guard: dict[str, Any], snapshot: dict[str, Any]) -> bool:
+def effective_response_grace_minutes(campaign: dict[str, Any]) -> int:
+    """Authoritative response grace, independent of the scheduler cadence."""
+    return max(
+        campaign["config"]["interval_minutes"],
+        MIN_REVIEW_RESPONSE_GRACE_MINUTES,
+    )
+
+
+def _response_grace_elapsed(
+    campaign: dict[str, Any], guard: dict[str, Any], snapshot: dict[str, Any]
+) -> bool:
     opened_at = guard.get("window_opened_at")
     if not isinstance(opened_at, str):
         return False
     elapsed_seconds = (
         parse_timestamp(snapshot["server_time"]) - parse_timestamp(opened_at)
     ).total_seconds()
-    return elapsed_seconds >= campaign["config"]["interval_minutes"] * 60
+    return elapsed_seconds >= effective_response_grace_minutes(campaign) * 60
 
 
 def decide(campaign: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
     """Map campaign state plus one complete observation to one directive.
 
     Directives that mutate GitHub/Git are effective actions; everything else is
-    a non-counting observation or a terminal outcome.
+    a non-counting observation or a terminal outcome. Terminal directives carry
+    a deterministic ``basis``: ``durable_local`` when current durable campaign
+    state alone proves terminality, ``observation`` when the conclusion also
+    depends on current GitHub state. This metadata is in-memory decision
+    output, never persisted workflow state.
     """
     status = campaign.get("status")
     if status in TERMINAL_STATUSES:
         return {"action": "campaign_terminal", "status": status}
+
+    # Durable-local ambiguity: campaign state alone proves terminality, before
+    # any observation. A RESERVED guard anywhere - on any head - blocks blind
+    # continuation, so snapshot incompleteness cannot hide it either.
+    reserved = reserved_guard_ambiguity(campaign)
+    if reserved is not None:
+        return {
+            "action": "terminal",
+            "status": AMBIGUOUS_INTERRUPTION,
+            "detail": "reserved request attempt has no creation result",
+            "guard_head": reserved.get("head_oid"),
+            "basis": "durable_local",
+        }
 
     if not snapshot.get("complete"):
         return {
@@ -863,21 +987,17 @@ def decide(campaign: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]
 
     pr_state = snapshot.get("pr_state")
     if pr_state != "OPEN":
-        return {"action": "terminal", "status": TARGET_UNAVAILABLE, "detail": f"pull request is {pr_state}"}
+        return {
+            "action": "terminal",
+            "status": TARGET_UNAVAILABLE,
+            "detail": f"pull request is {pr_state}",
+            "basis": "observation",
+        }
 
     head_oid = snapshot.get("head_oid")
     guard = guard_for_head(campaign, head_oid) if isinstance(head_oid, str) else None
     evidence = evaluate(campaign, snapshot)
     budget_remaining = campaign["rounds_used"] < campaign["config"]["max_rounds"]
-
-    # A reserved guard without a resolved creation result means the previous
-    # owner was interrupted at the fail-closed point.
-    if guard is not None and guard.get("state") == RESERVED:
-        return {
-            "action": "terminal",
-            "status": AMBIGUOUS_INTERRUPTION,
-            "detail": "reserved request attempt has no creation result",
-        }
 
     # Unresolved applicable feedback always wins over reaction/approval signals.
     if evidence["threads"]:
@@ -890,10 +1010,16 @@ def decide(campaign: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]
             "action": "terminal",
             "status": ROUNDS_EXHAUSTED,
             "detail": "applicable unresolved feedback remains with no round budget",
+            "basis": "observation",
         }
 
     if evidence["approval"] is not None:
-        return {"action": "terminal", "status": SUCCEEDED, "proof": evidence["approval"]}
+        return {
+            "action": "terminal",
+            "status": SUCCEEDED,
+            "proof": evidence["approval"],
+            "basis": "observation",
+        }
 
     if evidence["eyes"]:
         return {
@@ -920,6 +1046,7 @@ def decide(campaign: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]
             "action": "terminal",
             "status": ROUNDS_EXHAUSTED,
             "detail": "no effective action remains",
+            "basis": "observation",
         }
 
     guard_state = guard.get("state")
@@ -930,18 +1057,20 @@ def decide(campaign: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]
                 "action": "terminal",
                 "status": REVIEW_COMPLETED_WITHOUT_APPROVAL,
                 "review_id": evidence["completed_reviews"][0]["id"],
+                "basis": "observation",
             }
-        if not _interval_elapsed(campaign, guard, snapshot):
+        if not _response_grace_elapsed(campaign, guard, snapshot):
             return {
                 "action": "wait_request_outstanding",
                 "guard_head": head_oid,
             }
-        # At least one full interval has elapsed with complete evidence.
+        # The response grace has elapsed with complete evidence.
         if evidence["codex_comments"]:
             return {
                 "action": "terminal",
                 "status": REVIEW_COMPLETED_WITHOUT_APPROVAL,
                 "comment_id": evidence["codex_comments"][0]["id"],
+                "basis": "observation",
             }
         if evidence["ambiguous_artifacts"]:
             return {
@@ -949,11 +1078,16 @@ def decide(campaign: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]
                 "status": MANUAL_INTERVENTION_REQUIRED,
                 "detail": "temporal eligibility cannot be established for possible Codex activity",
                 "artifacts": evidence["ambiguous_artifacts"],
+                "basis": "observation",
             }
         return {
             "action": "terminal",
             "status": CODEX_REVIEW_SERVICE_UNRESPONSIVE,
-            "detail": "one interval elapsed with complete evidence and no attributable Codex response",
+            "detail": (
+                "response grace elapsed with complete evidence and no "
+                "attributable Codex response"
+            ),
+            "basis": "observation",
         }
 
     if guard_state in (CREATION_FAILED, UNBRACKETED, GUARD_AMBIGUOUS, CLOSED):
@@ -961,21 +1095,26 @@ def decide(campaign: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]
             "action": "terminal",
             "status": MANUAL_INTERVENTION_REQUIRED,
             "detail": f"request guard already reached state {guard_state}",
+            "basis": "observation",
         }
 
     # INVALIDATED on the same head, or SUPERSEDED on a head that returned: the
     # per-head allowance is permanently gone and the window must not reactivate.
+    # Terminality still requires the observed current head, so the proof stays
+    # observation-derived rather than classified from the guard state name.
     if guard_state in (INVALIDATED, SUPERSEDED):
         return {
             "action": "terminal",
             "status": MANUAL_INTERVENTION_REQUIRED,
             "detail": f"request guard state {guard_state} leaves no automatic action for this head",
+            "basis": "observation",
         }
 
     return {
         "action": "terminal",
         "status": MANUAL_INTERVENTION_REQUIRED,
         "detail": f"unhandled guard state: {guard_state}",
+        "basis": "observation",
     }
 
 

@@ -7,6 +7,13 @@ record, and prints an admission envelope that references a snapshot file
 written by this process itself. The worker model never assembles, edits, or
 re-saves snapshot evidence; it only passes the printed path to later helpers.
 
+The admission snapshot is S0: it authorizes only cheap rejection, preliminary
+target validation, and diagnostics before ownership acquisition. It never
+authorizes durable head synchronization, worker decisions, remediation-batch
+selection, request eligibility, round consumption, or terminalization; a
+matching head OID does not make S0 current. Later authoritative evidence is
+obtained by the owned product boundaries themselves.
+
 Admission performs no lock, campaign, Git, or GitHub mutation. Its only local
 artifact is a fresh private snapshot file in the system temporary directory.
 """
@@ -26,7 +33,7 @@ import github_api
 import storage
 
 
-def _write_private_snapshot(snapshot: dict[str, Any]) -> str:
+def write_private_snapshot(snapshot: dict[str, Any]) -> str:
     """Persist the observation to a fresh private file owned by this process."""
     descriptor, name = tempfile.mkstemp(prefix="crp-snapshot-", suffix=".json")
     try:
@@ -51,7 +58,7 @@ def run_admission(
     repository_path: str | Path = ".",
 ) -> dict[str, Any]:
     snapshot = github_api.fetch_snapshot(repository, pr_number)
-    snapshot_path = _write_private_snapshot(snapshot)
+    snapshot_path = write_private_snapshot(snapshot)
 
     envelope: dict[str, Any] = {
         "snapshot_path": snapshot_path,

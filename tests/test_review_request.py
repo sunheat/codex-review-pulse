@@ -35,6 +35,11 @@ def campaign() -> dict:
     )
 
 
+def committed() -> dict:
+    """A campaign whose request round and allowance are already durably committed."""
+    return m.reserve_request(campaign(), head_oid=H, reserved_at=T0, snapshot=snap(time=T0))
+
+
 def snap(
     *,
     time: str,
@@ -62,44 +67,50 @@ def snap(
     }
 
 
-class RequestAttemptTests(unittest.TestCase):
-    def test_round_and_guard_are_committed_before_the_mutation(self) -> None:
-        events: list[str] = []
-        original_reserve = review_request.model.reserve_request
+def run(outcome_campaign: dict, *, observer, commenter, persist=lambda record: None) -> dict:
+    """Drive the executor the way the CLI does, from the committed guard."""
+    guard = review_request.committed_request_guard(outcome_campaign)
+    return review_request.execute_request_attempt(
+        campaign=outcome_campaign,
+        head_oid=guard["head_oid"],
+        reserved_at=guard["reserved_at"],
+        baseline_comment_ids=set(guard.get("baseline", {}).get("comment_ids", [])),
+        observer=observer,
+        commenter=commenter,
+        persist=persist,
+    )
 
-        def tracking_reserve(campaign_data, **kwargs):
-            result = original_reserve(campaign_data, **kwargs)
-            events.append("reserved")
-            return result
 
-        review_request.model.reserve_request = tracking_reserve
-        try:
-            def commenter(subject_id: str, body: str) -> dict:
-                events.append("posted")
-                return {"node_id": "c1", "created_at": T1, "url": "https://x/c1"}
-
-            sequence = [snap(time=T1), snap(time=T2)]
-            outcome = review_request.execute_request_attempt(
-                repository="owner/repo",
-                pr_number=7,
-                campaign=campaign(),
-                admission_snapshot=snap(time=T0),
-                persist=lambda record: None,
-                observer=lambda: sequence.pop(0),
-                commenter=commenter,
+class CommittedGuardHandoffTests(unittest.TestCase):
+    def test_exactly_one_committed_guard_is_required(self) -> None:
+        with self.assertRaises(RuntimeError):
+            review_request.committed_request_guard(campaign())
+        with self.assertRaises(RuntimeError):
+            review_request.committed_request_guard(
+                m.reserve_request(committed(), head_oid="other-head", reserved_at=T0, snapshot=snap(time=T0, head="other-head"))
             )
-        finally:
-            review_request.model.reserve_request = original_reserve
-        self.assertEqual(events, ["reserved", "posted"])
-        self.assertEqual(outcome["outcome"], "window_open")
-        guard = m.guard_for_head(outcome["campaign"], H)
-        self.assertEqual(guard["state"], m.GUARD_ACTIVE)
-        self.assertEqual(guard["request"]["node_id"], "c1")
-        self.assertEqual(outcome["campaign"]["rounds_used"], 1)
+        guard = review_request.committed_request_guard(committed())
+        self.assertEqual(guard["head_oid"], H)
+        self.assertEqual(guard["state"], m.RESERVED)
 
-    def test_reservation_is_persisted_before_any_external_call(self) -> None:
+    def test_invalidated_guard_is_not_a_committed_request(self) -> None:
+        used = m.invalidate_reserved_request(
+            committed(), head_oid=H, at=T1, reason="head_changed"
+        )
+        with self.assertRaises(RuntimeError):
+            review_request.committed_request_guard(used)
+
+
+class RequestExecutionTests(unittest.TestCase):
+    def test_execution_consumes_no_second_round_or_reservation(self) -> None:
         events: list[str] = []
         sequence = [snap(time=T1), snap(time=T2)]
+        fixture = committed()
+        original_reserve = review_request.model.reserve_request
+
+        def failing_reserve(*args, **kwargs):
+            events.append("reserved")
+            raise AssertionError("the executor must not reserve again")
 
         def observer() -> dict:
             events.append("observed")
@@ -109,28 +120,23 @@ class RequestAttemptTests(unittest.TestCase):
             events.append("posted")
             return {"node_id": "c1", "created_at": T1, "url": "https://x/c1"}
 
-        def persist(record: dict) -> None:
-            guard = m.guard_for_head(record, H)
-            events.append(
-                "persisted-reserved"
-                if record["rounds_used"] == 1 and guard["state"] == m.RESERVED
-                else "persisted-window"
+        review_request.model.reserve_request = failing_reserve
+        try:
+            outcome = run(
+                fixture,
+                observer=observer,
+                commenter=commenter,
+                persist=lambda record: events.append("persisted"),
             )
-
-        outcome = review_request.execute_request_attempt(
-            repository="owner/repo",
-            pr_number=7,
-            campaign=campaign(),
-            admission_snapshot=snap(time=T0),
-            observer=observer,
-            commenter=commenter,
-            persist=persist,
-        )
-        self.assertEqual(
-            events,
-            ["persisted-reserved", "observed", "posted", "observed", "persisted-window"],
-        )
+        finally:
+            review_request.model.reserve_request = original_reserve
+        self.assertEqual(events, ["observed", "posted", "observed", "persisted"])
         self.assertEqual(outcome["outcome"], "window_open")
+        guard = m.guard_for_head(outcome["campaign"], H)
+        self.assertEqual(guard["state"], m.GUARD_ACTIVE)
+        self.assertEqual(guard["request"]["node_id"], "c1")
+        # Exactly the round consumed by the commitment, never a second one.
+        self.assertEqual(outcome["campaign"]["rounds_used"], 1)
 
     def test_revalidation_invalidation_skips_post_and_keeps_round(self) -> None:
         posted = []
@@ -142,17 +148,9 @@ class RequestAttemptTests(unittest.TestCase):
                 ],
             ),
         ]
-
-        def observer() -> dict:
-            return sequence.pop(0)
-
-        outcome = review_request.execute_request_attempt(
-            repository="owner/repo",
-            pr_number=7,
-            campaign=campaign(),
-            admission_snapshot=snap(time=T0),
-            persist=lambda record: None,
-            observer=observer,
+        outcome = run(
+            committed(),
+            observer=lambda: sequence.pop(0),
             commenter=lambda *a: posted.append(a) or {},
         )
         self.assertEqual(outcome["outcome"], "invalidated")
@@ -162,12 +160,8 @@ class RequestAttemptTests(unittest.TestCase):
         self.assertFalse(outcome["retain_lock"])
 
     def test_head_change_at_revalidation_invalidates_without_post(self) -> None:
-        outcome = review_request.execute_request_attempt(
-            repository="owner/repo",
-            pr_number=7,
-            campaign=campaign(),
-            admission_snapshot=snap(time=T0),
-            persist=lambda record: None,
+        outcome = run(
+            committed(),
             observer=lambda: snap(time=T1, head="different"),
             commenter=lambda *a: (_ for _ in ()).throw(AssertionError("must not post")),
         )
@@ -178,12 +172,8 @@ class RequestAttemptTests(unittest.TestCase):
 
     def test_post_mutation_head_mismatch_terminates_manual_unbracketed(self) -> None:
         sequence = [snap(time=T1), snap(time=T2, head="changed")]
-        outcome = review_request.execute_request_attempt(
-            repository="owner/repo",
-            pr_number=7,
-            campaign=campaign(),
-            admission_snapshot=snap(time=T0),
-            persist=lambda record: None,
+        outcome = run(
+            committed(),
             observer=lambda: sequence.pop(0),
             commenter=lambda subject_id, body: {
                 "node_id": "c1",
@@ -205,12 +195,8 @@ class RequestAttemptTests(unittest.TestCase):
         def commenter(subject_id: str, body: str) -> dict:
             raise RuntimeError("422 nope")
 
-        outcome = review_request.execute_request_attempt(
-            repository="owner/repo",
-            pr_number=7,
-            campaign=campaign(),
-            admission_snapshot=snap(time=T0),
-            persist=lambda record: None,
+        outcome = run(
+            committed(),
             observer=lambda: sequence.pop(0),
             commenter=commenter,
         )
@@ -235,12 +221,8 @@ class RequestAttemptTests(unittest.TestCase):
                 ],
             ),
         ]
-        outcome = review_request.execute_request_attempt(
-            repository="owner/repo",
-            pr_number=7,
-            campaign=campaign(),
-            admission_snapshot=snap(time=T0),
-            persist=lambda record: None,
+        outcome = run(
+            committed(),
             observer=lambda: sequence.pop(0),
             commenter=lambda *a: (_ for _ in ()).throw(RuntimeError("network gone")),
         )
@@ -255,16 +237,14 @@ class RequestAttemptTests(unittest.TestCase):
             "created_at": "2026-09-14T09:00:00Z",
             "body": "@codex review",
         }
-        admission = snap(time=T0, comments=[manual])
+        with_baseline = m.reserve_request(
+            campaign(), head_oid=H, reserved_at=T0, snapshot=snap(time=T0, comments=[manual])
+        )
         sequence = [snap(time=T1, comments=[manual]), snap(time=T2, comments=[manual])]
-        outcome = review_request.execute_request_attempt(
-            repository="owner/repo",
-            pr_number=7,
-            campaign=campaign(),
-            admission_snapshot=admission,
+        outcome = run(
+            with_baseline,
             observer=lambda: sequence.pop(0),
             commenter=lambda *a: (_ for _ in ()).throw(RuntimeError("403 forbidden")),
-            persist=lambda record: None,
         )
         self.assertEqual(outcome["outcome"], "creation_failed")
         self.assertFalse(outcome["retain_lock"])
@@ -278,12 +258,8 @@ class RequestAttemptTests(unittest.TestCase):
             except StopIteration:
                 raise RuntimeError("network down")
 
-        outcome = review_request.execute_request_attempt(
-            repository="owner/repo",
-            pr_number=7,
-            campaign=campaign(),
-            admission_snapshot=snap(time=T0),
-            persist=lambda record: None,
+        outcome = run(
+            committed(),
             observer=observer,
             commenter=lambda *a: (_ for _ in ()).throw(RuntimeError("network gone")),
         )
@@ -293,17 +269,24 @@ class RequestAttemptTests(unittest.TestCase):
 
     def test_incomplete_post_evidence_fails_closed(self) -> None:
         sequence = [snap(time=T1), snap(time=T2, complete=False)]
-        outcome = review_request.execute_request_attempt(
-            repository="owner/repo",
-            pr_number=7,
-            campaign=campaign(),
-            admission_snapshot=snap(time=T0),
-            persist=lambda record: None,
+        outcome = run(
+            committed(),
             observer=lambda: sequence.pop(0),
             commenter=lambda *a: (_ for _ in ()).throw(RuntimeError("500")),
         )
         self.assertEqual(outcome["outcome"], "ambiguous")
         self.assertTrue(outcome["retain_lock"])
+
+    def test_ambiguity_stamps_use_the_committed_reservation_time(self) -> None:
+        sequence = [snap(time=T1)]
+        outcome = run(
+            committed(),
+            observer=lambda: sequence.pop(0),
+            commenter=lambda *a: (_ for _ in ()).throw(RuntimeError("network gone")),
+        )
+        # Re-observation failed outright, so the ambiguity timestamp can only
+        # come from the durable reservation, not from any replayed snapshot.
+        self.assertEqual(outcome["campaign"]["terminal_at"], T0)
 
 
 if __name__ == "__main__":
