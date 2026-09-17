@@ -45,6 +45,17 @@ Codex CLI, Pi, OMP, ordinary ChatGPT scheduled tasks, cron, GitHub Actions, Wind
 Do not build a repository-side scheduler client, private HTTP API, automation SDK, generic scheduler adapter, or mock adapter to substitute for native host integration.
 If the native host does not expose, cannot validate, or rejects requested configuration, report an explicit native-host limitation; do not emulate the configuration by merely storing requested values in campaign state.
 
+### Execution environment gate
+
+Launcher and scheduled-worker execution starts with an environment gate, before PR inspection, GitHub mutation, sub-agent work, or extended analysis.
+Where the native host authoritatively identifies the current task mode, Codex mode is required and ChatGPT, including ChatGPT Work, is rejected; where it authoritatively exposes effective permissions, Full access — unrestricted sandbox access and no approval prompts — is required.
+Values the host does not expose are unknown and are never inferred from model name, task title, directory, global settings, tool availability, or a different task.
+
+A positively identified violation, or an explicit host-generated authorization, approval, policy, or sandbox denial observed before any external product mutation (or after an operation is confirmed not to have occurred), is a hard failure with a closed set of reason codes: `unsupported_execution_mode`, `insufficient_effective_access`, `host_authorization_denied`.
+Through one owned, idempotent handoff the matching campaign forfeits its entire remaining round budget (`rounds_used = max_rounds`) and durably terminalizes as `hard_failed` with the reason code and concise diagnostic detail; a launcher rejection before campaign creation creates no campaign state and no Automation.
+A lock owned by another worker remains a non-counting idle exit, and duplicate or stale deliveries never modify a newer campaign.
+Generic permission, network, authentication, or timeout errors, and denials surfacing after an operation whose outcome may be ambiguous, are not hard failures and keep the existing fail-closed behavior.
+
 ## Authority and runtime truth
 
 Tracked repository files are authoritative for product architecture, implementation, tests, packaging, and documented behavior.

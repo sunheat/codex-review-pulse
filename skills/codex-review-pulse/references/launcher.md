@@ -10,6 +10,30 @@ All Python commands run from the Codex app project directory that contains the
 intended local clone (`--repository-path .`). Resolve the helper directory as
 the `scripts/` folder next to this skill's `SKILL.md`.
 
+## 0. Environment gate
+
+Before parsing the instruction or inspecting anything, check the native host
+only where it exposes authoritative metadata for this conversation:
+
+- If the host reliably identifies the current task mode and it is not Codex
+  mode (for example ChatGPT or ChatGPT Work), stop and report the reason
+  (`unsupported_execution_mode`). Create no campaign record and no Automation;
+  there is no counter to mutate.
+- If the host reliably exposes effective permissions and they are not Full
+  access (unrestricted sandbox access and no approval prompts), stop and
+  report the reason (`insufficient_effective_access`). Create no campaign
+  record and no Automation.
+- A value the host does not expose is unknown: continue to step 1 and never
+  infer it from the model name, task title, directory, global settings, tool
+  availability, or a different task.
+
+An explicit host-generated authorization, approval, policy, or sandbox denial
+of a required launcher operation before campaign creation is also a stop with
+no local state to record (report the `host_authorization_denied` context;
+generic Python, network, or GitHub CLI errors are not denials). A denial after
+campaign creation follows the existing setup-result classification and
+fail-closed rules below.
+
 ## 1. Parse and validate the instruction
 
 - Extract `OWNER/REPO`, pull request number, max rounds (1–10 integer), worker

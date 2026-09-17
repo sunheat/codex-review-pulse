@@ -97,8 +97,8 @@ Retirement is the explicit human handling path for a valid supported campaign
 that must not continue: an active interrupted campaign, an active
 fully-consumed campaign the user chooses not to continue, `ambiguous_interruption`,
 `manual_intervention_required`, `request_creation_failed`, `target_unavailable`,
-an early `succeeded` campaign with unused rounds, or an unused active
-scheduler-setup orphan. It is never automatic.
+`hard_failed`, an early `succeeded` campaign with unused rounds, or an unused
+active scheduler-setup orphan. It is never automatic.
 
 Before retiring, confirm that every previous owner and product-mutating
 operation for this campaign can no longer continue. Then choose one mode:
@@ -155,4 +155,5 @@ A later delivery creates a fresh worktree and never resumes an abandoned one.
 | `request_creation_failed` | Request creation definitively failed with proven absence of a comment | released |
 | `manual_intervention_required` | E.g. unbracketed request, inconclusive temporal evidence, no automatic action remains | released |
 | `target_unavailable` | PR closed/merged or another definite platform condition | released |
+| `hard_failed` | Positively identified unsupported execution environment (`unsupported_execution_mode`, `insufficient_effective_access`) or explicit host authorization denial (`host_authorization_denied`); entire remaining round budget forfeited | released |
 | `ambiguous_interruption` | A product mutation may or may not have happened | **retained** |

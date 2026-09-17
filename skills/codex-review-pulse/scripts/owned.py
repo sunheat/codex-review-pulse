@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""The three deterministic owned product boundaries of Phase 2.
+"""The deterministic owned product boundaries of Phase 2.
 
 These are the only product-facing entry points that may:
 
 - create a campaign from post-lock owned evidence (normal setup);
 - prepare and apply the fixed C1-to-C2 rollover transition;
-- make the one deterministic owned worker decision per acquired delivery.
+- make the one deterministic owned worker decision per acquired delivery;
+- record the environment-gate hard-failure handoff (``record_hard_failure``),
+  the one guarded transition that forfeits the remaining budget and
+  terminalizes ``hard_failed``.
 
-Every helper establishes matching Phase 1 ownership itself, obtains its own
-fresh authoritative GitHub evidence while the permanent lock remains held and
-the canonical sidecar guard stays released, and persists only through the
-guarded Phase 1 primitives. Callers cannot select snapshots, creation
+Every helper establishes matching Phase 1 ownership itself and persists only
+through the guarded Phase 1 primitives; the observation boundaries obtain
+their own fresh authoritative GitHub evidence while the permanent lock remains
+held and the canonical sidecar guard stays released (the hard-failure handoff
+performs no observation at all). Callers cannot select snapshots, creation
 evidence, terminal statuses, proof bases, round commitment, or ownership
 dispositions. No remediation editing, review-request POST, Git push, issue
 creation, thread resolution, or native scheduler mutation happens here.
@@ -20,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 from typing import Any, Callable
@@ -35,6 +40,18 @@ FetchSnapshot = Callable[[], dict[str, Any]]
 
 class OwnedBoundaryError(RuntimeError):
     """A handled deterministic failure inside one owned boundary."""
+
+
+def _utc_now() -> str:
+    """Local wall-clock stamp for gate transitions that observe nothing.
+
+    The hard-failure handoff deliberately performs no GitHub observation, so
+    no authoritative server time exists; the timestamp is diagnostic only and
+    no correctness decision orders on it.
+    """
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
 
 
 def _load_campaign(
@@ -709,9 +726,123 @@ def run_worker_decision(
     return _fail_closed(f"unknown owned-worker directive: {action!r}")
 
 
+def record_hard_failure(
+    *,
+    repository: str,
+    pr_number: int,
+    campaign_id: str,
+    reason: str,
+    detail: str,
+    repository_path: str | Path = ".",
+    now: Callable[[], str] | None = None,
+) -> dict[str, Any]:
+    """Explicit handoff for a positively identified execution-environment failure.
+
+    Production entry point behind the environment gate of the launcher and the
+    scheduled worker. Call it only when the host authoritatively identifies an
+    unsupported execution mode or missing Full access, or returns an explicit
+    host-generated authorization, approval, policy, or sandbox denial for a
+    required operation — and only before any external mutation has occurred,
+    or after an operation is confirmed not to have occurred. It performs local
+    durable work only, no GitHub observation or mutation:
+
+    1. acquires the same worker ownership predicate as any scheduled delivery
+       (busy, invalid, terminal, absent, or mismatched campaigns exit idle);
+    2. applies one guarded transition that forfeits the entire remaining round
+       budget and terminalizes the campaign as ``hard_failed`` with the reason
+       code and concise diagnostic;
+    3. releases ownership once the failure state is durably confirmed.
+
+    Duplicate deliveries and stale campaign identities never modify a newer
+    campaign; a lock owned by another worker is a non-counting idle exit.
+    Unknown reason codes are refused before any shared state is touched.
+    """
+    canonical = model.canonical_repository(repository)
+    if reason not in model.HARD_FAILURE_REASONS:
+        raise ValueError(f"Unknown hard-failure reason: {reason!r}")
+    if not isinstance(detail, str) or not detail.strip():
+        raise ValueError("Hard-failure detail must be a non-empty string")
+    at = (now or _utc_now)()
+
+    try:
+        acquisition = storage.acquire_worker_lock(
+            canonical,
+            pr_number,
+            campaign_id=campaign_id,
+            acquired_at=at,
+            repository_path=repository_path,
+        )
+    except Exception as error:  # noqa: BLE001 - fail closed
+        return {
+            "recorded": False,
+            "outcome": "local_fail_closed",
+            "reason": storage.error_text(error),
+            "ownership": "not_acquired",
+            "scheduler_cleanup_authorized": False,
+        }
+    if not acquisition.get("acquired"):
+        return {
+            "recorded": False,
+            "outcome": "idle_exit",
+            "acquisition_status": acquisition.get("status"),
+            "ownership": "not_acquired",
+            "scheduler_cleanup_authorized": False,
+        }
+    token = acquisition["owner_token"]
+
+    try:
+        terminal = storage.transition_active_campaign(
+            canonical,
+            pr_number,
+            owner_token=token,
+            transition=lambda record: model.hard_fail(
+                record, at=at, reason=reason, detail=detail
+            ),
+            repository_path=repository_path,
+        )
+    except Exception as error:  # noqa: BLE001 - persistence unconfirmed
+        return {
+            "recorded": False,
+            "outcome": "persistence_unconfirmed",
+            "reason": storage.error_text(error),
+            "ownership": "retained",
+            "scheduler_cleanup_authorized": False,
+        }
+
+    released = False
+    release_error: str | None = None
+    try:
+        released = (
+            storage.release_lock(
+                canonical, pr_number, token, repository_path=repository_path
+            ).get("released")
+            is True
+        )
+    except Exception as error:  # noqa: BLE001 - release must never be guessed
+        release_error = storage.error_text(error)
+    result: dict[str, Any] = {
+        "recorded": True,
+        "outcome": "hard_failed",
+        "campaign_id": terminal["campaign_id"],
+        "status": terminal["status"],
+        "reason": reason,
+        "status_detail": terminal["status_detail"],
+        "rounds_used": terminal["rounds_used"],
+        "max_rounds": terminal["config"]["max_rounds"],
+        "ownership": "released" if released else "retained",
+        "scheduler_cleanup_authorized": released,
+    }
+    if release_error is not None:
+        result["release_error"] = release_error
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Deterministic owned campaign creation, rollover, and worker decision"
+        description=(
+            "Deterministic owned campaign creation, rollover, worker decision, "
+            "and environment-gate hard failure"
+        )
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -736,6 +867,22 @@ def main() -> None:
     subparsers.add_parser("create-campaign", parents=[common, config_args])
     subparsers.add_parser("prepare-rollover", parents=[common, config_args])
     subparsers.add_parser("worker-decision", parents=[common])
+
+    hard_fail = subparsers.add_parser(
+        "hard-fail",
+        help=(
+            "Environment-gate handoff: forfeit the entire remaining round "
+            "budget and terminalize hard_failed for a positively identified "
+            "unsupported execution mode, missing Full access, or explicit "
+            "host authorization denial"
+        ),
+    )
+    hard_fail.add_argument("--repo", required=True)
+    hard_fail.add_argument("--pr", required=True, type=int)
+    hard_fail.add_argument("--repository-path", default=".")
+    hard_fail.add_argument("--campaign-id", required=True)
+    hard_fail.add_argument("--reason", required=True, choices=sorted(model.HARD_FAILURE_REASONS))
+    hard_fail.add_argument("--detail", required=True)
 
     args = parser.parse_args()
 
@@ -768,6 +915,15 @@ def main() -> None:
             reviewer_logins=args.reviewer_logins,
             approval_logins=args.approval_logins,
             fetch_snapshot=fetch,
+            repository_path=args.repository_path,
+        )
+    elif args.command == "hard-fail":
+        result = record_hard_failure(
+            repository=args.repo,
+            pr_number=args.pr,
+            campaign_id=args.campaign_id,
+            reason=args.reason,
+            detail=args.detail,
             repository_path=args.repository_path,
         )
     else:

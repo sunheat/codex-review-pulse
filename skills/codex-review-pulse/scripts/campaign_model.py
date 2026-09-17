@@ -36,6 +36,7 @@ REQUEST_CREATION_FAILED = "request_creation_failed"
 MANUAL_INTERVENTION_REQUIRED = "manual_intervention_required"
 TARGET_UNAVAILABLE = "target_unavailable"
 AMBIGUOUS_INTERRUPTION = "ambiguous_interruption"
+HARD_FAILED = "hard_failed"
 
 TERMINAL_STATUSES = {
     SUCCEEDED,
@@ -46,7 +47,20 @@ TERMINAL_STATUSES = {
     MANUAL_INTERVENTION_REQUIRED,
     TARGET_UNAVAILABLE,
     AMBIGUOUS_INTERRUPTION,
+    HARD_FAILED,
 }
+
+# Positively identified execution-environment failures (environment gate).
+# A closed set: generic permission, network, authentication, and timeout
+# errors are never classified as these reasons.
+HARD_FAILURE_REASONS = frozenset(
+    {
+        "unsupported_execution_mode",
+        "insufficient_effective_access",
+        "host_authorization_denied",
+    }
+)
+HARD_FAILURE_DETAIL_LIMIT = 500
 
 # Per-head request guard states.
 RESERVED = "reserved"
@@ -680,6 +694,43 @@ def terminate(
         )
     result = deepcopy(campaign)
     _apply_terminal_invariant(result, status=status, at=at, detail=detail)
+    return result
+
+
+def hard_fail(
+    campaign: dict[str, Any],
+    *,
+    at: str,
+    reason: str,
+    detail: str,
+) -> dict[str, Any]:
+    """Terminal failure for a positively identified execution-environment rejection.
+
+    One guarded transition forfeits the entire remaining round budget
+    (``rounds_used = max_rounds``) and terminalizes the campaign as
+    ``hard_failed`` with the reason code plus concise host diagnostic. A
+    campaign carrying an unclassified RESERVED request attempt is refused:
+    that ambiguity keeps its existing fail-closed handling and is never
+    masked by this transition.
+    """
+    _require_active(campaign)
+    if reason not in HARD_FAILURE_REASONS:
+        raise ValueError(f"Unknown hard-failure reason: {reason!r}")
+    if not isinstance(detail, str) or not detail.strip():
+        raise ValueError("Hard-failure detail must be a non-empty string")
+    reserved = reserved_guard_ambiguity(campaign)
+    if reserved is not None:
+        raise RuntimeError(
+            "Campaign carries an unclassified RESERVED request attempt; "
+            "hard-failure terminalization is refused"
+        )
+    parse_timestamp(at)
+    result = deepcopy(campaign)
+    result["rounds_used"] = result["config"]["max_rounds"]
+    concise = " ".join(detail.split())[:HARD_FAILURE_DETAIL_LIMIT]
+    _apply_terminal_invariant(
+        result, status=HARD_FAILED, at=at, detail=f"{reason}: {concise}"
+    )
     return result
 
 

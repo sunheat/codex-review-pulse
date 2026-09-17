@@ -204,6 +204,7 @@ class ValidatorAcceptsRealStates(unittest.TestCase):
             m.MANUAL_INTERVENTION_REQUIRED,
             m.AMBIGUOUS_INTERRUPTION,
             m.TARGET_UNAVAILABLE,
+            m.HARD_FAILED,
         ):
             ineligible = m.terminate(
                 {**base_campaign(), "rounds_used": 6}, status=status, at=T1
