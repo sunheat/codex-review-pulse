@@ -570,5 +570,129 @@ class TerminalConfirmationTests(WorkerDecisionFixture):
         self.assertEqual(outcome["outcome"], "terminal_released")
 
 
+class FinalizationTests(WorkerDecisionFixture):
+    """Same-delivery exhaustion finalization after a successful final remediation."""
+
+    def finalize(self) -> dict:
+        return owned.finalize_exhaustion_owned(
+            repository="owner/repo",
+            pr_number=7,
+            owner_token=self.token,
+            repository_path=self.repository_path,
+        )
+
+    def test_successful_final_remediation_finalizes_in_same_delivery(self) -> None:
+        # Active at max-1 rounds; the boundary commits the final remediation
+        # round; after the batch completes successfully the same delivery
+        # terminalizes rounds_exhausted and releases without needing another
+        # scheduled delivery merely to discover exhaustion.
+        self.campaign["config"]["max_rounds"] = 2
+        self.campaign["rounds_used"] = 1
+        storage.save_json(self.campaign_path(), self.campaign)
+        self.fetches = [snapshot(threads=[thread("T1")])]
+        committed = self.decide()
+        self.assertEqual(committed["outcome"], "remediation_committed")
+        self.assertEqual(committed["rounds_used"], 2)
+        self.assertEqual(self.on_disk()["status"], model.ACTIVE)
+
+        finalization = self.finalize()
+        self.assertTrue(finalization["finalized"])
+        self.assertEqual(finalization["outcome"], "rounds_exhausted_finalized")
+        self.assertEqual(finalization["status"], model.ROUNDS_EXHAUSTED)
+        self.assertEqual(finalization["rounds_used"], 2)
+        self.assertEqual(finalization["ownership"], "released")
+        self.assertTrue(finalization["scheduler_cleanup_authorized"])
+        record = self.on_disk()
+        self.assertEqual(record["status"], model.ROUNDS_EXHAUSTED)
+        self.assertEqual(record["rounds_used"], record["config"]["max_rounds"])
+        self.assertIsNotNone(record["terminal_at"])
+        self.assertEqual(self.lock_status(), "absent")
+
+    def test_finalization_refuses_while_request_window_is_outstanding(self) -> None:
+        # A fully-consumed campaign with an open current-head request window
+        # stays active for non-counting lifecycle observation.
+        self.campaign["config"]["max_rounds"] = 1
+        self.open_window()
+        self.assertEqual(self.campaign["rounds_used"], 1)
+        finalization = self.finalize()
+        self.assertFalse(finalization["finalized"])
+        self.assertEqual(finalization["outcome"], "not_applicable")
+        self.assertIn("window", finalization["reason"])
+        record = self.on_disk()
+        self.assertEqual(record["status"], model.ACTIVE)
+        self.assertEqual(self.lock_status(), "active")
+
+    def test_finalization_refuses_while_budget_remains(self) -> None:
+        self.fetches = [snapshot(threads=[thread("T1")])]
+        committed = self.decide()
+        self.assertEqual(committed["outcome"], "remediation_committed")
+        self.assertEqual(committed["rounds_used"], 1)
+        self.assertEqual(self.on_disk()["config"]["max_rounds"], 6)
+        finalization = self.finalize()
+        self.assertFalse(finalization["finalized"])
+        self.assertEqual(finalization["outcome"], "not_applicable")
+        self.assertEqual(self.on_disk()["status"], model.ACTIVE)
+        self.assertEqual(self.lock_status(), "active")
+
+    def test_finalization_refuses_an_already_terminal_campaign(self) -> None:
+        self.campaign["config"]["max_rounds"] = 2
+        self.campaign["rounds_used"] = 2
+        self.campaign = model.terminate(
+            self.campaign, status=model.SUCCEEDED, at=T_EARLY
+        )
+        storage.save_json(self.campaign_path(), self.campaign)
+        finalization = self.finalize()
+        self.assertFalse(finalization["finalized"])
+        self.assertEqual(finalization["outcome"], "not_applicable")
+        self.assertIn("already terminal", finalization["reason"])
+        self.assertEqual(self.on_disk()["status"], model.SUCCEEDED)
+        self.assertEqual(self.lock_status(), "active")
+
+    def test_finalization_fails_closed_on_reserved_guard(self) -> None:
+        self.campaign["config"]["max_rounds"] = 1
+        self.campaign = model.reserve_request(
+            self.campaign, head_oid=H1, reserved_at=T0, snapshot=snapshot(time=T0)
+        )
+        storage.save_json(self.campaign_path(), self.campaign)
+        finalization = self.finalize()
+        self.assertFalse(finalization["finalized"])
+        self.assertEqual(finalization["outcome"], "local_fail_closed")
+        self.assertEqual(finalization["ownership"], "retained")
+        self.assertFalse(finalization["scheduler_cleanup_authorized"])
+        self.assertEqual(self.on_disk()["status"], model.ACTIVE)
+        self.assertEqual(self.lock_status(), "active")
+
+    def test_terminalized_campaign_is_never_lost_on_release_failure(self) -> None:
+        self.campaign["config"]["max_rounds"] = 2
+        self.campaign["rounds_used"] = 1
+        storage.save_json(self.campaign_path(), self.campaign)
+        self.fetches = [snapshot(threads=[thread("T1")])]
+        self.assertEqual(self.decide()["outcome"], "remediation_committed")
+        with unittest.mock.patch.object(
+            storage,
+            "release_lock",
+            side_effect=RuntimeError("unlink refused"),
+        ):
+            finalization = self.finalize()
+        self.assertTrue(finalization["finalized"])
+        self.assertEqual(finalization["outcome"], "release_unconfirmed")
+        self.assertEqual(finalization["ownership"], "retained")
+        self.assertFalse(finalization["scheduler_cleanup_authorized"])
+        record = self.on_disk()
+        self.assertEqual(record["status"], model.ROUNDS_EXHAUSTED)
+        self.assertEqual(self.lock_status(), "active")
+
+    def test_caller_cannot_select_the_terminal_result(self) -> None:
+        with self.assertRaises(TypeError):
+            owned.finalize_exhaustion_owned(  # type: ignore[call-arg]
+                repository="owner/repo",
+                pr_number=7,
+                owner_token=self.token,
+                status=model.SUCCEEDED,
+                terminal_at=T_EARLY,
+                repository_path=self.repository_path,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

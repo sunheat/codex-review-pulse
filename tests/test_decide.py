@@ -252,6 +252,39 @@ class DecisionTests(unittest.TestCase):
         directive = m.decide(campaign(rounds_used=6), snapshot())
         self.assertEqual(directive["status"], m.ROUNDS_EXHAUSTED)
 
+    def test_exhausted_unattributable_thumbs_up_terminates_exhausted(self) -> None:
+        # The repeated-wake incident: an active fully-consumed campaign with no
+        # request guard must not loop forever on the attribution-unknown wait.
+        # Exhaustion takes precedence; the unattributable reaction proves
+        # neither approval nor review progress.
+        directive = m.decide(
+            campaign(rounds_used=6),
+            snapshot(reactions=[reaction(m.THUMBS_UP, created_at=T_PLUS_15)]),
+        )
+        self.assertEqual(directive["action"], "terminal")
+        self.assertEqual(directive["status"], m.ROUNDS_EXHAUSTED)
+        self.assertEqual(directive["basis"], "observation")
+        self.assertNotEqual(directive["action"], "wait_lifecycle_attribution_unknown")
+
+    def test_exhausted_unattributable_eyes_terminates_exhausted(self) -> None:
+        directive = m.decide(
+            campaign(rounds_used=6),
+            snapshot(reactions=[reaction(m.EYES, created_at=T_PLUS_15)]),
+        )
+        self.assertEqual(directive["action"], "terminal")
+        self.assertEqual(directive["status"], m.ROUNDS_EXHAUSTED)
+        self.assertEqual(directive["basis"], "observation")
+        self.assertNotEqual(directive["action"], "wait_lifecycle_attribution_unknown")
+
+    def test_exhausted_unattributable_reaction_never_claims_approval(self) -> None:
+        # Exhaustion precedence must not reinterpret the reaction as approval.
+        directive = m.decide(
+            campaign(rounds_used=6),
+            snapshot(reactions=[reaction(m.THUMBS_UP, created_at=T_PLUS_15)]),
+        )
+        self.assertNotEqual(directive["status"], m.SUCCEEDED)
+        self.assertNotIn("proof", directive)
+
     def test_feedback_with_no_remaining_round_terminates_exhausted(self) -> None:
         c = reserve_and_open(campaign(rounds_used=5, max_rounds=6))
         directive = m.decide(

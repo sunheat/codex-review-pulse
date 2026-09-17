@@ -6,6 +6,8 @@ These are the only product-facing entry points that may:
 - create a campaign from post-lock owned evidence (normal setup);
 - prepare and apply the fixed C1-to-C2 rollover transition;
 - make the one deterministic owned worker decision per acquired delivery;
+- finalize exhaustion in the same delivery after a successful final
+  remediation (``finalize_exhaustion_owned``);
 - record the environment-gate hard-failure handoff (``record_hard_failure``),
   the one guarded transition that forfeits the remaining budget and
   terminalizes ``hard_failed``.
@@ -726,6 +728,146 @@ def run_worker_decision(
     return _fail_closed(f"unknown owned-worker directive: {action!r}")
 
 
+def finalize_exhaustion_owned(
+    *,
+    repository: str,
+    pr_number: int,
+    owner_token: str,
+    repository_path: str | Path = ".",
+    now: Callable[[], str] | None = None,
+) -> dict[str, Any]:
+    """Same-delivery exhaustion finalization after a successful final remediation.
+
+    Invoked by the scheduled worker in place of the plain final release, and
+    only after the delivery's committed remediation batch completed successfully
+    under the existing worker contract (every external result known and
+    unambiguous, none in flight). When durable campaign state alone proves that
+    no effective action and no outstanding asynchronous request obligation
+    remain, it persists terminal ``rounds_exhausted`` through the guarded
+    campaign-transition primitive and releases the matching terminal lock:
+
+    - the campaign is still active (no other terminal result was established);
+    - ``rounds_used >= max_rounds``;
+    - no request guard on any head claims an open response window (``active``)
+      or an unclassified request attempt (``reserved``).
+
+    Otherwise it changes nothing and reports why; the delivery then follows the
+    ordinary final-release contract. A clean-unsuccessful or ambiguous attempt
+    never calls this boundary and keeps its existing semantics. Correctness
+    never depends on this finalization succeeding: a later delivery observes
+    the same exhausted state and terminalizes through the owned-worker decision.
+    """
+    canonical = model.canonical_repository(repository)
+
+    def release() -> bool:
+        try:
+            storage.release_lock(
+                canonical, pr_number, owner_token, repository_path=repository_path
+            )
+            return True
+        except Exception:  # noqa: BLE001 - release must never be guessed
+            return False
+
+    def not_applicable(reason: str) -> dict[str, Any]:
+        return {
+            "finalized": False,
+            "outcome": "not_applicable",
+            "reason": reason,
+            "ownership": "delivery_disposition",
+            "scheduler_cleanup_authorized": False,
+        }
+
+    def fail_closed(reason: str) -> dict[str, Any]:
+        return {
+            **_fail_closed(reason),
+            "finalized": False,
+        }
+
+    # 1. Prove matching ownership and load the durable campaign.
+    try:
+        metadata = storage.verify_owner(
+            canonical, pr_number, owner_token, repository_path=repository_path
+        )
+        campaign = _load_campaign(
+            canonical, pr_number, repository_path=repository_path
+        )
+    except Exception as error:  # noqa: BLE001 - fail closed
+        return fail_closed(storage.error_text(error))
+    if campaign["campaign_id"] != metadata["campaign_id"]:
+        return fail_closed("Ownership lock belongs to a different campaign")
+
+    # 2. No other terminal result may already be established.
+    if model.is_terminal(campaign):
+        return not_applicable(
+            f"campaign is already terminal as {campaign['status']}"
+        )
+
+    # 3. Durable-local proof that exhaustion leaves no obligation behind.
+    if campaign["rounds_used"] < campaign["config"]["max_rounds"]:
+        return not_applicable("effective-round budget is not exhausted")
+    outstanding = [
+        guard
+        for guard in campaign.get("guards", [])
+        if isinstance(guard, dict)
+        and guard.get("state") in (model.GUARD_ACTIVE, model.RESERVED)
+    ]
+    if any(guard.get("state") == model.RESERVED for guard in outstanding):
+        return fail_closed(
+            "campaign carries an unclassified RESERVED request attempt"
+        )
+    if outstanding:
+        return not_applicable(
+            "a request response window remains outstanding for lifecycle "
+            "observation"
+        )
+
+    # 4. Persist terminal rounds_exhausted through the owned transition path.
+    at = (now or _utc_now)()
+    try:
+        terminal = storage.transition_active_campaign(
+            canonical,
+            pr_number,
+            owner_token=owner_token,
+            transition=lambda record: model.terminate(
+                record,
+                status=model.ROUNDS_EXHAUSTED,
+                at=at,
+                detail=(
+                    "successful final remediation consumed the last effective "
+                    "round with no outstanding request obligation"
+                ),
+            ),
+            repository_path=repository_path,
+        )
+    except Exception as error:  # noqa: BLE001 - fail closed
+        return fail_closed(storage.error_text(error))
+
+    # 5. Release the matching terminal lock; cleanup only after confirmed release.
+    if not release():
+        return {
+            "finalized": True,
+            "outcome": "release_unconfirmed",
+            "campaign_id": terminal["campaign_id"],
+            "status": terminal["status"],
+            "status_detail": terminal["status_detail"],
+            "rounds_used": terminal["rounds_used"],
+            "max_rounds": terminal["config"]["max_rounds"],
+            "ownership": "retained",
+            "scheduler_cleanup_authorized": False,
+        }
+    return {
+        "finalized": True,
+        "outcome": "rounds_exhausted_finalized",
+        "campaign_id": terminal["campaign_id"],
+        "status": terminal["status"],
+        "status_detail": terminal["status_detail"],
+        "rounds_used": terminal["rounds_used"],
+        "max_rounds": terminal["config"]["max_rounds"],
+        "ownership": "released",
+        "scheduler_cleanup_authorized": True,
+    }
+
+
 def record_hard_failure(
     *,
     repository: str,
@@ -868,6 +1010,19 @@ def main() -> None:
     subparsers.add_parser("prepare-rollover", parents=[common, config_args])
     subparsers.add_parser("worker-decision", parents=[common])
 
+    finalize = subparsers.add_parser(
+        "finalize-exhaustion",
+        help=(
+            "After a successful final remediation batch: durably terminalize "
+            "rounds_exhausted and release the matching terminal lock when "
+            "durable state proves no outstanding request obligation remains"
+        ),
+    )
+    finalize.add_argument("--repo", required=True)
+    finalize.add_argument("--pr", required=True, type=int)
+    finalize.add_argument("--repository-path", default=".")
+    finalize.add_argument("--owner-token", required=True)
+
     hard_fail = subparsers.add_parser(
         "hard-fail",
         help=(
@@ -915,6 +1070,13 @@ def main() -> None:
             reviewer_logins=args.reviewer_logins,
             approval_logins=args.approval_logins,
             fetch_snapshot=fetch,
+            repository_path=args.repository_path,
+        )
+    elif args.command == "finalize-exhaustion":
+        result = finalize_exhaustion_owned(
+            repository=args.repo,
+            pr_number=args.pr,
+            owner_token=args.owner_token,
             repository_path=args.repository_path,
         )
     elif args.command == "hard-fail":

@@ -85,9 +85,13 @@ Manual recovery of the permanent lock is an explicit human boundary; see
   executor never reserves or consumes again.
 - Unknown or incomplete evidence is never treated as absence.
 - Ambiguous external mutation fails closed and keeps the ownership lock.
-- An active fully-consumed campaign stays scheduled for non-counting
-  asynchronous-lifecycle observation; it is not cleaned just because
-  `rounds_used == max_rounds`.
+- An active fully-consumed campaign with an outstanding current-head request
+  window stays scheduled for non-counting asynchronous-lifecycle observation;
+  it is not cleaned just because `rounds_used == max_rounds`. A successful
+  final remediation with no outstanding request obligation terminalizes
+  `rounds_exhausted` in the same delivery, releases, and only then enters
+  best-effort cleanup; an unattributable reaction never outranks exhaustion
+  when no request window exists.
 - The review-response grace is at least the configured interval and never under
   20 minutes, independent of the scheduler cadence.
 - Discovery metadata never authorizes a live run. Development work on this

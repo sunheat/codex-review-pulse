@@ -1090,8 +1090,11 @@ def decide(campaign: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]
         }
 
     # An applicable Codex reaction without a guard cannot be proven current-head.
-    # This is a non-counting fail-closed wait: no round, no guard, no request.
-    if evidence["unattributable_reactions"]:
+    # With round budget remaining this is a non-counting fail-closed wait: no
+    # round, no guard, no request. Once the budget is exhausted with no request
+    # guard, waiting would repeat forever, so exhaustion takes precedence; the
+    # unattributable reaction still proves neither approval nor review progress.
+    if evidence["unattributable_reactions"] and budget_remaining:
         return {
             "action": "wait_lifecycle_attribution_unknown",
             "reaction_ids": [item["id"] for item in evidence["unattributable_reactions"]],

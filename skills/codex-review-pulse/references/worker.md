@@ -266,20 +266,43 @@ contract); never rebuild a batch from campaign state.
 
    A dirty removal failure is residue; report it and continue.
 
-8. Final release. When every external result of this batch is known and
-   unambiguous (all intended mutations confirmed or definitively failed, and
-   none in flight), release the lock:
+8. Final release and same-delivery exhaustion finalization. When every
+   external result of this batch is known and unambiguous (all intended
+   mutations confirmed or definitively failed, and none in flight):
 
-   ```text
-   python S/lock.py release --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN
-   ```
+   - If the batch completed successfully (every intended mutation confirmed,
+     including targets that were already resolved externally), invoke the
+     finalization boundary exactly once instead of the plain release. It
+     terminalizes `rounds_exhausted` and releases when durable state proves
+     the last allowed round was consumed with no outstanding request
+     obligation:
 
-   A clean unsuccessful attempt (stale or changed evidence prevented some
-   intended work) releases the same way; the round stays consumed. Do not
-   release while any mutation result is ambiguous or unknown. If the release
-   itself fails, do not claim ownership was released and do not clean up the
-   scheduler; report fail closed. A later delivery observes fresh GitHub
-   state; it does not resume this batch or its worktree.
+     ```text
+     python S/owned.py finalize-exhaustion --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN
+     ```
+
+     - `rounds_exhausted_finalized` (`"finalized": true`,
+       `"ownership": "released"`): the campaign durably terminalized and the
+       lock was released. Perform the best-effort Automation cleanup
+       (section 8) once, then stop.
+     - `not_applicable` (`"finalized": false`,
+       `"ownership": "delivery_disposition"`): the budget is not exhausted,
+       an outstanding request window remains, or another terminal result
+       already exists. Perform the ordinary release below and stop.
+     - `local_fail_closed`, `release_unconfirmed`, or
+       `"ownership": "retained"`: stop for [recovery](recovery.md). No
+       cleanup.
+   - Otherwise (a clean unsuccessful attempt: stale or changed evidence
+     prevented some intended work), release the lock directly:
+
+     ```text
+     python S/lock.py release --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN
+     ```
+
+   Do not release while any mutation result is ambiguous or unknown. If a
+   release itself fails, do not claim ownership was released and do not clean
+   up the scheduler; report fail closed. A later delivery observes fresh
+   GitHub state; it does not resume this batch or its worktree.
 
 ## 6. Review request (after `request_committed`)
 
@@ -338,8 +361,9 @@ recurring automation. This is best effort:
 - stale or extra deliveries are safe because terminal and exhausted campaigns
   exit at step 2 without consuming rounds;
 - do not build or call any repository-side scheduler API;
-- an active fully-consumed campaign (`rounds_used == max_rounds`) stays
-  scheduled for non-counting lifecycle observation and must not be cleaned;
+- an active fully-consumed campaign (`rounds_used == max_rounds`) with an
+  outstanding current-head request window stays scheduled for non-counting
+  lifecycle observation and must not be cleaned;
 - a terminal campaign with retained ambiguity is never eligible for cleanup.
 
 ## Forbidden
