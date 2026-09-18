@@ -22,6 +22,7 @@ SCRIPTS = ROOT / "skills" / "codex-review-pulse" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import campaign_model as model  # noqa: E402
+import externalize  # noqa: E402
 import owned  # noqa: E402
 import storage  # noqa: E402
 
@@ -469,6 +470,218 @@ class CommitmentTests(WorkerDecisionFixture):
             outcome = self.decide()
         self.assertEqual(outcome["outcome"], "local_fail_closed")
         self.assertEqual(self.on_disk()["rounds_used"], 0)
+
+
+def raw_thread(
+    thread_id: str,
+    *,
+    login: str = CODEX,
+    resolved: bool = False,
+    root_comment: str | None = None,
+    updated_at: str = T0,
+) -> dict:
+    """A raw S1 thread record with the Phase 3 externalization fields."""
+    return {
+        "id": thread_id,
+        "is_resolved": resolved,
+        "root_login": login,
+        "root_comment_id": root_comment or f"{thread_id}-rc1",
+        "root_updated_at": updated_at,
+        "path": "x.py",
+        "body": "change",
+        "url": f"https://example.test/{thread_id}",
+    }
+
+
+class BatchProjectionTests(WorkerDecisionFixture):
+    """One authoritative remediation batch: directive == projected snapshot.
+
+    Incident regression for the 14-versus-17 authority mismatch: a worker once
+    committed a 14-thread batch but persisted the full 17-thread S1, later
+    scanned the snapshot to enlarge its batch, selected a thread outside the
+    committed directive, and received an unstructured FrozenEvidenceError that
+    retained the ownership lock forever. The projected snapshot now contains
+    exactly the committed targets and nothing else.
+    """
+
+    def raw_snapshot(self) -> dict:
+        return snapshot(
+            threads=[
+                raw_thread("T1"),
+                raw_thread("T2", resolved=True),
+                raw_thread("T3", login="human-reviewer"),
+            ]
+        )
+
+    def read_batch_snapshot(self, outcome: dict) -> dict:
+        return json.loads(Path(outcome["snapshot_path"]).read_text(encoding="utf-8"))
+
+    def test_projection_contains_exactly_the_committed_batch(self) -> None:
+        s1 = self.raw_snapshot()
+        self.fetches = [s1]
+        outcome = self.decide()
+        self.assertEqual(outcome["outcome"], "remediation_committed")
+        # The pure decision selects only the unresolved applicable Codex thread.
+        self.assertEqual([t["id"] for t in outcome["threads"]], ["T1"])
+        written = self.read_batch_snapshot(outcome)
+        self.assertEqual([t["id"] for t in written["threads"]], ["T1"])
+        # The projected entry is the original raw S1 record, not a directive
+        # record: every Phase 3 field is preserved.
+        self.assertEqual(written["threads"][0], s1["threads"][0])
+        self.assertEqual(written["threads"][0]["root_login"], CODEX)
+        self.assertIs(written["threads"][0]["is_resolved"], False)
+        self.assertEqual(written["threads"][0]["root_comment_id"], "T1-rc1")
+        self.assertEqual(written["threads"][0]["root_updated_at"], T0)
+        # Resolved and human threads are not batch targets.
+        self.assertNotIn("T2", [t["id"] for t in written["threads"]])
+        self.assertNotIn("T3", [t["id"] for t in written["threads"]])
+        # One batch-membership representation only: the projection changes
+        # nothing except the threads array itself.
+        self.assertEqual(set(written.keys()), set(s1.keys()))
+        Path(outcome["snapshot_path"]).unlink()
+
+    def test_projection_failure_consumes_no_round(self) -> None:
+        # Two raw records share one ID: the directive would select the ID
+        # twice, so the projection is an internal invariant failure that must
+        # fail closed before the remediation round is consumed.
+        self.fetches = [
+            snapshot(threads=[raw_thread("T1"), raw_thread("T1")])
+        ]
+        outcome = self.decide()
+        self.assertEqual(outcome["outcome"], "local_fail_closed")
+        self.assertEqual(self.on_disk()["rounds_used"], 0)
+
+    def test_empty_directive_target_list_fails_closed(self) -> None:
+        self.fetches = [snapshot()]
+        with unittest.mock.patch.object(
+            model,
+            "decide",
+            return_value={"action": "remediation_batch", "threads": []},
+        ):
+            outcome = self.decide()
+        self.assertEqual(outcome["outcome"], "local_fail_closed")
+        self.assertEqual(self.on_disk()["rounds_used"], 0)
+
+    def test_snapshot_persistence_failure_consumes_no_round(self) -> None:
+        self.fetches = [self.raw_snapshot()]
+        with unittest.mock.patch.object(
+            owned.admission,
+            "write_private_snapshot",
+            side_effect=RuntimeError("disk full"),
+        ):
+            outcome = self.decide()
+        self.assertEqual(outcome["outcome"], "local_fail_closed")
+        self.assertEqual(self.on_disk()["rounds_used"], 0)
+
+    def test_incident_regression_full_s1_cannot_enlarge_or_break_the_batch(self) -> None:
+        # Scaled incident regression: the full S1 holds 5 threads, the
+        # directive commits 3 applicable ones (originally 17 observed versus
+        # 14 committed). The persisted snapshot contains exactly the committed
+        # batch; externalization cannot select the extra S1 threads, extra
+        # threads cannot trigger FrozenEvidenceError during valid batch work,
+        # and a normal clean completion may release ownership.
+        s1 = snapshot(
+            threads=[
+                raw_thread("T1"),
+                raw_thread("T2"),
+                raw_thread("T5"),
+                raw_thread("T3", resolved=True),
+                raw_thread("T4", login="human-reviewer"),
+            ]
+        )
+        self.fetches = [s1]
+        outcome = self.decide()
+        self.assertEqual(outcome["outcome"], "remediation_committed")
+        self.assertEqual(
+            [t["id"] for t in outcome["threads"]], ["T1", "T2", "T5"]
+        )
+        written = self.read_batch_snapshot(outcome)
+        self.assertEqual(
+            [t["id"] for t in written["threads"]], ["T1", "T2", "T5"]
+        )
+
+        def current() -> dict:
+            return snapshot(
+                threads=[
+                    raw_thread("T1"),
+                    raw_thread("T2"),
+                    raw_thread("T5"),
+                    raw_thread("T3", resolved=True),
+                    raw_thread("T4", login="human-reviewer"),
+                ]
+            )
+
+        resolved: list[str] = []
+
+        def resolve_call(tid: str) -> dict:
+            resolved.append(tid)
+            return {"id": tid, "isResolved": True}
+
+        kwargs = dict(
+            repository="owner/repo",
+            pr_number=7,
+            owner_token=self.token,
+            snapshot_path=outcome["snapshot_path"],
+            expected_head=H1,
+            campaign_id=CAMPAIGN_ID,
+            rounds_used=outcome["rounds_used"],
+            repository_path=self.repository_path,
+            fetch_snapshot=current,
+            remote_head_call=lambda ref: H1,
+            list_issues=lambda: [],
+            viewer_call=lambda: "operator",
+            resolve_call=resolve_call,
+        )
+        first = externalize.resolve_review_thread(
+            thread_id="T1", outcome="no_fix_required", **kwargs,
+        )
+        self.assertEqual(first["classification"], "confirmed_success")
+        # A thread that was visible in the full S1 but is outside the
+        # committed batch returns a structured refusal, never a
+        # FrozenEvidenceError authority failure.
+        human = externalize.resolve_review_thread(
+            thread_id="T4", outcome="no_fix_required", **kwargs,
+        )
+        self.assertEqual(human["classification"], "refused")
+        self.assertIn("not part of the committed batch", human["reason"])
+        self.assertEqual(resolved, ["T1"])
+        stale = externalize.ensure_deferred_issue(
+            thread_id="T3",
+            triage_head=H1,
+            title="Deferred",
+            body="Deferred follow-up.",
+            create_issue=lambda title, body: (_ for _ in ()).throw(
+                AssertionError("creation must not run")
+            ),
+            repository="owner/repo",
+            pr_number=7,
+            owner_token=self.token,
+            snapshot_path=outcome["snapshot_path"],
+            campaign_id=CAMPAIGN_ID,
+            rounds_used=outcome["rounds_used"],
+            repository_path=self.repository_path,
+            fetch_snapshot=current,
+            list_issues=lambda: [],
+            viewer_call=lambda: "operator",
+        )
+        self.assertEqual(stale["classification"], "refused")
+        second = externalize.resolve_review_thread(
+            thread_id="T2", outcome="no_fix_required", **kwargs,
+        )
+        third = externalize.resolve_review_thread(
+            thread_id="T5", outcome="no_fix_required", **kwargs,
+        )
+        self.assertEqual(second["classification"], "confirmed_success")
+        self.assertEqual(third["classification"], "confirmed_success")
+        self.assertEqual(resolved, ["T1", "T2", "T5"])
+        # Normal clean completion may release ownership.
+        release = storage.release_lock(
+            "owner/repo", 7, owner_token=self.token,
+            repository_path=self.repository_path,
+        )
+        self.assertTrue(release["released"])
+        self.assertEqual(self.lock_status(), "absent")
+        Path(outcome["snapshot_path"]).unlink()
 
 
 class TerminalConfirmationTests(WorkerDecisionFixture):

@@ -286,6 +286,18 @@ Where reliable owner identity exists, recovery must avoid accidentally clearing 
 After recovery, the next worker starts from fresh authoritative GitHub and Git state.
 It does not resume the prior model's reasoning, frozen batch, or abandoned worktree.
 
+### Retained-lock quarantine
+
+One narrow exception exists for an owned delivery that has already entered a manual-recovery-required outcome while holding the permanent lock.
+When deterministic read-only local verification proves that the delivery's exact owner token still owns the lock, it may make one best-effort pause attempt against its directly self-identified exact native Automation before stopping for manual recovery.
+
+The exact native self identity must come directly from authoritative host metadata for the current delivery; it is never reconstructed through Automation listing, search, naming, or matching, and no repository-side scheduler mechanism is added in its place.
+If the identity is not directly exposed, or the pause attempt is rejected, unsupported, or ambiguous, the delivery reports the limitation, instructs the user to pause the exact Automation manually, and stops.
+
+Quarantine never releases or recovers the lock, never modifies campaign state, never refunds a round, never terminalizes the campaign, never resumes work, and never replaces normal terminal cleanup.
+Later busy deliveries never quarantine.
+Correctness does not depend on quarantine succeeding; the retained permanent lock remains the safety boundary.
+
 ## Round semantics
 
 An effective round is an attempt that commits to one of two external product actions:

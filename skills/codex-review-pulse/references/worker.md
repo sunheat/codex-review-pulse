@@ -43,10 +43,12 @@ python S/owned.py hard-fail --repo OWNER/REPO --pr NUMBER --campaign-id CRPCAMPA
 
 - `{"recorded": true, "ownership": "released", "scheduler_cleanup_authorized": true}`:
   the campaign durably terminalized as `hard_failed` and the entire remaining
-  round budget is forfeited. Do step 8 cleanup once, then stop.
+  round budget is forfeited. Perform the Automation cleanup (section 8) once,
+  then stop.
 - `{"recorded": true, "ownership": "retained", ...}`: the failure state is
-  durable but the release could not be confirmed. Stop for
-  [recovery](recovery.md). No cleanup.
+  durable but the release could not be confirmed. Perform the retained-lock
+  quarantine checks (section 9) only if this handoff acquired the lock, then
+  stop for [recovery](recovery.md). No cleanup.
 - `{"recorded": false, ...}` (busy, invalid, terminal, absent, or mismatched
   acquisition): a non-counting idle exit. Stop. Never claim the campaign was
   modified.
@@ -77,7 +79,8 @@ python S/lock.py inspect --repo OWNER/REPO --pr NUMBER
 - `"active"`: return a successful busy no-op immediately. Do not fetch GitHub,
   read the campaign to diagnose the owner, consume a round, wait, retry,
   steal, infer stale ownership, infer the lock purpose, or perform scheduler
-  cleanup.
+  cleanup. A later busy delivery never quarantines (section 9): it does not
+  hold the retained owner token and cannot know that the current owner failed.
 - `"invalid"`: fail closed with an explicit recovery diagnostic (see
   [recovery](recovery.md)). Do not continue.
 - `"absent"`: continue to step 2.
@@ -107,8 +110,8 @@ best-effort when the delivery ends.
   absence; the next delivery retries observation.
 - If `"campaign_record"` is `"absent"`, stop: this delivery does not match an
   existing campaign.
-- If `"campaign_record"` is `"terminal"` and the lock is absent, do step 8
-  cleanup checks and exit. No round, no lock.
+- If `"campaign_record"` is `"terminal"` and the lock is absent, perform the
+  Automation cleanup checks (section 8) and exit. No round, no lock.
 
 ## 3. Acquire ownership
 
@@ -143,33 +146,45 @@ Follow only a valid structured outcome:
 - `wait_released` or `observation_failed_released`: a non-counting wait or a
   clean observation failure. Ownership is already released; stop.
 - `terminal_released`: the campaign durably terminalized and the lock was
-  released. When `"scheduler_cleanup_authorized"` is `true`, do step 8
-  cleanup; otherwise stop.
+  released. When `"scheduler_cleanup_authorized"` is `true`, perform the
+  Automation cleanup (section 8); otherwise stop.
 - `terminal_retained`: durable-local ambiguity (for example an unresolved
-  RESERVED request attempt). The lock stays held; stop for
-  [recovery](recovery.md). No cleanup.
+  RESERVED request attempt). The lock stays held. Perform the retained-lock
+  quarantine checks (section 9), then stop for [recovery](recovery.md). No
+  cleanup.
 - `remediation_committed`: one remediation round is already durably consumed.
   Perform step 5 with the returned `campaign_id`, `rounds_used`,
-  `snapshot_path` (Python-owned frozen S1 evidence), `expected_head` (H1),
-  and frozen `threads`. Never consume again.
+  `snapshot_path` (Python-owned frozen evidence for the committed batch),
+  `expected_head` (H1), and the committed `threads` enumeration. Never consume
+  again.
 - `request_committed`: the request round and per-head allowance are already
   durably reserved (a RESERVED guard). Perform step 6. Never reserve again.
-- `local_fail_closed`: local authority is in doubt. Stop for
-  [recovery](recovery.md); perform no compensating action.
+- `local_fail_closed`: local authority is in doubt. Perform the retained-lock
+  quarantine checks (section 9), then stop for [recovery](recovery.md); perform
+  no compensating action.
 - Unknown or unparseable boundary result: stop the delivery. The boundary may
   already have completed local transitions, so do not retry it, do not start
   remediation, do not execute a request, do not clean up the scheduler, do not
-  issue another release, and do not reacquire ownership. A later delivery
-  starts through the ordinary path.
+  issue another release, and do not reacquire ownership. Perform the
+  retained-lock quarantine checks (section 9) only when a read-only local check
+  proves this delivery's exact token still owns the lock, then stop for
+  [recovery](recovery.md). A later delivery starts through the ordinary path.
 
 ## 5. Remediation batch (after `remediation_committed`)
 
 The round is already consumed; a crash from here on leaves it consumed and
-never resumes the batch. The frozen S1 snapshot at `snapshot_path` is the
-Python-owned frozen evidence for this delivery: never edit, re-save, or
-reconstruct it. If it is missing, unreadable, or foreign, stop without any
-external mutation and without releasing the lock (explicit-recovery
-contract); never rebuild a batch from campaign state.
+never resumes the batch. The committed `threads` enumeration returned by the
+boundary is this delivery's only target list: work exactly those targets, in
+that order. The Python-owned batch snapshot at `snapshot_path` is the frozen
+evidence for exactly those targets and nothing else — its `threads` array
+corresponds one-for-one with the committed enumeration. Never scan the
+snapshot to discover additional work: a thread that is not in the committed
+enumeration is not part of this batch and waits for a later delivery. Never
+edit, re-save, or reconstruct the snapshot, and never rebuild a batch from
+campaign state. If the snapshot is missing, unreadable, or foreign, stop
+without any external mutation: perform the retained-lock quarantine checks
+(section 9) only if the exact owner token verifiably still owns the lock, then
+stop for explicit recovery.
 
 1. Prepare an isolated worktree:
 
@@ -180,8 +195,9 @@ contract); never rebuild a batch from campaign state.
 
    Never edit the user's primary worktree.
 
-2. For each frozen thread, inspect its exact comment and the relevant code in
-   the worktree, then classify it as exactly one outcome:
+2. For each committed target in the `threads` enumeration, inspect its exact
+   comment and the relevant code in the worktree, then classify it as exactly
+   one outcome:
    - **Fix now** — implement the smallest correct change and run focused
      validation (tests/type checks appropriate to the repository).
    - **Fix later** — draft a concise issue title and body.
@@ -208,8 +224,9 @@ contract); never rebuild a batch from campaign state.
      may still proceed against H1 through their own boundaries. The round
      stays consumed. Remove the abandoned worktree as residue without
      resuming it.
-   - `refused`: evidence changed before any mutation. Do not resolve the
-     affected threads; continue independent work or end the attempt cleanly.
+   - `refused`: a pre-mutation refusal (changed evidence or an invalid target
+     selection). No mutation is ambiguous. Do not retry the same selection;
+     continue independent work or end the attempt cleanly.
    - `ambiguous`: fail closed. Keep the lock, report the local commit and
      remote state, and exit for manual recovery. No retry, no second push.
 
@@ -234,8 +251,8 @@ contract); never rebuild a batch from campaign state.
 
    - `confirmed_success` with `action: reused` or `action: created`: keep the
      returned `issue_number` for resolution.
-   - `refused`: prerequisites changed; create nothing, resolve nothing for
-     that thread.
+   - `refused`: a pre-mutation refusal; nothing was created and nothing is
+     ambiguous for that target. Do not retry the same selection.
    - `ambiguous`: keep the lock and stop for manual recovery. No second
      creation attempt.
 
@@ -257,6 +274,19 @@ contract); never rebuild a batch from campaign state.
 
    Never resolve human or unknown-author threads; the boundaries refuse them.
    Never post an explanatory comment merely as an audit trail.
+
+   A structured `refused` result is a pre-mutation caller-selection rejection:
+   nothing was mutated, nothing is ambiguous, and the refusal alone never
+   forces retained-lock recovery. Do not retry the same invalid selection;
+   continue independent targets when safe, and when all possible batch work is
+   done follow the clean-unsuccessful release rules in step 8. The round stays
+   consumed.
+
+   A frozen-evidence or authority failure (a fail-closed `FrozenEvidenceError`
+   from a boundary, or a missing, foreign, or inconsistent batch snapshot) is
+   different: stop all further externalization for the batch, perform the
+   retained-lock quarantine checks (section 9) only when the exact owner token
+   verifiably still owns the lock, and require explicit recovery.
 
 7. Remove the temporary worktree:
 
@@ -290,8 +320,9 @@ contract); never rebuild a batch from campaign state.
        an outstanding request window remains, or another terminal result
        already exists. Perform the ordinary release below and stop.
      - `local_fail_closed`, `release_unconfirmed`, or
-       `"ownership": "retained"`: stop for [recovery](recovery.md). No
-       cleanup.
+       `"ownership": "retained"`: perform the retained-lock quarantine checks
+       (section 9) only where this delivery's exact token verifiably still
+       owns the lock, then stop for [recovery](recovery.md). No cleanup.
    - Otherwise (a clean unsuccessful attempt: stale or changed evidence
      prevented some intended work), release the lock directly:
 
@@ -326,10 +357,11 @@ is the actual completed disposition.
 - `invalidated`: conditions changed before the POST; no post happened. The
   round and guard are retained by design.
 - `creation_failed` (terminal) and `unbracketed` (terminal manual
-  intervention): do step 8 cleanup.
+  intervention): perform the Automation cleanup (section 8).
 - `ambiguous`, `local_fail_closed`, or `ownership: retained` /
-  `release_unconfirmed`: **keep the lock** and stop for manual recovery. No
-  retry, no second POST.
+  `release_unconfirmed`: **keep the lock**; perform the retained-lock
+  quarantine checks (section 9), then stop for manual recovery. No retry, no
+  second POST.
 
 ## 7. Ownership disposition
 
@@ -340,7 +372,8 @@ instead of releasing speculatively.
 - Remediation boundaries never release; the delivery performs the final
   release only after all external work is known complete (step 5.8).
 - Any `ambiguous` or unknown result retains the lock until explicit human
-  recovery.
+  recovery; route it through the retained-lock quarantine checks (section 9)
+  after all product mutation has stopped.
 
 ## 8. Best-effort native Automation cleanup
 
@@ -365,6 +398,86 @@ recurring automation. This is best effort:
   outstanding current-head request window stays scheduled for non-counting
   lifecycle observation and must not be cleaned;
 - a terminal campaign with retained ambiguity is never eligible for cleanup.
+
+## 9. Retained-lock quarantine (manual-recovery exits)
+
+Quarantine is a narrow scheduler behavior for a delivery that has already
+entered a manual-recovery-required outcome while owning the permanent lock. It
+is distinct from the terminal cleanup of section 8: it never releases or
+recovers the lock, never modifies campaign state, never refunds a round, never
+terminalizes the campaign, never resumes work, and never replaces normal
+cleanup. Correctness never depends on quarantine succeeding; if it is
+unavailable or fails, recurring busy no-ops may continue until the operator
+pauses the Automation manually.
+
+Eligibility is narrow. Only the delivery that acquired the permanent lock and
+encountered the retained failure may quarantine. The startup busy fast path,
+pre-lock admission failures, clean waits, clean unsuccessful attempts after a
+confirmed release, and normal terminal cleanup never quarantine; a later busy
+delivery cannot quarantine because it does not hold the retained owner token
+and cannot know that the current owner failed.
+
+Eligible exits (after product mutation has stopped and every mutation-capable
+child or subprocess of this delivery has stopped or completed):
+
+- a structured external mutation result classified `ambiguous`;
+- a `terminal_retained` outcome;
+- `release_unconfirmed`, when local verification proves this exact token still
+  owns the lock;
+- missing, malformed, or unusable frozen batch evidence after remediation
+  commitment;
+- a fail-closed externalization error after ownership acquisition;
+- an unknown boundary result when a subsequent read-only local check proves
+  this delivery's exact token still owns the permanent lock;
+- another post-acquisition manual-recovery-required failure.
+
+Before any quarantine attempt, verify all of the following:
+
+1. all product mutation has stopped;
+2. deterministic read-only local verification proves this delivery's exact
+   owner token still owns the permanent lock:
+
+   ```text
+   python S/lock.py verify --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN
+   ```
+
+   If this exact token no longer owns the lock, perform no quarantine and
+   stop;
+3. the current campaign identity matches this delivery's campaign;
+4. the native host directly exposes an authoritative exact identity or handle
+   for the Automation that invoked THIS delivery.
+
+The native self identity must come directly from authoritative
+current-delivery host metadata. Repository state, campaign state, prompt text,
+local configuration, model reasoning, and search results are not substitutes.
+Never discover the Automation by listing, searching, or matching other
+Automations — no deterministic naming, inventory enumeration, campaign-ID
+search, repository/PR matching, project/folder matching, prompt comparison,
+interval/model/reasoning matching, newest-candidate selection, unique-candidate
+reconstruction, or fuzzy matching, and no persisted Automation ID or scheduler
+lookup adapter.
+
+If the exact native self identity is not directly exposed: perform no
+Automation mutation, keep the campaign and permanent lock unchanged, report
+that automatic quarantine is unavailable, instruct the operator to pause the
+exact Automation manually, and stop.
+
+With the exact self identity exposed, make at most one best-effort pause
+attempt against that exact Automation. Pause only — never delete, never
+retry, never wait and poll, never turn a timeout into a delete.
+
+- Confirmed paused: report that the exact current Automation was quarantined,
+  keep the campaign and lock, stop for explicit recovery.
+- Definitive pause rejection or unsupported pause: report that quarantine was
+  rejected or unavailable, keep the campaign and lock, instruct the operator
+  to pause the exact Automation manually, stop.
+- Ambiguous, timed-out, or unparseable pause result: report that pause state
+  is unknown, do not retry, do not delete, keep the campaign and lock,
+  instruct the operator to inspect the exact Automation manually, stop.
+
+In every case the retained permanent lock remains the safety boundary, the
+campaign stays unchanged, and explicit human recovery is still required (see
+[recovery](recovery.md)).
 
 ## Forbidden
 

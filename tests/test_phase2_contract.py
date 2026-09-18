@@ -477,6 +477,180 @@ class RecoveryDocumentationTests(unittest.TestCase):
         self.assertIn("--expected-campaign-id C2", recovery)
 
 
+def _collapsed(path: Path) -> str:
+    """Document text with all whitespace runs collapsed to single spaces."""
+    return " ".join(_read(path).split())
+
+
+class BatchMembershipContractTests(unittest.TestCase):
+    """One authoritative batch: the committed directive is the only target list."""
+
+    def test_projection_is_the_persisted_remediation_snapshot(self) -> None:
+        source = (SCRIPTS / "owned.py").read_text(encoding="utf-8")
+        self.assertIn("model.project_remediation_batch(s1", source)
+        model_source = (SCRIPTS / "campaign_model.py").read_text(encoding="utf-8")
+        self.assertIn("def project_remediation_batch", model_source)
+        self.assertIn("result[\"threads\"] = projected", model_source)
+
+    def test_worker_guide_names_the_only_target_enumeration(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn("only target list", worker)
+        self.assertIn("Never scan the snapshot to discover additional work", worker)
+        self.assertIn("waits for a later delivery", worker)
+        self.assertIn("never rebuild a batch from campaign state", worker)
+
+    def test_skill_contract_states_the_projection_invariant(self) -> None:
+        skill = _collapsed(REFERENCES.parent / "SKILL.md")
+        self.assertIn("only target list", skill)
+        self.assertIn("no second membership", skill)
+        self.assertIn("never scans the snapshot to enlarge the batch", skill)
+
+    def test_projection_adds_no_second_membership_representation(self) -> None:
+        model_source = (SCRIPTS / "campaign_model.py").read_text(encoding="utf-8")
+        for marker in (
+            "batch_id", "batch_ids", "batch_scope", "membership_manifest",
+            "batch_marker",
+        ):
+            self.assertNotIn(marker, model_source, marker)
+
+
+class StructuredRefusalContractTests(unittest.TestCase):
+    """Caller target-selection refusals are pre-mutation structured results."""
+
+    def test_externalize_defines_exactly_the_selection_error(self) -> None:
+        source = (SCRIPTS / "externalize.py").read_text(encoding="utf-8")
+        self.assertIn("class TargetSelectionError(ValueError)", source)
+        self.assertIn("not part of the committed batch", source)
+        self.assertIn("no Fix-now target was selected", source)
+        self.assertIn("duplicate target IDs", source)
+
+    def test_invalid_outcome_stays_outside_the_refusal_taxonomy(self) -> None:
+        source = (SCRIPTS / "externalize.py").read_text(encoding="utf-8")
+        self.assertIn("Unknown remediation outcome", source)
+        self.assertNotIn('"maybe_someday"', source)
+
+    def test_refusals_do_not_force_retained_lock_recovery(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn("the refusal alone never forces retained-lock recovery", worker)
+        self.assertIn("follow the clean-unsuccessful release rules", worker)
+        skill = _collapsed(REFERENCES.parent / "SKILL.md")
+        self.assertIn("never by itself forces retained-lock recovery", skill)
+
+    def test_frozen_evidence_failures_remain_fail_closed(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn("stop all further externalization for the batch", worker)
+        self.assertIn("require explicit recovery", worker)
+        skill = _collapsed(REFERENCES.parent / "SKILL.md")
+        self.assertIn("still fails closed", skill)
+
+
+class RetainedLockQuarantineContractTests(unittest.TestCase):
+    """Quarantine is a narrow pause-only exception, never recovery machinery."""
+
+    def test_quarantine_is_documented_as_distinct_from_terminal_cleanup(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn("## 9. Retained-lock quarantine (manual-recovery exits)", worker)
+        self.assertIn("distinct from the terminal cleanup of section 8", worker)
+
+    def test_no_quarantine_python_boundary_exists(self) -> None:
+        for path in SCRIPTS.glob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("quarantine", text, path.name)
+        for forbidden_token in (
+            "automation_handle", "automation_pause", "pause_automation",
+            "quarantine_state",
+        ):
+            for path in SCRIPTS.glob("*.py"):
+                self.assertNotIn(forbidden_token, path.read_text(encoding="utf-8"),
+                                 f"{path.name}: {forbidden_token}")
+
+    def test_startup_busy_delivery_never_quarantines(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn("A later busy delivery never quarantines (section 9)", worker)
+
+    def test_only_the_original_exact_retained_owner_may_quarantine(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn(
+            "Only the delivery that acquired the permanent lock and encountered "
+            "the retained failure may quarantine",
+            worker,
+        )
+        self.assertIn("does not hold the retained owner token", worker)
+
+    def test_read_only_owner_token_verification_precedes_quarantine(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn("lock.py verify", worker)
+        self.assertIn("If this exact token no longer owns the lock", worker)
+
+    def test_direct_authoritative_native_self_identity_is_mandatory(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn(
+            "authoritative exact identity or handle",
+            worker,
+        )
+        self.assertIn(
+            "must come directly from authoritative current-delivery host metadata",
+            worker,
+        )
+        self.assertIn("perform no Automation mutation", worker)
+
+    def test_no_automation_discovery_or_matching_is_introduced(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn("Never discover the Automation by listing", worker)
+        for forbidden in (
+            "deterministic naming", "inventory enumeration", "campaign-ID search",
+            "prompt comparison", "fuzzy matching", "newest-candidate selection",
+            "persisted Automation ID", "scheduler lookup adapter",
+        ):
+            self.assertIn(forbidden, worker, forbidden)
+
+    def test_pause_is_the_only_quarantine_mutation_and_happens_once(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn("at most one best-effort pause attempt", worker)
+        self.assertIn("Pause only", worker)
+        # No delete fallback on any pause outcome.
+        self.assertIn("never delete", worker)
+        self.assertIn("do not retry, do not delete", worker)
+        self.assertIn("never turn a timeout into a delete", worker)
+
+    def test_quarantine_changes_no_campaign_round_lock_or_recovery(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn(
+            "never releases or recovers the lock, never modifies campaign state, "
+            "never refunds a round, never terminalizes the campaign, never "
+            "resumes work, and never replaces normal cleanup",
+            worker,
+        )
+        self.assertIn("Correctness never depends on quarantine succeeding", worker)
+
+    def test_manual_pause_fallback_is_documented(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn(
+            "instruct the operator to pause the exact Automation manually", worker
+        )
+
+    def test_recovery_documents_paused_automation_states_and_explicit_resume(self) -> None:
+        recovery = _collapsed(REFERENCES / "recovery.md")
+        for state in (
+            "confirmed paused", "not paused", "unknown pause state", "untouched",
+        ):
+            self.assertIn(state, recovery, state)
+        self.assertIn("explicitly resume the same exact Automation", recovery)
+        self.assertIn("is not an automatic resume", recovery)
+        self.assertIn(
+            "only after campaign authority is removed", recovery,
+        )
+
+    def test_agents_contract_records_only_the_high_level_boundary(self) -> None:
+        agents = _collapsed(ROOT / "AGENTS.md")
+        self.assertIn("### Retained-lock quarantine", agents)
+        self.assertIn("one best-effort pause attempt", agents)
+        self.assertIn("Later busy deliveries never quarantine", agents)
+        self.assertIn("Correctness does not depend on quarantine succeeding", agents)
+        # The detailed procedure stays in the worker guide, not the contract.
+        self.assertNotIn("lock.py verify", agents)
+
+
 class ExclusivePathTests(unittest.TestCase):
     def test_worker_guide_uses_owned_boundary_exclusively(self) -> None:
         worker = _read(REFERENCES / "worker.md")

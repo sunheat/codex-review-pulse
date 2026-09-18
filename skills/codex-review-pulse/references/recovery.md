@@ -26,6 +26,26 @@ refund rounds or restore a per-head review-request allowance. The next delivery
 starts from fresh authoritative GitHub and Git state. It does not resume an
 interrupted batch, worktree, or reasoning.
 
+## Retained-lock quarantine states
+
+The original owning delivery may have attempted a best-effort quarantine
+before stopping (see the worker guide, section 9). The bound native Automation
+may therefore be in any of these states:
+
+- **confirmed paused** by the original delivery's single pause attempt;
+- **not paused**, because automatic quarantine was unavailable or the pause
+  attempt was definitively rejected;
+- **unknown pause state**, because the pause attempt timed out or returned an
+  unparseable result;
+- **untouched**, because the host never exposed an exact native self identity.
+
+The quarantine never releases or recovers the lock, never modifies the
+campaign, and never refunds a round. Before any recovery, you must still
+establish that the previous owner and every mutation-capable child or
+in-flight operation can no longer continue; a paused Automation is one
+possible quiescence signal, but an unknown or unpaused state means you must
+establish quiescence by the existing rules.
+
 ## Recover
 
 ```text
@@ -90,6 +110,22 @@ durable campaign state.
 There is no automatic choice between resume and retirement. If you want to
 stop all deliveries, also pause or delete the bound native Codex Automation
 using the Codex app controls.
+
+**When preserving an active campaign** (where the rules above permit a
+lock-only recovery as a resume):
+
+1. inspect the exact native Automation and establish that continuation is
+   safe;
+2. recover the exact permanent lock using the identity rules above;
+3. explicitly resume the same exact Automation if the quarantine paused it —
+   an explicitly resumed Automation is not an automatic resume;
+4. never refund a consumed round and never resume abandoned in-memory
+   reasoning, a frozen batch, or an abandoned worktree; the next delivery
+   starts from fresh authoritative state.
+
+**When abandoning the campaign**: perform the explicit campaign retirement
+below; only after campaign authority is removed, delete or otherwise clean the
+exact native Automation best effort using the Codex app controls.
 
 ## Campaign retirement
 

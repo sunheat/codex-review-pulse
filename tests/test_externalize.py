@@ -293,8 +293,9 @@ class FrozenEvidenceAuthorityTests(ExternalizeTests):
                 self.assertNotIn(forbidden, parameters, boundary.__name__)
 
     def test_empty_fix_now_selection_is_refused(self) -> None:
-        with self.assertRaises(externalize.FrozenEvidenceError):
-            self.publish(thread_ids=[])
+        result = self.publish(thread_ids=[])
+        self.assertEqual(result["classification"], "refused")
+        self.assertIn("no Fix-now target", result["reason"])
 
 
 # ---------------------------------------------------------------------------
@@ -843,6 +844,207 @@ class ResolveReviewThreadTests(ExternalizeTests):
     def test_unknown_outcome_is_refused(self) -> None:
         with self.assertRaises(RuntimeError):
             self.resolve(outcome="maybe_someday")
+
+
+# ---------------------------------------------------------------------------
+# Caller target-selection refusals (never authority failures)
+
+
+class TargetSelectionRefusalTests(ExternalizeTests):
+    """The three defined caller target-selection mistakes refuse pre-mutation.
+
+    Incident context: a worker once selected a thread outside the committed
+    batch and received an unstructured FrozenEvidenceError, treating a target
+    mistake as an unrecoverable authority failure and retaining the lock
+    forever. A structured refusal proves no mutation began.
+    """
+
+    def test_outside_batch_publish_target_refuses_atomically(self) -> None:
+        attempts: list[dict] = []
+        original = externalize.gitlocal.publish_batch
+        externalize.gitlocal.publish_batch = lambda **kw: attempts.append(kw) or {}
+        try:
+            result = self.publish(thread_ids=["T1", "T9"])
+        finally:
+            externalize.gitlocal.publish_batch = original
+        self.assertEqual(result["classification"], "refused")
+        self.assertIn("not part of the committed batch", result["reason"])
+        self.assertEqual(attempts, [])
+
+    def test_outside_batch_issue_target_refuses_without_creation(self) -> None:
+        result, created = self.ensure_issue(thread_id="T9")
+        self.assertEqual(result["classification"], "refused")
+        self.assertIn("not part of the committed batch", result["reason"])
+        self.assertEqual(created, [])
+
+    def test_outside_batch_resolve_target_refuses_without_resolution(self) -> None:
+        result, resolved = self.resolve(thread_id="T9")
+        self.assertEqual(result["classification"], "refused")
+        self.assertIn("not part of the committed batch", result["reason"])
+        self.assertEqual(resolved, [])
+
+    def test_duplicate_publish_targets_refuse_before_any_mutation(self) -> None:
+        attempts: list[dict] = []
+        original = externalize.gitlocal.publish_batch
+        externalize.gitlocal.publish_batch = lambda **kw: attempts.append(kw) or {}
+        try:
+            result = self.publish(thread_ids=["T1", "T1"])
+        finally:
+            externalize.gitlocal.publish_batch = original
+        self.assertEqual(result["classification"], "refused")
+        self.assertIn("duplicate target IDs", result["reason"])
+        self.assertEqual(attempts, [])
+
+    def test_missing_frozen_snapshot_remains_fail_closed(self) -> None:
+        with self.assertRaises(externalize.FrozenEvidenceError):
+            self.publish(snapshot_path=self.fixture.path / "missing.json")
+        with self.assertRaises(externalize.FrozenEvidenceError):
+            self.ensure_issue(snapshot_path=self.fixture.path / "missing.json")
+
+    def test_incomplete_frozen_snapshot_remains_fail_closed(self) -> None:
+        broken = self.frozen
+        broken["complete"] = False
+        self.fixture.write_frozen(broken)
+        with self.assertRaises(externalize.FrozenEvidenceError):
+            self.publish()
+
+    def test_foreign_frozen_snapshot_remains_fail_closed(self) -> None:
+        self.fixture.write_frozen(snapshot(repository="other/repo"))
+        with self.assertRaises(externalize.FrozenEvidenceError):
+            self.publish()
+        with self.assertRaises(externalize.FrozenEvidenceError):
+            self.ensure_issue()
+
+    def test_malformed_frozen_identity_remains_fail_closed(self) -> None:
+        broken = thread()
+        del broken["root_comment_id"]
+        self.fixture.write_frozen(snapshot(threads=[broken]))
+        with self.assertRaises(externalize.FrozenEvidenceError):
+            self.publish()
+
+    def test_resolved_record_inside_batch_is_an_invariant_failure(self) -> None:
+        # A repaired batch projection never contains a resolved record; finding
+        # one is corrupt frozen evidence, not a caller typo.
+        self.fixture.write_frozen(snapshot(threads=[thread(resolved=True)]))
+        with self.assertRaises(externalize.FrozenEvidenceError):
+            self.publish()
+        with self.assertRaises(externalize.FrozenEvidenceError):
+            self.resolve()
+
+    def test_non_applicable_author_inside_batch_is_an_invariant_failure(self) -> None:
+        self.fixture.write_frozen(snapshot(threads=[thread(author="human-reviewer")]))
+        with self.assertRaises(externalize.FrozenEvidenceError):
+            self.ensure_issue()
+
+    def test_invalid_outcome_stays_a_programmer_error(self) -> None:
+        with self.assertRaises(RuntimeError):
+            self.resolve(outcome="maybe_someday")
+
+    def test_freshly_resolved_target_follows_already_resolved_behavior(self) -> None:
+        result, resolved = self.resolve(
+            current=snapshot(threads=[thread(resolved=True)]),
+        )
+        self.assertEqual(result["classification"], "confirmed_success")
+        self.assertTrue(result["already_resolved"])
+        self.assertEqual(resolved, [])
+
+
+# ---------------------------------------------------------------------------
+# Documented CLI surface
+
+
+class CliParserRepairTests(unittest.TestCase):
+    """Every subcommand inherits the common options (incident: argparse defect).
+
+    The documented forms place the common options after the subcommand; a
+    missing parents=[common] inheritance rejected every documented command and
+    pushed a worker into bypassing the CLI via direct imports.
+    """
+
+    COMMON = ["--repo", "owner/repo", "--pr", "7", "--repository-path", "."]
+
+    def documented_argv(self, command: str, extra: list[str]) -> list[str]:
+        return (
+            [command]
+            + self.COMMON
+            + ["--owner-token", "tok", "--snapshot", "missing.json",
+               "--campaign-id", "crp-20260914T120000Z-abc123", "--rounds-used", "1"]
+            + extra
+        )
+
+    def test_every_subcommand_parses_its_documented_argv(self) -> None:
+        import externalize
+
+        cases = {
+            "publish-fix-now": [
+                "--thread-id", "T1", "--expected-head", "h1",
+                "--worktree", "wt", "--path", "src/a.py", "--message", "m",
+            ],
+            "ensure-issue": [
+                "--thread-id", "T1", "--expected-head", "h1",
+                "--title", "t", "--body-file", "body.md",
+            ],
+            "resolve-thread": [
+                "--thread-id", "T1", "--expected-head", "h1",
+                "--outcome", "no_fix_required",
+            ],
+        }
+        for command, extra in cases.items():
+            args = externalize.build_parser().parse_args(
+                self.documented_argv(command, extra)
+            )
+            self.assertEqual(args.command, command)
+            self.assertEqual(args.repo, "owner/repo")
+            self.assertEqual(args.pr, 7)
+            self.assertEqual(args.repository_path, ".")
+            self.assertEqual(args.owner_token, "tok")
+            self.assertEqual(args.campaign_id, "crp-20260914T120000Z-abc123")
+            self.assertEqual(args.rounds_used, 1)
+
+    def test_subcommand_help_shows_the_common_options(self) -> None:
+        script = str(SCRIPTS / "externalize.py")
+        for command in ("publish-fix-now", "ensure-issue", "resolve-thread"):
+            process = subprocess.run(
+                [sys.executable, script, command, "--help"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(process.returncode, 0, command)
+            for option in (
+                "--repo", "--pr", "--repository-path", "--owner-token",
+                "--snapshot", "--campaign-id", "--rounds-used",
+            ):
+                self.assertIn(option, process.stdout, f"{command}: {option}")
+
+    def test_subprocess_documented_invocation_is_not_rejected(self) -> None:
+        # A full documented argv must reach the boundary itself (which then
+        # fails closed on the missing frozen evidence), never the argparse
+        # "unrecognized arguments" rejection.
+        body = SCRIPTS.parent / "references" / "worker.md"
+        cases = {
+            "publish-fix-now": [
+                "--thread-id", "T1", "--expected-head", "h1",
+                "--worktree", "wt", "--path", "src/a.py", "--message", "m",
+            ],
+            "ensure-issue": [
+                "--thread-id", "T1", "--expected-head", "h1",
+                "--title", "t", "--body-file", str(body),
+            ],
+            "resolve-thread": [
+                "--thread-id", "T1", "--expected-head", "h1",
+                "--outcome", "no_fix_required",
+            ],
+        }
+        script = str(SCRIPTS / "externalize.py")
+        for command, extra in cases.items():
+            process = subprocess.run(
+                [sys.executable, script, *self.documented_argv(command, extra)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(process.returncode, 1, command)
+            self.assertIn("Frozen evidence does not exist", process.stderr, command)
+            self.assertNotIn("unrecognized arguments", process.stderr, command)
 
 
 # ---------------------------------------------------------------------------

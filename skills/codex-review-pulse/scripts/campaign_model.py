@@ -769,6 +769,53 @@ def applicable_unresolved_threads(
     return threads
 
 
+def project_remediation_batch(
+    snapshot: dict[str, Any], directive_threads: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Project the frozen S1 observation to exactly the committed batch.
+
+    The returned snapshot preserves every top-level evidence field but its
+    ``threads`` array contains exactly the raw frozen records of the selected
+    directive targets, in directive order. This projection is the single
+    batch-membership representation: the committed directive enumeration and
+    the persisted snapshot must correspond one-for-one, so a worker can never
+    enlarge its batch by scanning the snapshot. A missing or duplicate raw
+    mapping for any selected ID is an internal invariant failure and fails
+    closed before the remediation round is consumed.
+    """
+    if not isinstance(directive_threads, list) or not directive_threads:
+        raise ValueError("remediation directive selects no target")
+    raw = snapshot.get("threads")
+    if not isinstance(raw, list):
+        raise ValueError("observation has no thread evidence array")
+    selected_ids: list[str] = []
+    for record in directive_threads:
+        if not isinstance(record, dict) or not isinstance(record.get("id"), str):
+            raise ValueError("remediation directive contains a malformed target")
+        selected_ids.append(record["id"])
+    if len(set(selected_ids)) != len(selected_ids):
+        raise ValueError("remediation directive selects a duplicate target ID")
+    by_id: dict[str, list[dict[str, Any]]] = {}
+    for record in raw:
+        if isinstance(record, dict) and isinstance(record.get("id"), str):
+            by_id.setdefault(record["id"], []).append(record)
+    projected: list[dict[str, Any]] = []
+    for thread_id in selected_ids:
+        matches = by_id.get(thread_id)
+        if not matches:
+            raise ValueError(
+                f"selected target has no raw frozen record: {thread_id}"
+            )
+        if len(matches) > 1:
+            raise ValueError(
+                f"selected target matches multiple raw frozen records: {thread_id}"
+            )
+        projected.append(matches[0])
+    result = dict(snapshot)
+    result["threads"] = projected
+    return result
+
+
 def _temporal_floor(guard: dict[str, Any] | None) -> str | None:
     """Authoritative timestamp an event must strictly follow to be eligible.
 

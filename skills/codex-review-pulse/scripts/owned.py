@@ -526,7 +526,9 @@ def run_worker_decision(
 
     if action == "remediation_batch":
         try:
-            snapshot_path = admission.write_private_snapshot(s1)
+            snapshot_path = admission.write_private_snapshot(
+                model.project_remediation_batch(s1, directive["threads"])
+            )
         except Exception as error:  # noqa: BLE001 - fail closed before commitment
             return _fail_closed(
                 "could not persist the owned decision snapshot: "

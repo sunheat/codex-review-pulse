@@ -21,10 +21,17 @@ external mutation attempt; classify the result (``confirmed_success``,
 ``definitive_failure``, ``ambiguous``, or a pre-mutation ``refused``); and
 return one closed structured outcome.
 
+Caller-controlled target-selection mistakes (a selected ID outside the
+committed batch, an empty Fix-now selection, duplicate target IDs) return a
+pre-mutation structured ``refused`` result: no mutation began, nothing is
+ambiguous, and the refusal alone never requires retained-lock recovery. Damaged
+or inconsistent frozen evidence still fails closed through
+``FrozenEvidenceError``.
+
 No boundary consumes a round, reserves a request, reconstructs a lost batch
 from campaign state, or retries after an ambiguous result. The committed
 remediation handoff is delivery-local and ephemeral: the caller must pass the
-exact ``remediation_committed`` campaign id, round count, and the S1 snapshot
+exact ``remediation_committed`` campaign id, round count, and the batch snapshot
 path that received the structured result. Missing, malformed, or incomplete
 frozen evidence grants no mutation authority.
 """
@@ -51,6 +58,15 @@ OUTCOMES = ("fix_now", "fix_later", "no_fix_required")
 
 class FrozenEvidenceError(RuntimeError):
     """The delivery-local frozen evidence is absent, malformed, or foreign."""
+
+
+class TargetSelectionError(ValueError):
+    """A caller-selected target is invalid; the requested mutation never began.
+
+    Limited to caller-controlled target-selection mistakes: a selected ID
+    outside the committed batch. This is a pre-mutation structured refusal, not
+    a frozen-evidence authority failure.
+    """
 
 
 def load_frozen_evidence(snapshot_path: str | Path) -> dict[str, Any]:
@@ -85,8 +101,8 @@ def _frozen_thread(snapshot: dict[str, Any], thread_id: str) -> dict[str, Any]:
         None,
     )
     if thread is None:
-        raise FrozenEvidenceError(
-            f"Thread is not part of the frozen batch: {thread_id}"
+        raise TargetSelectionError(
+            f"Target is not part of the committed batch: {thread_id}"
         )
     if thread.get("is_resolved") is True:
         raise FrozenEvidenceError(f"Frozen thread is already resolved: {thread_id}")
@@ -269,7 +285,17 @@ def publish_fix_now(
             "Frozen evidence head does not match the expected publication head"
         )
     if not thread_ids:
-        raise FrozenEvidenceError("No Fix-now target was selected for publication")
+        return _result(
+            "publish_fix_now",
+            "refused",
+            reason="no Fix-now target was selected for publication",
+        )
+    if len(set(thread_ids)) != len(thread_ids):
+        return _result(
+            "publish_fix_now",
+            "refused",
+            reason="duplicate target IDs in the Fix-now selection",
+        )
     campaign = _establish_authority(
         repository,
         pr_number,
@@ -279,7 +305,10 @@ def publish_fix_now(
         rounds_used=rounds_used,
     )
     reviewers = set(campaign["config"]["reviewer_logins"])
-    targets = [_frozen_thread(frozen, thread_id) for thread_id in thread_ids]
+    try:
+        targets = [_frozen_thread(frozen, thread_id) for thread_id in thread_ids]
+    except TargetSelectionError as error:
+        return _result("publish_fix_now", "refused", reason=str(error))
     for target in targets:
         if target["root_author"] not in reviewers:
             raise FrozenEvidenceError(
@@ -495,7 +524,10 @@ def ensure_deferred_issue(
         campaign_id=campaign_id,
         rounds_used=rounds_used,
     )
-    target = _frozen_thread(frozen, thread_id)
+    try:
+        target = _frozen_thread(frozen, thread_id)
+    except TargetSelectionError as error:
+        return _result("ensure_deferred_issue", "refused", reason=str(error))
     if target["root_author"] not in set(campaign["config"]["reviewer_logins"]):
         raise FrozenEvidenceError(
             f"Frozen thread root author is not an applicable Codex identity: {thread_id}"
@@ -672,7 +704,10 @@ def resolve_review_thread(
         campaign_id=campaign_id,
         rounds_used=rounds_used,
     )
-    target = _frozen_thread(frozen, thread_id)
+    try:
+        target = _frozen_thread(frozen, thread_id)
+    except TargetSelectionError as error:
+        return _result("resolve_review_thread", "refused", reason=str(error))
     if target["root_author"] not in set(campaign["config"]["reviewer_logins"]):
         raise FrozenEvidenceError(
             f"Frozen thread root author is not an applicable Codex identity: {thread_id}"
@@ -846,7 +881,8 @@ def _classify_resolution_failure(
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the documented CLI; every subparser inherits the common options."""
     parser = argparse.ArgumentParser(
         description=(
             "Phase 3 externalization boundaries for committed remediation "
@@ -865,7 +901,9 @@ def main() -> None:
     common.add_argument("--rounds-used", required=True, type=int)
 
     publish = subparsers.add_parser(
-        "publish-fix-now", help="One-commit one-push Fix-now publication"
+        "publish-fix-now",
+        help="One-commit one-push Fix-now publication",
+        parents=[common],
     )
     publish.add_argument("--thread-id", action="append", required=True, dest="thread_ids")
     publish.add_argument("--expected-head", required=True)
@@ -874,7 +912,9 @@ def main() -> None:
     publish.add_argument("--message", required=True)
 
     issue = subparsers.add_parser(
-        "ensure-issue", help="Reuse or create the deferred Fix-later issue"
+        "ensure-issue",
+        help="Reuse or create the deferred Fix-later issue",
+        parents=[common],
     )
     issue.add_argument("--thread-id", required=True)
     issue.add_argument("--expected-head", required=True)
@@ -882,7 +922,9 @@ def main() -> None:
     issue.add_argument("--body-file", required=True, type=Path)
 
     resolve = subparsers.add_parser(
-        "resolve-thread", help="Resolve one independently validated review thread"
+        "resolve-thread",
+        help="Resolve one independently validated review thread",
+        parents=[common],
     )
     resolve.add_argument("--thread-id", required=True)
     resolve.add_argument("--expected-head", required=True)
@@ -894,7 +936,11 @@ def main() -> None:
     resolve.add_argument("--published-commit")
     resolve.add_argument("--issue-number", type=int)
 
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
     if args.command == "publish-fix-now":
         result = publish_fix_now(
             repository=args.repo,

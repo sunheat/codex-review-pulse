@@ -85,6 +85,20 @@ Manual recovery of the permanent lock is an explicit human boundary; see
   executor never reserves or consumes again.
 - Unknown or incomplete evidence is never treated as absence.
 - Ambiguous external mutation fails closed and keeps the ownership lock.
+- The committed `remediation_committed["threads"]` enumeration is the batch's
+  only target list; the persisted batch snapshot holds the matching raw frozen
+  evidence and contains no additional targets and no second membership
+  manifest. The worker never scans the snapshot to enlarge the batch.
+- A pre-mutation structured `refused` result (a target outside the committed
+  batch, an empty Fix-now selection, or duplicate target IDs) proves the
+  mutation never began and never by itself forces retained-lock recovery;
+  damaged or inconsistent frozen evidence still fails closed and requires
+  explicit recovery.
+- An owned delivery that still verifiably owns the retained permanent lock may
+  make one best-effort pause attempt against its directly self-identified
+  exact native Automation before stopping for manual recovery; later busy
+  deliveries never quarantine, and correctness never depends on quarantine
+  succeeding.
 - An active fully-consumed campaign with an outstanding current-head request
   window stays scheduled for non-counting asynchronous-lifecycle observation;
   it is not cleaned just because `rounds_used == max_rounds`. A successful
