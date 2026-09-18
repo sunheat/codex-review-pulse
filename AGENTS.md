@@ -142,11 +142,20 @@ They must not:
 
 A user must be able to start Codex Review Pulse with a simple instruction and specify at least:
 
-- the target GitHub pull request;
 - the maximum number of effective rounds;
 - the scheduled-worker model;
 - the reasoning or thinking level;
 - the interval between scheduled wakes.
+
+The target GitHub pull request may be explicitly supplied, in which case it is authoritative and never silently replaced.
+If the target is omitted, the launcher discovers OPEN pull requests in the current bound repository:
+
+- exactly one -> select it automatically;
+- two or more -> ask the user to choose;
+- zero -> report and stop;
+- discovery failure -> report and stop.
+
+Existing campaign state for another PR is not target-selection evidence.
 
 The current hard safety cap is 10 effective rounds.
 Accept values from 1 through 10.

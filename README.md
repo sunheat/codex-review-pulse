@@ -47,8 +47,12 @@ Run Codex Review Pulse on https://github.com/OWNER/REPO/pull/NUMBER for at most
 6 effective rounds, using MODEL with REASONING_LEVEL every 30 minutes.
 ```
 
-Required parameters: target PR, 1–10 effective rounds, worker model, reasoning
-level, and minutes between deliveries. None may be silently substituted. The
+Required parameters: 1–10 effective rounds, worker model, reasoning level, and
+minutes between deliveries. The target PR may be explicitly supplied — then it
+is authoritative and never substituted — or omitted, in which case the launcher
+discovers OPEN pull requests in the bound repository: exactly one is selected
+automatically, two or more ask the user to choose, zero reports and stops, and
+a discovery failure reports and stops. Nothing is silently substituted. The
 launcher validates as far as the native host permits, creates the campaign
 record, and configures one fixed recurring native Codex Automation bound to the
 local repository project. Full procedures:

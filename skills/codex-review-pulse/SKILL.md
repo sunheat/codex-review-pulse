@@ -1,6 +1,6 @@
 ---
 name: codex-review-pulse
-description: Codex-bound GitHub pull request remediation for the Codex app. Start a bounded campaign with one instruction (target PR, 1-10 effective rounds, worker model, reasoning level, delivery interval); the launcher configures a native Codex Automation and each scheduled delivery independently re-observes GitHub/Git, remediates applicable Codex review threads in one in-memory batch, requests @codex review at most once per head, and stops on approval, terminal policy, exhaustion, or fail-closed ambiguity. Requires the Codex app with native Automations, git, authenticated GitHub CLI, and Python 3.11+.
+description: Codex-bound GitHub pull request remediation for the Codex app. Start a bounded campaign with one instruction (optional target PR, 1-10 effective rounds, worker model, reasoning level, delivery interval); the launcher discovers the target when omitted, configures a native Codex Automation, and each scheduled delivery independently re-observes GitHub/Git, remediates applicable Codex review threads in one in-memory batch, requests @codex review at most once per head, and stops on approval, terminal policy, exhaustion, or fail-closed ambiguity. Requires the Codex app with native Automations, git, authenticated GitHub CLI, and Python 3.11+.
 ---
 
 # Codex Review Pulse
@@ -32,15 +32,24 @@ Run Codex Review Pulse on https://github.com/OWNER/REPO/pull/NUMBER for at most
 6 effective rounds, using MODEL with REASONING_LEVEL every 30 minutes.
 ```
 
-Every parameter is required and must never be silently substituted:
+The other parameters are required and must never be silently substituted. The
+pull request may be omitted; when supplied it is authoritative and never
+replaced:
 
 | Parameter | Rule |
 | --- | --- |
-| pull request | Full `https://github.com/OWNER/REPO/pull/NUMBER` URL |
+| pull request | Full `https://github.com/OWNER/REPO/pull/NUMBER` URL, or omitted — see below |
 | effective rounds | Integer 1 through 10 (hard cap) |
 | worker model | Must be accepted by the native Codex Automation configuration |
 | reasoning level | Must be accepted by the native Codex Automation configuration |
 | interval | Minutes between recurring deliveries; positive integer |
+
+If the pull request is omitted, the launcher discovers OPEN pull requests in
+the bound repository: exactly one is selected automatically and without
+confirmation, two or more require the user to choose, zero is reported and the
+launcher stops, and a discovery failure is reported and stopped without being
+treated as zero. Existing campaign state for another PR is not
+target-selection evidence. See [the launcher guide](references/launcher.md).
 
 The Automation must be bound to the intended local repository/project
 installation so deliveries can reach the repository, its Git common directory,
