@@ -52,9 +52,16 @@ with all of the following and the Codex app accepts that configuration:
    never an occurrence limit (RRULE `COUNT`, end date, or similar) derived
    from the effective-round budget, because delivery count is not round count;
 4. the project/folder binding to the intended local repository installation;
-5. the packaged Codex Review Pulse skill available to the delivery;
-6. a fixed delivery prompt that names the campaign, repository, PR number, and
+5. the packaged Codex Review Pulse skill available to the delivery; and
+6. a fixed delivery prompt whose first nonblank line is
+   `$codex-review-pulse`, then names the campaign, repository, PR number, and
    the worker guide (see the launcher guide).
+
+The `$codex-review-pulse` marker is the supported explicit skill invocation for
+a scheduled task. A native Automation need not expose a separate skill-
+attachment field when it accepts that exact prompt. If a host neither accepts
+the explicit invocation nor exposes an equivalent validated attachment, stop
+and report the native-host limitation.
 
 Storing a model or reasoning string in the campaign record is only a record of
 what was requested. It is not proof that the Automation will run with those

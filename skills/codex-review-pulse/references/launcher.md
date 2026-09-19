@@ -88,9 +88,13 @@ selected PR invalid or closed, reject it normally without rediscovering.
    the same-repository rule again on its own evidence.
 5. Confirm, through the native Codex app interface, that Codex Automations can
    be created in this project with a configurable model, reasoning/thinking
-   level, minute-granularity recurring schedule, project/folder binding, and
-   skill attachment. If that capability or any setting is not exposed, stop and
-   report the exact native-host limitation. Do not emulate it in local state.
+   level, minute-granularity recurring schedule, project/folder binding, and a
+   delivery prompt beginning with `$codex-review-pulse`. That marker is the
+   supported explicit invocation of the packaged skill. A distinct native
+   skill-attachment field is not required when the host accepts the exact
+   prompt. If the host neither accepts the explicit invocation nor exposes an
+   equivalent validated attachment, stop and report the exact native-host
+   limitation. Do not emulate it in local state.
 
 ## 3. Cheap pre-lock admission
 
@@ -172,10 +176,14 @@ automation UI/API). Configure exactly one recurring automation:
   exhausted campaigns exit safely on extra deliveries. Rounds are enforced by
   the campaign record alone;
 - model and reasoning/thinking level: the requested values;
-- skill: this packaged Codex Review Pulse skill;
+- skill: invoke this packaged Codex Review Pulse skill with the
+  `$codex-review-pulse` marker at the start of the delivery prompt. A separate
+  attachment setting is optional and must not be required when the native host
+  accepts this explicit invocation;
 - delivery prompt, verbatim with the values substituted:
 
 ```text
+$codex-review-pulse
 Run the Codex Review Pulse scheduled worker for campaign CRPCAMPAIGNID on
 OWNER/REPO pull request NUMBER in this bound project. Follow the
 codex-review-pulse skill's references/worker.md exactly. Take campaign
@@ -186,11 +194,11 @@ Classify the native result only from authoritative native-host evidence:
 
 - **Confirmed compliant** — the host definitively reports successful creation
   and every required setting (project/folder binding, campaign-bound prompt,
-  recurrence and interval, model, reasoning level, skill attachment) is
-  established either as a validated input to the successful native operation
-  or by authoritative output/readback. A successful validated native creation
-  is authoritative without a mandatory separate readback; use authoritative
-  readback when available to detect mismatch.
+  recurrence and interval, model, reasoning level, and explicit
+  `$codex-review-pulse` invocation) is established either as a validated input
+  to the successful native operation or by authoritative output/readback. A
+  successful validated native creation is authoritative without a mandatory separate readback; use
+  authoritative readback when available to detect mismatch.
 - **Definitive failure** — the host definitively rejects creation, or
   authoritative output proves a required setting is wrong, unsupported, or
   bound to the wrong target.

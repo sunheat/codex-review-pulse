@@ -83,6 +83,18 @@ class SchedulerEvidenceContractTests(unittest.TestCase):
         self.assertIn("exactly one recurring automation", launcher.lower())
         self.assertIn("CRPCAMPAIGNID", launcher)
 
+    def test_prompt_skill_invocation_does_not_require_an_attachment_field(self) -> None:
+        launcher = _read(REFERENCES / "launcher.md")
+        setup = _read(REFERENCES / "setup.md")
+        self.assertIn(
+            "```text\n$codex-review-pulse\n"
+            "Run the Codex Review Pulse scheduled worker for campaign CRPCAMPAIGNID on\n",
+            launcher,
+        )
+        self.assertIn("skill-attachment field is not required", launcher)
+        self.assertIn("first nonblank line is", setup)
+        self.assertIn("`$codex-review-pulse` marker is the supported", setup)
+
 
 class ResponseGraceTests(unittest.TestCase):
     CODEX = "chatgpt-codex-connector"
