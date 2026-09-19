@@ -9,6 +9,45 @@ You perform at most one effective action per delivery. Read-only observation,
 lock blocking, review-in-progress waits, and waiting on an outstanding request
 consume no round.
 
+## Runtime skill boundary
+
+This unattended runtime is self-contained with respect to Agent Skills. You
+must not invoke, install, bootstrap, configure, fetch, or require any
+auxiliary Agent Skill — including Ponytail, Matt Pocock `code-review`, or any
+other skill package or interactive meta-workflow, whether globally installed,
+supplied by the target repository, recommended by repository instructions, or
+exposed by the host — as a prerequisite, optional aid, validation step, review
+step, fallback, or interactive development workflow. Do not vendor, embed, or
+modify any auxiliary skill either.
+
+Absence, unavailability, misconfiguration, or missing setup for an auxiliary
+Agent Skill is not a failure condition: continue the current remediation
+attempt without it. Inspecting your own remediation patch against the frozen
+Codex feedback and the target repository's ordinary requirements is normal
+work, not an auxiliary-skill dependency.
+
+Target-repository instructions remain authoritative for the substance of the
+patch: architecture and safety constraints, coding conventions, supported
+runtimes, file scope, required documentation, and concrete build, test, lint,
+and formatting requirements. They do not turn recommended Agent Skills or
+interactive meta-workflows into runtime prerequisites, and they never alter
+campaign identity, batch membership, round accounting, ownership disposition,
+or this skill boundary. If a mandatory concrete acceptance requirement cannot
+be satisfied, do not waive it, do not publish the affected Fix-now change, and
+do not resolve its thread as fixed: abandon the unpublished local work and
+follow the clean-unsuccessful release rules in step 8 when the failure is
+purely local and every existing safe-release condition holds. Only tooling
+explicitly optional under the applicable target-repository contract may be
+skipped as optional.
+
+If, contrary to this boundary, an attempted auxiliary workflow has already
+left this delivery unable to continue safely, abandon the unpublished local
+work and use the clean-unsuccessful release path (step 8) only when the
+existing contract establishes that no product mutation result is ambiguous,
+no mutation-capable operation remains in flight, and no retained-lock
+condition applies. Never retain the permanent lock merely because an
+auxiliary Agent Skill was unavailable.
+
 ## 0. Inputs and environment gate
 
 The delivery prompt gives you the campaign id, `OWNER/REPO`, the PR number, and
@@ -324,12 +363,21 @@ stop for explicit recovery.
        (section 9) only where this delivery's exact token verifiably still
        owns the lock, then stop for [recovery](recovery.md). No cleanup.
    - Otherwise (a clean unsuccessful attempt: stale or changed evidence
-     prevented some intended work), release the lock directly:
+     prevented some intended work, or a confirmed purely local preparation,
+     analysis, editing, or mandatory-validation failure made the intended
+     work unfinishable), release the lock directly:
 
      ```text
      python S/lock.py release --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN
      ```
 
+   A confirmed purely local failure may use this clean-unsuccessful path only
+   when no mutation-capable boundary produced an unknown result, no external
+   product mutation is ambiguous, no authoritative retained disposition
+   exists, and no mutation-capable child, subagent, subprocess, or in-flight
+   operation can still complete afterward. The consumed round stays consumed:
+   never refund, recreate, or retry it merely because the local attempt was
+   abandoned.
    Do not release while any mutation result is ambiguous or unknown. If a
    release itself fails, do not claim ownership was released and do not clean
    up the scheduler; report fail closed. A later delivery observes fresh
@@ -366,7 +414,8 @@ is the actual completed disposition.
 ## 7. Ownership disposition
 
 Every Phase 3 boundary reports the actual ownership disposition; trust it
-instead of releasing speculatively.
+instead of releasing speculatively. Do not override a valid disposition
+returned by an authoritative deterministic boundary.
 
 - The request boundary owns its disposition (step 6); do nothing more.
 - Remediation boundaries never release; the delivery performs the final
@@ -374,6 +423,25 @@ instead of releasing speculatively.
 - Any `ambiguous` or unknown result retains the lock until explicit human
   recovery; route it through the retained-lock quarantine checks (section 9)
   after all product mutation has stopped.
+
+**Exit discipline.** Once step 3 succeeds you hold the permanent lock, and
+from then on you must never end the delivery through an unqualified stop,
+return, abandoned plan, or ordinary error report. Before every
+post-acquisition exit, the actual ownership disposition must be clear under
+the existing protocol as exactly one of:
+
+1. ownership was already disposed by an authoritative deterministic boundary
+   (trust its reported disposition);
+2. this delivery safely performed and confirmed the existing guarded release
+   (step 5.8, or a boundary whose reported disposition is a confirmed
+   release); or
+3. ownership is deliberately retained because an existing fail-closed or
+   recovery rule requires retention (follow section 9 where it applies).
+
+Complete or honor the existing disposition before ending whenever its result
+is authoritatively known; do not merely note which disposition should occur.
+Do not release the lock for any retained outcome listed in section 9, and do
+not release over any ambiguous, unknown, or unconfirmed result.
 
 ## 8. Best-effort native Automation cleanup
 
@@ -503,4 +571,11 @@ campaign stays unchanged, and explicit human recovery is still required (see
   second time in one delivery;
 - inferring the execution mode or effective permissions from the model name,
   task title, directory, settings, tool availability, or another task;
+- invoking, installing, bootstrapping, configuring, or waiting for any
+  auxiliary Agent Skill (Ponytail, Matt Pocock `code-review`, or any other
+  skill package or interactive meta-workflow) as a prerequisite, optional
+  aid, validation step, review step, or fallback, or stopping because one was
+  unavailable;
+- ending a post-acquisition delivery without an explicit ownership
+  disposition (section 7);
 - widening scope to merge, base changes, auto-merge, other PRs, or fork PRs.

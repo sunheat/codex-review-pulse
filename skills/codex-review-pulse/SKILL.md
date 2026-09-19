@@ -11,8 +11,14 @@ PR, one small campaign record, one PR-scoped permanent ownership lock, a bounded
 number of effective rounds. It is not a generic workflow engine, scheduler,
 multi-host platform, or multi-reviewer framework.
 
-The canonical behavior contract is [`AGENTS.md`](../../AGENTS.md). This skill is
-an implementation of that contract, not a restatement of it.
+In this source repository, the canonical behavior contract is the root
+[`AGENTS.md`](../../AGENTS.md); this skill is an implementation of that
+contract, not a restatement of it. That file is development context only: an
+installed runtime is self-contained, and a scheduled worker running in another
+repository must not depend on locating the Codex Review Pulse source
+repository or its `AGENTS.md`. This package — `SKILL.md`, the packaged
+references, and the deterministic helpers — carries the complete
+runtime-critical protocol required by the installed product path.
 
 ## Supported host
 
@@ -117,6 +123,20 @@ Manual recovery of the permanent lock is an explicit human boundary; see
   when no request window exists.
 - The review-response grace is at least the configured interval and never under
   20 minutes, independent of the scheduler cadence.
+- The unattended runtime is independent of auxiliary Agent Skills. A
+  scheduled worker never invokes, installs, bootstraps, configures, fetches,
+  or waits for Ponytail, Matt Pocock `code-review`, or any other auxiliary
+  skill as a prerequisite, optional aid, validation step, review step, or
+  fallback; their absence never stops an otherwise viable remediation attempt,
+  retains ownership, or requires manual recovery.
+- Target-repository instructions govern the substance of the remediation
+  patch, including mandatory concrete build, test, lint, and formatting
+  requirements, but never turn recommended Agent Skills or interactive
+  meta-workflows into runtime prerequisites.
+- After the lock is acquired, every delivery exit carries an explicit
+  ownership disposition: already disposed by an authoritative deterministic
+  boundary, a confirmed guarded release, or deliberate retention under an
+  existing fail-closed or recovery rule.
 - Discovery metadata never authorizes a live run. Development work on this
   repository is not a product run.
 - Phase 3 externalizes only already-committed actions through deterministic

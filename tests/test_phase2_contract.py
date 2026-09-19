@@ -706,6 +706,193 @@ class ExclusivePathTests(unittest.TestCase):
         self.assertNotIn("--snapshot", request_help)
 
 
+class AuxiliarySkillIndependenceContractTests(unittest.TestCase):
+    """The packaged scheduled-worker protocol needs no auxiliary Agent Skill."""
+
+    def test_worker_guide_prohibits_auxiliary_skill_invocation(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn(
+            "must not invoke, install, bootstrap, configure, fetch, or require "
+            "any auxiliary Agent Skill",
+            worker,
+        )
+        self.assertIn(
+            "as a prerequisite, optional aid, validation step, review step, "
+            "fallback, or interactive development workflow",
+            worker,
+        )
+        self.assertIn("Do not vendor, embed, or modify any auxiliary skill", worker)
+
+    def test_auxiliary_skill_absence_is_not_a_failure_condition(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn("is not a failure condition", worker)
+        self.assertIn("continue the current remediation attempt without it", worker)
+        self.assertIn(
+            "Never retain the permanent lock merely because an auxiliary "
+            "Agent Skill was unavailable",
+            worker,
+        )
+
+    def test_target_requirements_are_distinguished_from_auxiliary_workflows(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        # Concrete mandatory target-repository requirements stay binding and
+        # route through the clean-unsuccessful path; recommended skills and
+        # interactive meta-workflows never become runtime prerequisites and
+        # never alter campaign orchestration.
+        self.assertIn("mandatory concrete acceptance requirement", worker)
+        self.assertIn("abandon the unpublished local work", worker)
+        self.assertIn("clean-unsuccessful release rules in step 8", worker)
+        self.assertIn(
+            "they never alter campaign identity, batch membership, round "
+            "accounting, ownership disposition",
+            worker,
+        )
+        self.assertIn("Only tooling explicitly optional", worker)
+
+    def test_local_abandonment_routes_to_the_existing_guarded_release(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn(
+            "confirmed purely local preparation, analysis, editing, or "
+            "mandatory-validation failure",
+            worker,
+        )
+        self.assertIn("no mutation-capable boundary produced an unknown result", worker)
+        self.assertIn("no external product mutation is ambiguous", worker)
+        self.assertIn(
+            "no mutation-capable child, subagent, subprocess, or in-flight "
+            "operation can still complete afterward",
+            worker,
+        )
+        self.assertIn(
+            "never refund, recreate, or retry it merely because the local "
+            "attempt was abandoned",
+            worker,
+        )
+        self.assertIn("python S/lock.py release", worker)
+
+    def test_skill_contract_states_auxiliary_skill_independence(self) -> None:
+        skill = _collapsed(REFERENCES.parent / "SKILL.md")
+        self.assertIn("independent of auxiliary Agent Skills", skill)
+        self.assertIn(
+            "their absence never stops an otherwise viable remediation "
+            "attempt, retains ownership, or requires manual recovery",
+            skill,
+        )
+        self.assertIn(
+            "never turn recommended Agent Skills or interactive meta-workflows "
+            "into runtime prerequisites",
+            skill,
+        )
+
+    def test_no_auxiliary_skill_machinery_or_names_in_helpers(self) -> None:
+        forbidden = (
+            "skill_manager", "skill_allowlist", "skill_registry",
+            "skill_discovery", "skill_interception", "skill_compatibility",
+        )
+        for path in SCRIPTS.glob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            for token in forbidden:
+                self.assertNotIn(token, text, f"{path.name}: {token}")
+            lowered = text.lower()
+            self.assertNotIn("ponytail", lowered, path.name)
+
+
+class RuntimeAuthorityContractTests(unittest.TestCase):
+    """Installed runtime correctness never depends on the source AGENTS.md."""
+
+    def test_skill_marks_agents_md_as_development_context_only(self) -> None:
+        skill = _collapsed(REFERENCES.parent / "SKILL.md")
+        self.assertIn("That file is development context only", skill)
+        self.assertIn("an installed runtime is self-contained", skill)
+        self.assertIn(
+            "must not depend on locating the Codex Review Pulse source "
+            "repository or its `AGENTS.md`",
+            skill,
+        )
+        self.assertIn(
+            "carries the complete runtime-critical protocol", skill
+        )
+
+    def test_worker_guide_never_requires_the_source_agents_md(self) -> None:
+        worker = _read(REFERENCES / "worker.md")
+        self.assertNotIn("AGENTS.md", worker)
+        self.assertNotIn("../../", worker)
+
+
+class PostAcquisitionExitDisciplineContractTests(unittest.TestCase):
+    def test_worker_requires_an_explicit_disposition_before_every_exit(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn(
+            "must never end the delivery through an unqualified stop, return, "
+            "abandoned plan, or ordinary error report",
+            worker,
+        )
+        self.assertIn("exactly one of", worker)
+        self.assertIn(
+            "ownership was already disposed by an authoritative deterministic "
+            "boundary",
+            worker,
+        )
+        self.assertIn(
+            "deliberately retained because an existing fail-closed or recovery "
+            "rule requires retention",
+            worker,
+        )
+
+    def test_exit_discipline_honors_and_never_overrides_boundaries(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn("Do not override a valid disposition", worker)
+        self.assertIn(
+            "Complete or honor the existing disposition before ending", worker
+        )
+
+    def test_exit_discipline_does_not_release_retained_outcomes(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn("Do not release the lock for any retained outcome", worker)
+        # The pre-existing retained-outcome protection stays intact.
+        self.assertIn(
+            "Any `ambiguous` or unknown result retains the lock", worker
+        )
+
+    def test_skill_contract_states_the_exit_disposition_rule(self) -> None:
+        skill = _collapsed(REFERENCES.parent / "SKILL.md")
+        self.assertIn(
+            "every delivery exit carries an explicit ownership disposition", skill
+        )
+
+
+class RequestTerminalityPreservationTests(unittest.TestCase):
+    """Release failure must not rewrite request-determined campaign terminality."""
+
+    def test_dispose_preserves_terminality_when_release_fails(self) -> None:
+        cases = [
+            {"outcome": "window_open", "terminal": False},
+            {"outcome": "unbracketed", "terminal": True},
+            {"outcome": "creation_failed", "terminal": True},
+        ]
+        for case in cases:
+            with self.subTest(outcome=case["outcome"]):
+                result = {
+                    "outcome": case["outcome"],
+                    "detail": None,
+                    "terminal": case["terminal"],
+                    "head_oid": "h",
+                    "retain_lock": False,
+                    "campaign": {"status": "x", "rounds_used": 1},
+                }
+                disposed = review_request._dispose(  # type: ignore[arg-type]
+                    "owner/repo",
+                    7,
+                    "token",
+                    repository_path=".",
+                    result=result,
+                )
+                self.assertEqual(disposed["outcome"], "local_fail_closed")
+                self.assertEqual(disposed["terminal"], case["terminal"])
+                self.assertEqual(disposed["ownership"], "release_unconfirmed")
+                self.assertFalse(disposed["scheduler_cleanup_authorized"])
+
+
 class ExhaustedBudgetPrecedenceTests(unittest.TestCase):
     CODEX = "chatgpt-codex-connector"
     H = "h1-oid"

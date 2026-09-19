@@ -211,6 +211,9 @@ def _dispose(
             repository, pr_number, owner_token, repository_path=repository_path
         )
     except Exception as error:  # noqa: BLE001 - release must never be guessed
+        # Release failure changes only the ownership disposition. The
+        # campaign terminality was already determined by the request attempt
+        # and must not be rewritten here.
         return {
             **printable,
             "outcome": "local_fail_closed",
@@ -218,7 +221,7 @@ def _dispose(
                 f"request outcome {result['outcome']} completed but release "
                 "could not be confirmed: " + storage.error_text(error)
             ),
-            "terminal": True,
+            "terminal": result["terminal"],
             "ownership": "release_unconfirmed",
             "scheduler_cleanup_authorized": False,
         }

@@ -422,8 +422,42 @@ class RequestBoundaryTests(unittest.TestCase):
             )
         finally:
             storage.release_lock = real_release
-        self.assertEqual(result["ownership"], "release_unconfirmed")
         self.assertEqual(result["outcome"], "local_fail_closed")
+        self.assertEqual(result["ownership"], "release_unconfirmed")
+        # Release failure changes the ownership disposition only: the active
+        # campaign terminality determined by the window_open outcome stays.
+        self.assertFalse(result["terminal"])
+        self.assertFalse(result["scheduler_cleanup_authorized"])
+        self.assertEqual(self.fixture.campaign_on_disk()["status"], m.ACTIVE)
+        self.assertEqual(self.fixture.lock_status(), "active")
+
+    def test_release_failure_preserves_terminal_unbracketed_result(self) -> None:
+        sequence = [snap(time=T1), snap(time=T2, head="changed")]
+        real_release = storage.release_lock
+
+        def failing_release(*args, **kwargs):
+            raise RuntimeError("release failed")
+
+        storage.release_lock = failing_release
+        try:
+            result = self.run_boundary(
+                observer=lambda: sequence.pop(0),
+                commenter=lambda subject_id, body: {
+                    "node_id": "c1", "created_at": T1, "url": "https://x/c1",
+                },
+            )
+        finally:
+            storage.release_lock = real_release
+        self.assertEqual(result["outcome"], "local_fail_closed")
+        self.assertEqual(result["ownership"], "release_unconfirmed")
+        # A genuinely terminal request result remains terminal even though
+        # the release could not be confirmed.
+        self.assertTrue(result["terminal"])
+        self.assertFalse(result["scheduler_cleanup_authorized"])
+        self.assertEqual(
+            self.fixture.campaign_on_disk()["status"],
+            m.MANUAL_INTERVENTION_REQUIRED,
+        )
         self.assertEqual(self.fixture.lock_status(), "active")
 
 

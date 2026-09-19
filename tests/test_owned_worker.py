@@ -783,6 +783,39 @@ class TerminalConfirmationTests(WorkerDecisionFixture):
         self.assertEqual(outcome["outcome"], "terminal_released")
 
 
+class CleanUnsuccessfulReleaseRegression(WorkerDecisionFixture):
+    """Confirmed local pre-publication abandonment reaches the guarded release.
+
+    Incident regression: a committed remediation round followed by a purely
+    local failure (no mutation-capable boundary invoked, every local command
+    known) must end through the existing guarded release, not a retained lock
+    with later busy no-ops. The consumed round stays consumed.
+    """
+
+    def test_confirmed_local_abandonment_releases_and_stays_active(self) -> None:
+        # Non-final-round fixture: one of six effective rounds consumed.
+        self.fetches = [snapshot(threads=[thread("T1")])]
+        committed = self.decide()
+        self.assertEqual(committed["outcome"], "remediation_committed")
+        self.assertEqual(committed["rounds_used"], 1)
+        self.assertEqual(self.on_disk()["status"], model.ACTIVE)
+
+        # Confirmed local pre-publication abandonment: preparation, editing,
+        # and validation all completed with known results, no externalization
+        # boundary was invoked, and no mutation-capable operation remains in
+        # flight. The unpublished batch is abandoned, not resumed.
+        release = storage.release_lock(
+            "owner/repo", 7, owner_token=self.token,
+            repository_path=self.repository_path,
+        )
+        self.assertTrue(release["released"])
+
+        record = self.on_disk()
+        self.assertEqual(record["rounds_used"], 1)
+        self.assertEqual(record["status"], model.ACTIVE)
+        self.assertEqual(self.lock_status(), "absent")
+
+
 class FinalizationTests(WorkerDecisionFixture):
     """Same-delivery exhaustion finalization after a successful final remediation."""
 
