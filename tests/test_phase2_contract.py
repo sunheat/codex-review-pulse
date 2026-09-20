@@ -386,7 +386,8 @@ class OwnershipCompletionAlgebraTests(unittest.TestCase):
             "observation_failed_released",
             "terminal_released",
             "terminal_retained",
-            "remediation_committed",
+            "remediation_prepared",
+            "remediation_preparation_refused",
             "request_committed",
             "local_fail_closed",
         )
@@ -498,8 +499,8 @@ class BatchMembershipContractTests(unittest.TestCase):
     """One authoritative batch: the committed directive is the only target list."""
 
     def test_projection_is_the_persisted_remediation_snapshot(self) -> None:
-        source = (SCRIPTS / "owned.py").read_text(encoding="utf-8")
-        self.assertIn("model.project_remediation_batch(s1", source)
+        source = (SCRIPTS / "remediation.py").read_text(encoding="utf-8")
+        self.assertIn("model.project_remediation_batch(", source)
         model_source = (SCRIPTS / "campaign_model.py").read_text(encoding="utf-8")
         self.assertIn("def project_remediation_batch", model_source)
         self.assertIn("result[\"threads\"] = projected", model_source)
@@ -533,8 +534,7 @@ class StructuredRefusalContractTests(unittest.TestCase):
         source = (SCRIPTS / "externalize.py").read_text(encoding="utf-8")
         self.assertIn("class TargetSelectionError(ValueError)", source)
         self.assertIn("not part of the committed batch", source)
-        self.assertIn("no Fix-now target was selected", source)
-        self.assertIn("duplicate target IDs", source)
+        self.assertIn("class FrozenEvidenceError(RuntimeError)", source)
 
     def test_invalid_outcome_stays_outside_the_refusal_taxonomy(self) -> None:
         source = (SCRIPTS / "externalize.py").read_text(encoding="utf-8")
@@ -543,15 +543,15 @@ class StructuredRefusalContractTests(unittest.TestCase):
 
     def test_refusals_do_not_force_retained_lock_recovery(self) -> None:
         worker = _collapsed(REFERENCES / "worker.md")
-        self.assertIn("the refusal alone never forces retained-lock recovery", worker)
-        self.assertIn("follow the clean-unsuccessful release rules", worker)
+        self.assertIn("The refusal alone never forces retained-lock recovery", worker)
+        self.assertIn("a later delivery prepares fresh from current authoritative state", worker)
         skill = _collapsed(REFERENCES.parent / "SKILL.md")
         self.assertIn("never by itself forces retained-lock recovery", skill)
 
     def test_frozen_evidence_failures_remain_fail_closed(self) -> None:
         worker = _collapsed(REFERENCES / "worker.md")
-        self.assertIn("stop all further externalization for the batch", worker)
-        self.assertIn("require explicit recovery", worker)
+        self.assertIn("a pre-mutation whole-proposal refusal", worker)
+        self.assertIn("No external product mutation began", worker)
         skill = _collapsed(REFERENCES.parent / "SKILL.md")
         self.assertIn("still fails closed", skill)
 
@@ -736,12 +736,11 @@ class AuxiliarySkillIndependenceContractTests(unittest.TestCase):
     def test_target_requirements_are_distinguished_from_auxiliary_workflows(self) -> None:
         worker = _collapsed(REFERENCES / "worker.md")
         # Concrete mandatory target-repository requirements stay binding and
-        # route through the clean-unsuccessful path; recommended skills and
-        # interactive meta-workflows never become runtime prerequisites and
-        # never alter campaign orchestration.
+        # route through abandoning the unpublished local speculative work;
+        # recommended skills and interactive meta-workflows never become
+        # runtime prerequisites and never alter campaign orchestration.
         self.assertIn("mandatory concrete acceptance requirement", worker)
-        self.assertIn("abandon the unpublished local work", worker)
-        self.assertIn("clean-unsuccessful release rules in step 8", worker)
+        self.assertIn("Abandon the unpublished local work and end the delivery", worker)
         self.assertIn(
             "they never alter campaign identity, batch membership, round "
             "accounting, ownership disposition",
@@ -749,26 +748,22 @@ class AuxiliarySkillIndependenceContractTests(unittest.TestCase):
         )
         self.assertIn("Only tooling explicitly optional", worker)
 
-    def test_local_abandonment_routes_to_the_existing_guarded_release(self) -> None:
+    def test_speculative_abandonment_routes_to_a_plain_stop(self) -> None:
         worker = _collapsed(REFERENCES / "worker.md")
+        # The speculative interval holds no ownership and consumes nothing, so
+        # a purely local abandonment ends the delivery without invoking the
+        # finalizer and without any release call.
         self.assertIn(
-            "confirmed purely local preparation, analysis, editing, or "
-            "mandatory-validation failure",
+            "abandon the unpublished local work and end the delivery without "
+            "invoking the finalizer",
             worker,
         )
-        self.assertIn("no mutation-capable boundary produced an unknown result", worker)
         self.assertIn("no external product mutation is ambiguous", worker)
         self.assertIn(
-            "no mutation-capable child, subagent, subprocess, or in-flight "
-            "operation can still complete afterward",
-            worker,
+            "no mutation-capable operation remains in flight", worker
         )
-        self.assertIn(
-            "never refund, recreate, or retry it merely because the local "
-            "attempt was abandoned",
-            worker,
-        )
-        self.assertIn("python S/lock.py release", worker)
+        self.assertIn("the speculative interval holds no permanent lock", worker)
+        self.assertIn("The round stays consumed", worker)
 
     def test_skill_contract_states_auxiliary_skill_independence(self) -> None:
         skill = _collapsed(REFERENCES.parent / "SKILL.md")

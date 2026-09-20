@@ -5,12 +5,19 @@ These are the only product-facing entry points that may:
 
 - create a campaign from post-lock owned evidence (normal setup);
 - prepare and apply the fixed C1-to-C2 rollover transition;
-- make the one deterministic owned worker decision per acquired delivery;
-- finalize exhaustion in the same delivery after a successful final
-  remediation (``finalize_exhaustion_owned``);
+- make the one deterministic owned worker decision per acquired delivery
+  (``run_worker_decision``), including the deterministic remediation
+  preparation handoff into the Phase 1 remediation subprotocol
+  (``remediation.py``): preparation freezes the exact batch, worktree, and
+  campaign-source witness, consumes no round, and releases ownership before
+  returning the semantic-work action;
 - record the environment-gate hard-failure handoff (``record_hard_failure``),
   the one guarded transition that forfeits the remaining budget and
   terminalizes ``hard_failed``.
+
+``finalize_exhaustion_owned`` is no longer a model-visible CLI: it is an
+internal library boundary invoked by the deterministic remediation finalizer
+in the same invocation that committed the final remediation round.
 
 Every helper establishes matching Phase 1 ownership itself and persists only
 through the guarded Phase 1 primitives; the observation boundaries obtain
@@ -31,13 +38,14 @@ from pathlib import Path
 import sys
 from typing import Any, Callable
 
-import admission
 import campaign_model as model
 import github_api
+import remediation
 import storage
 
 
 FetchSnapshot = Callable[[], dict[str, Any]]
+FetchRemote = Callable[[], None]
 
 
 class OwnedBoundaryError(RuntimeError):
@@ -396,6 +404,7 @@ def run_worker_decision(
     pr_number: int,
     owner_token: str,
     fetch_snapshot: FetchSnapshot,
+    fetch_remote: FetchRemote | None = None,
     repository_path: str | Path = ".",
 ) -> dict[str, Any]:
     """One deterministic owned-worker decision boundary.
@@ -404,10 +413,14 @@ def run_worker_decision(
     acquisition. This helper owns the correctness-critical sequence: matching
     active ownership, campaign-wide durable-local preflight, one fresh owned
     S1, guarded sync-head, authoritative post-sync campaign, pure decision,
-    effective-action commitment or bounded S2 terminal confirmation, and the
-    safe local ownership disposition. It performs no remediation editing, no
-    review-request POST, no Git push, no issue creation, and no thread
-    resolution; committed actions are externalized later (Phase 3).
+    request commitment or bounded S2 terminal confirmation, and the safe
+    local ownership disposition. When the decision selects remediation, it
+    hands off into the deterministic remediation subprotocol
+    (``remediation.prepare_remediation_owned``): preparation freezes the
+    exact batch and worktree while ownership is held, consumes no round, and
+    releases ownership before the semantic-work action is returned. It
+    performs no remediation editing, no review-request POST, no Git push, no
+    issue creation, and no thread resolution.
 
     The returned outcome is a closed structured result with unambiguous local
     postconditions. Unknown directives or inconsistent combinations fail
@@ -525,43 +538,47 @@ def run_worker_decision(
         )
 
     if action == "remediation_batch":
-        try:
-            snapshot_path = admission.write_private_snapshot(
-                model.project_remediation_batch(s1, directive["threads"])
-            )
-        except Exception as error:  # noqa: BLE001 - fail closed before commitment
-            return _fail_closed(
-                "could not persist the owned decision snapshot: "
-                + storage.error_text(error)
-            )
-        try:
-            committed = storage.apply_campaign_transition_if_current(
-                repository,
-                pr_number,
-                owner_token=owner_token,
-                expected_source=post_sync,
-                transition=lambda record: model.consume_round(record, kind="remediation"),
-                repository_path=repository_path,
-            )
-        except Exception as error:  # noqa: BLE001 - commitment refused
-            try:
-                Path(snapshot_path).unlink()
-            except OSError:
-                pass
-            return _fail_closed(
-                "remediation commitment refused: " + storage.error_text(error)
-            )
-        return {
-            "outcome": "remediation_committed",
-            "campaign_id": committed["campaign_id"],
-            "threads": directive["threads"],
-            "snapshot_path": snapshot_path,
-            "expected_head": s1["head_oid"],
-            "round_committed": True,
-            "rounds_used": committed["rounds_used"],
-            "ownership": "retained",
-            "scheduler_cleanup_authorized": False,
-        }
+        # Phase 1 remediation handoff: deterministic preparation while the
+        # permanent lock is still held, then release. No remediation round is
+        # consumed here; the round is committed by the deterministic
+        # finalizer after complete validation, before any external mutation.
+        # The legacy long-lock remediation path (model-held owner token,
+        # model-sequenced publication/issue/thread helpers) has been removed.
+        prepared = remediation.prepare_remediation_owned(
+            repository=canonical,
+            pr_number=pr_number,
+            owner_token=owner_token,
+            snapshot=s1,
+            directive_threads=directive["threads"],
+            campaign=post_sync,
+            repository_path=repository_path,
+            fetch_remote=fetch_remote,
+        )
+        if prepared["prepared"]:
+            return {
+                "outcome": "remediation_prepared",
+                "action": "run_semantic_remediation",
+                "campaign_id": prepared["packet"]["campaign_id"],
+                "packet_path": prepared["packet_path"],
+                "prepared_head": prepared["packet"]["prepared_head"],
+                "worktree": prepared["packet"]["worktree_path"],
+                "targets": [t["id"] for t in prepared["packet"]["targets"]],
+                "round_committed": False,
+                "ownership": "released",
+                "scheduler_cleanup_authorized": False,
+            }
+        if prepared["released"]:
+            return {
+                "outcome": "remediation_preparation_refused",
+                "reason": prepared["reason"],
+                "round_committed": False,
+                "ownership": "released",
+                "scheduler_cleanup_authorized": False,
+            }
+        return _fail_closed(
+            "remediation preparation could not release ownership: "
+            + prepared["reason"]
+        )
 
     if action == "request_review":
         try:
@@ -740,13 +757,13 @@ def finalize_exhaustion_owned(
 ) -> dict[str, Any]:
     """Same-delivery exhaustion finalization after a successful final remediation.
 
-    Invoked by the scheduled worker in place of the plain final release, and
-    only after the delivery's committed remediation batch completed successfully
-    under the existing worker contract (every external result known and
-    unambiguous, none in flight). When durable campaign state alone proves that
-    no effective action and no outstanding asynchronous request obligation
-    remain, it persists terminal ``rounds_exhausted`` through the guarded
-    campaign-transition primitive and releases the matching terminal lock:
+    Internal library boundary invoked by the deterministic remediation
+    finalizer (``remediation.py``) inside the same invocation that committed
+    the final remediation round; it is not a model-visible CLI. When durable
+    campaign state alone proves that no effective action and no outstanding
+    asynchronous request obligation remain, it persists terminal
+    ``rounds_exhausted`` through the guarded campaign-transition primitive and
+    releases the matching terminal lock:
 
     - the campaign is still active (no other terminal result was established);
     - ``rounds_used >= max_rounds``;
@@ -1012,19 +1029,6 @@ def main() -> None:
     subparsers.add_parser("prepare-rollover", parents=[common, config_args])
     subparsers.add_parser("worker-decision", parents=[common])
 
-    finalize = subparsers.add_parser(
-        "finalize-exhaustion",
-        help=(
-            "After a successful final remediation batch: durably terminalize "
-            "rounds_exhausted and release the matching terminal lock when "
-            "durable state proves no outstanding request obligation remains"
-        ),
-    )
-    finalize.add_argument("--repo", required=True)
-    finalize.add_argument("--pr", required=True, type=int)
-    finalize.add_argument("--repository-path", default=".")
-    finalize.add_argument("--owner-token", required=True)
-
     hard_fail = subparsers.add_parser(
         "hard-fail",
         help=(
@@ -1072,13 +1076,6 @@ def main() -> None:
             reviewer_logins=args.reviewer_logins,
             approval_logins=args.approval_logins,
             fetch_snapshot=fetch,
-            repository_path=args.repository_path,
-        )
-    elif args.command == "finalize-exhaustion":
-        result = finalize_exhaustion_owned(
-            repository=args.repo,
-            pr_number=args.pr,
-            owner_token=args.owner_token,
             repository_path=args.repository_path,
         )
     elif args.command == "hard-fail":

@@ -316,7 +316,10 @@ An effective round is an attempt that commits to one of two external product act
 
 Read-only admission and snapshot construction occur before round consumption.
 
-A round is consumed after ownership and authoritative revalidation establish that an effective action is required, but before remediation work or review-request creation begins.
+A review-request round is consumed at request commitment, inside the owned boundary, before the external mutation.
+
+A remediation round is consumed by the deterministic remediation finalizer, after complete validation of the prepared semantic authorization unit and before the first external product mutation.
+Deterministic remediation preparation and speculative semantic work consume no remediation round.
 
 Code edits, commits, publication, issue creation, review requests, and thread resolution belong to the consumed attempt.
 
@@ -351,19 +354,21 @@ Product mutations flow through a few narrow deterministic owned boundaries, not 
 
 **Owned campaign creation.** Normal setup and rollover derive all creation evidence themselves from one fresh post-acquisition authoritative GitHub snapshot taken while setup or rollover ownership is held. Callers cannot select the snapshot, its `created_at`, lifecycle-reaction baselines, canonical target evidence, or head evidence. Campaign identity is preallocated on the setup lock and is never regenerated from snapshot server time. A creation lifecycle-reaction baseline of pre-existing applicable reactions neither proves review-in-progress, nor approves, nor creates attribution waiting, nor blocks the request allowance; unresolved review threads remain immediately actionable.
 
-**Owned worker decision.** Each acquired delivery makes one deterministic decision through a single owned boundary: campaign-wide durable-local preflight, one fresh owned S1 observation, guarded head synchronization, the pure decision from the post-sync campaign, then effective-action commitment, terminal confirmation, or safe local release/retention. The pre-ownership admission snapshot is S0 and authorizes only cheap rejection, preliminary validation, and diagnostics — never synchronization, decisions, commitment, or terminalization, even at a matching head. The boundary performs the ownership disposition itself and reports facts, not recommendations. An unknown caller-visible result allows no compensating action and no second invocation.
+**Owned worker decision.** Each acquired delivery makes one deterministic decision through a single owned boundary: campaign-wide durable-local preflight, one fresh owned S1 observation, guarded head synchronization, the pure decision from the post-sync campaign, then request commitment, deterministic remediation preparation with ownership release, terminal confirmation, or safe local release/retention. The pre-ownership admission snapshot is S0 and authorizes only cheap rejection, preliminary validation, and diagnostics — never synchronization, decisions, commitment, or terminalization, even at a matching head. The boundary performs the ownership disposition itself and reports facts, not recommendations. An unknown caller-visible result allows no compensating action and no second invocation.
 
-**Effective-action commitment before external work.** Remediation rounds and request reservations are durably committed inside the owned boundary before any external remediation or request work begins. A crash after commitment leaves the round consumed and never resumes an in-memory batch.
+**Deterministic remediation transaction.** Once the owned decision selects remediation, it hands off into the deterministic remediation subprotocol, and every remediation phase, authority, commitment, mutation-ordering, result-classification, bookkeeping, and ownership-disposition decision after that handoff is deterministic. Preparation runs while ownership is held (freeze the exact batch, capture the campaign-source witness, fetch remote Git state, create the isolated worktree, write the controller-owned packet), consumes no round, performs no external product mutation, and releases ownership before returning the semantic-work action; the packet carries no owner token. The model then performs speculative semantic and code work in the registered worktree without any ownership and submits one bounded semantic proposal covering the exact prepared targets one-for-one. One model-visible finalizer invocation acquires ownership internally, validates packet, proposal, worktree, and fresh external evidence, performs the campaign-source compare-and-swap, derives the proposal-bound tree from the complete tracked plus non-ignored worktree delta, creates the hook-free local commit when publication is required, validates the final remote head, durably commits the remediation round, executes the fixed external mutation order (push, deferred issues, thread resolutions), stops the external suffix on the first definitive failure or ambiguity, persists the mandatory campaign bookkeeping including direct remediation exhaustion when deterministically applicable, and disposes ownership before returning an informational result. The model never carries finalization ownership, supplies authoritative tree identity, selects publication paths, sequences authoritative mutation helpers, or decides ambiguity, continuation, bookkeeping, or release. The former model-orchestrated long-lock remediation path is removed, not preserved for compatibility. Speculative worktrees, preparation packets, snapshots, and unpublished hook-free commits are disposable artifacts; deleting them never changes what authoritative mutation the campaign may perform.
+
+**Effective-action commitment before external work.** Request reservations are durably committed inside the owned boundary before any request work begins, and remediation rounds are durably committed inside the deterministic finalizer before the first external remediation mutation begins. A crash after commitment leaves the round consumed and never resumes an in-memory batch.
 
 **RESERVED durable handoff.** The durable per-head RESERVED guard is the authoritative handoff to the request executor, identified by matching campaign identity, owner lock, and the exact guard — no action IDs, reservation tokens, or handoff tokens. The executor establishes authority from durable state and never reserves or consumes again.
 
 **Terminal proof and disposition.** Terminal decisions carry a deterministic basis: `durable_local` when current durable campaign state alone proves terminality (for example campaign-wide RESERVED ambiguity, inspected across every guard), `observation` when the conclusion also depends on current GitHub state. Observation-derived terminalization is confirmed by exactly one bounded fresh confirmation snapshot; a contradicting or failed confirmation does not terminalize. Callers cannot choose terminal status, proof basis, or disposition. Scheduler cleanup is authorized only after a release-permitted terminal outcome and confirmed matching release.
 
-**Successful final-remediation exhaustion.** When a delivery's committed remediation batch completes successfully and durable campaign state alone proves the last effective round was consumed with no other terminal result, no open request window, and no unclassified request attempt on any head, the delivery terminalizes `rounds_exhausted` through the owned finalization boundary in the same delivery, releases the matching terminal lock, and only then enters best-effort scheduler cleanup. No later delivery is required merely to discover that the successful final remediation used the last round. Clean-unsuccessful and ambiguous attempts keep their existing release and retention semantics, and correctness never depends on this finalization: a later delivery terminalizes the same exhausted state through the owned-worker decision.
+**Successful final-remediation exhaustion.** When a delivery's remediation batch completes successfully under the deterministic finalizer and durable campaign state alone proves the last effective round was consumed with no other terminal result, no open request window, and no unclassified request attempt on any head, the finalizer terminalizes `rounds_exhausted` in the same invocation, releases the matching terminal lock, and only then authorizes best-effort scheduler cleanup. No later delivery is required merely to discover that the successful final remediation used the last round. Clean-unsuccessful and ambiguous attempts keep their existing release and retention semantics, and correctness never depends on this finalization: a later delivery terminalizes the same exhausted state through the owned-worker decision.
 
 **Response grace.** A request may become `codex_review_service_unresponsive` only at or after `max(interval_minutes, 20)` minutes of authoritative elapsed grace, independent of the scheduler cadence. Effective-round exhaustion prevents new effective actions but never erases an already-started asynchronous review lifecycle: an outstanding current-head request window, applicable 👀 within it, approval, and attributable completion keep precedence over generic exhaustion, and observing them consumes no round. With no outstanding request window, an applicable but current-head-unattributable Codex reaction does not keep an exhausted campaign waiting: exhaustion terminalizes `rounds_exhausted`, and the reaction still proves neither approval nor review progress.
 
-Phase 3 completes the external Git/GitHub mutation boundaries (final request revalidation and POST classification, one-commit one-push Fix-now publication, deferred-issue ensure/create with marker plus evidence-fingerprint identity, and independent target-specific review-thread resolution). Each boundary performs its own fresh evidence revalidation and final ownership check immediately before the mutation, classifies results as confirmed, definitively failed, or ambiguous, and retains ownership on ambiguity. The runtime is canary-ready only after a separately authorized live canary.
+Only the remediation slice of the external Git/GitHub mutation boundaries has migrated into the deterministic remediation finalizer (one-commit one-push Fix-now publication of the exact proposal-bound tree, deferred-issue ensure/create with marker plus evidence-fingerprint identity, and independent target-specific review-thread resolution, each with fresh evidence revalidation, a final ownership check immediately before the mutation, at most one mutation attempt, and confirmed / definitively-failed / ambiguous classification). The review-request boundary keeps its existing form. The runtime is canary-ready only after a separately authorized live canary.
 
 ## Applicable Codex evidence
 
@@ -402,20 +407,20 @@ Further review-request behavior follows campaign policy and the review-request r
 
 ## Remediation batches
 
-Each remediation attempt works against a bounded in-memory set of applicable unresolved Codex review threads from a stable current-head observation.
+Each remediation attempt works against a bounded prepared set of applicable unresolved Codex review threads frozen by deterministic preparation from a stable current-head observation.
 
 Do not continuously absorb newly arriving review feedback into the same attempt.
 
-The in-memory batch exists only for the lifetime of that attempt.
-If the worker is interrupted, the batch is discarded.
-A later attempt observes the current world again.
+The prepared batch is fixed for the lifetime of its semantic proposal; the packet and frozen snapshot that record it are disposable speculative artifacts, not durable workflow state.
+If the worker is interrupted, the proposal is discarded.
+A later attempt observes the current world again and prepares fresh.
 
-Before making a triage outcome externally visible, re-observe the exact target thread and the relevant current-head state.
+Before making a triage outcome externally visible, the deterministic finalizer re-observes the exact target thread and the relevant current-head state.
 
-If external change has invalidated the evidence supporting that outcome, do not apply the stale outcome.
-Either revalidate the outcome within the same in-memory attempt or end the attempt cleanly and allow a later round to work from fresh authoritative state.
+If external change has invalidated the evidence supporting that outcome, the whole proposal is stale and nothing is applied.
+The attempt ends cleanly and a later round works from fresh authoritative state.
 
-A remediation attempt is successfully complete only when every thread in its frozen in-memory batch that remains unresolved has a verified outcome.
+A remediation attempt is successfully complete only when every thread in its exact prepared batch that remains unresolved has a verified outcome.
 
 A thread may be complete because:
 

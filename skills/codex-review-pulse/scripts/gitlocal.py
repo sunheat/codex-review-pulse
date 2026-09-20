@@ -4,10 +4,14 @@
 The user's primary worktree is never modified. Remediation runs in detached
 temporary worktrees under the repository-associated v2 state directory. A batch
 creates at most one commit and one push, never an empty commit, never a
-force-push, and a remote head advancement aborts publication.
+force-push, and a remote head advancement aborts publication. Authoritative
+commit creation never executes Git hooks (``core.hooksPath`` is pointed at an
+empty directory for the one commit invocation).
 
-``publish_batch`` is the internal one-commit/one-push engine used by the Phase 3
-Fix-now publication boundary; it is not an alternate product-facing push path.
+The publication primitives (``stage_complete_delta``, ``write_tree``,
+``head_tree_oid``, ``commit_index_hook_free``, ``push_publication_commit``)
+are internal library boundaries of the deterministic remediation finalizer
+(``remediation.py``); they are not alternate product-facing push paths.
 """
 
 from __future__ import annotations
@@ -15,8 +19,10 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import tempfile
 from typing import Any, Callable
 
 import storage
@@ -170,22 +176,83 @@ def remove_worktree(
     return {"removed": str(target)}
 
 
-def _inside(worktree: Path, path: str) -> Path:
-    """Resolve a publication path strictly inside the worktree."""
-    wt = _canonical(worktree)
-    candidate = Path(os.path.realpath(os.path.abspath(str(worktree / path))))
-    if not _canonical(candidate).startswith(wt + os.sep):
-        raise RuntimeError(f"Publication path escapes the worktree: {path}")
-    return candidate
+def worktree_is_registered(repository_path: str | Path, path: str | Path) -> bool:
+    """True when the path is a registered worktree of this repository."""
+    target = Path(path).resolve()
+    return any(
+        _same_location(target, candidate)
+        for candidate in _registered_worktrees(repository_path)
+    )
 
 
-def publish_batch(
+def stage_complete_delta(
+    worktree: str | Path, *, runner: Callable[..., subprocess.CompletedProcess[str]] = git
+) -> None:
+    """Stage the complete non-ignored worktree delta (complete `git add -A`).
+
+    Tracked modifications, tracked deletions, and non-ignored untracked files
+    are staged; ignored files are excluded by Git's deterministic ignore
+    rules. Unmerged index entries fail here and refuse publication.
+    """
+    staged = runner("add", "-A", "--", ".", cwd=str(worktree))
+    if staged.returncode != 0:
+        raise RuntimeError(staged.stderr.strip())
+
+
+def write_tree(
+    worktree: str | Path, *, runner: Callable[..., subprocess.CompletedProcess[str]] = git
+) -> str:
+    """Return the exact Git tree OID of the current worktree index."""
+    written = runner("write-tree", cwd=str(worktree))
+    if written.returncode != 0:
+        raise RuntimeError(written.stderr.strip())
+    return written.stdout.strip()
+
+
+def head_tree_oid(
+    worktree: str | Path, *, runner: Callable[..., subprocess.CompletedProcess[str]] = git
+) -> str:
+    """Return the tree OID of the worktree's HEAD commit."""
+    resolved = runner("rev-parse", "HEAD^{tree}", cwd=str(worktree))
+    if resolved.returncode != 0:
+        raise RuntimeError(resolved.stderr.strip())
+    return resolved.stdout.strip()
+
+
+def commit_index_hook_free(
+    worktree: str | Path,
+    *,
+    message: str,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = git,
+) -> str:
+    """Create one commit from the current index without executing Git hooks.
+
+    ``core.hooksPath`` is pointed at a fresh empty directory for this one
+    invocation, so no repository- or user-configured hook can run. The caller
+    verifies the resulting commit's tree against the bound tree.
+    """
+    hooks_dir = tempfile.mkdtemp(prefix="crp-no-hooks-")
+    try:
+        committed = runner(
+            "-c", f"core.hooksPath={hooks_dir}", "commit", "-m", message,
+            cwd=str(worktree),
+        )
+        if committed.returncode != 0:
+            raise RuntimeError(committed.stderr.strip())
+        resolved = runner("rev-parse", "HEAD", cwd=str(worktree))
+        if resolved.returncode != 0:
+            raise RuntimeError(resolved.stderr.strip())
+        return resolved.stdout.strip()
+    finally:
+        shutil.rmtree(hooks_dir, ignore_errors=True)
+
+
+def push_publication_commit(
     *,
     worktree: str | Path,
     branch: str,
-    paths: list[str],
-    commit_message: str,
     expected_head: str,
+    local_commit: str,
     repository: str,
     pr_number: int,
     owner_token: str,
@@ -194,49 +261,18 @@ def publish_batch(
     runner: Callable[..., subprocess.CompletedProcess[str]] = git,
     before_push: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
-    """Internal one-commit, one-push publication engine, never force.
+    """Internal one-push publication tail, never force. Ambiguity fails closed.
 
-    This is not a product-facing boundary: the Phase 3 Fix-now publication
-    boundary (``externalize.py publish-fix-now``) wraps it with frozen-evidence
-    revalidation, current-PR-head validation, and the final ownership check.
+    This is not a product-facing boundary: the deterministic remediation
+    finalizer wraps it with round commitment and downstream mutation ordering.
     ``before_push`` runs as the final local authority operation immediately
-    before the push attempt. Ambiguous publication fails closed.
+    before the push attempt. The caller has already created ``local_commit``
+    and validated the remote head; this helper re-checks the remote head,
+    pushes exactly once, and classifies the outcome from re-observation.
     """
     storage.ensure_active_campaign_owner(
         repository, pr_number, owner_token, repository_path=repository_path
     )
-    wt = Path(worktree).resolve()
-    if not paths:
-        raise ValueError("At least one explicit path is required for publication")
-    resolved_paths = [
-        os.path.relpath(str(_inside(wt, p)), str(wt)) for p in paths
-    ]
-
-    def g(*args: str) -> subprocess.CompletedProcess[str]:
-        return runner(*args, cwd=wt)
-
-    before = remote_head(repository_path, branch, remote=remote)
-    if before != expected_head:
-        return {
-            "published": False,
-            "status": "remote_head_advanced",
-            "expected_head": expected_head,
-            "remote_head": before,
-        }
-
-    staged = g("add", "--", *resolved_paths)
-    if staged.returncode != 0:
-        raise RuntimeError(staged.stderr.strip())
-    diff = g("diff", "--cached", "--quiet")
-    if diff.returncode == 0:
-        return {"published": False, "status": "no_changes"}
-    if diff.returncode != 1:
-        raise RuntimeError(diff.stderr.strip())
-
-    committed = g("commit", "-m", commit_message)
-    if committed.returncode != 0:
-        raise RuntimeError(committed.stderr.strip())
-    local_head = g("rev-parse", "HEAD").stdout.strip()
 
     second = remote_head(repository_path, branch, remote=remote)
     if second != expected_head:
@@ -245,44 +281,44 @@ def publish_batch(
             "status": "remote_head_advanced_after_commit",
             "expected_head": expected_head,
             "remote_head": second,
-            "local_commit": local_head,
+            "local_commit": local_commit,
         }
 
     if before_push is not None:
         before_push()
     push = runner(
-        "push", remote, f"HEAD:refs/heads/{branch}", cwd=wt
+        "push", remote, f"HEAD:refs/heads/{branch}", cwd=str(worktree)
     )
     if push.returncode != 0:
         # Re-observe to classify a potentially-accepted push instead of guessing.
         observed = remote_head(repository_path, branch, remote=remote)
-        if observed == local_head:
-            return {"published": True, "status": "pushed", "commit": local_head}
+        if observed == local_commit:
+            return {"published": True, "status": "pushed", "commit": local_commit}
         if observed == expected_head:
             return {
                 "published": False,
                 "status": "push_failed_clean",
-                "local_commit": local_head,
+                "local_commit": local_commit,
                 "remote_head": observed,
                 "error": push.stderr.strip(),
             }
         return {
             "published": False,
             "status": "ambiguous_publication",
-            "local_commit": local_head,
+            "local_commit": local_commit,
             "remote_head": observed,
             "error": push.stderr.strip(),
         }
 
     confirmed = remote_head(repository_path, branch, remote=remote)
-    if confirmed != local_head:
+    if confirmed != local_commit:
         return {
             "published": False,
             "status": "ambiguous_publication",
-            "local_commit": local_head,
+            "local_commit": local_commit,
             "remote_head": confirmed,
         }
-    return {"published": True, "status": "pushed", "commit": local_head}
+    return {"published": True, "status": "pushed", "commit": local_commit}
 
 
 def main() -> None:

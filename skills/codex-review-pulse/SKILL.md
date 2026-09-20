@@ -72,8 +72,10 @@ launcher conversation or working directory.
   [the launcher guide](references/launcher.md).
 - **Scheduled worker** — runs on each delivery with no conversational context:
   inspects the lock first, acquires the PR-scoped lock, then invokes the
-  deterministic owned-worker decision boundary exactly once before any
-  effective action, and externalizes committed actions only afterward. Follow
+  deterministic owned-worker decision boundary exactly once. When it selects
+  remediation, deterministic preparation freezes the batch and worktree and
+  releases ownership before the worker performs speculative semantic work and
+  one finalizer invocation without holding the permanent lock. Follow
   [the worker guide](references/worker.md).
 
 Manual recovery of the permanent lock is an explicit human boundary; see
@@ -92,23 +94,31 @@ Manual recovery of the permanent lock is an explicit human boundary; see
   terminalizes as `hard_failed`. Host metadata that is not exposed is unknown
   and is never inferred.
 - No TTL, heartbeat, renewal, stale detection, or automatic lock stealing.
+- The permanent lock never spans model work. Deterministic preparation
+  releases ownership before speculative semantic work; the worker holds no
+  owner token during that interval, consumes no round, and its disappearance
+  leaves only disposable speculative local artifacts.
 - One remediation batch creates at most one commit and one push; never force
-  push; publish fixing state before resolving a thread.
+  push; publish fixing state before resolving a thread. The deterministic
+  finalizer enforces this ordering itself.
+- The remediation round is committed by the deterministic finalizer, after
+  complete validation of the prepared semantic authorization unit and before
+  the first external product mutation; it is never refunded.
+- The `remediation_prepared` targets enumeration is the batch's only target
+  list; the preparation packet binds it to the matching frozen evidence,
+  prepared head, worktree, and campaign-source witness and contains no
+  additional targets and no second membership manifest. The worker never
+  scans the snapshot to enlarge the batch.
+- A pre-mutation structured `refused` or `stale` finalizer result proves no
+  external product mutation began and no round was consumed, and never by
+  itself forces retained-lock recovery; damaged or inconsistent frozen
+  evidence still fails closed and requires explicit recovery.
 - One automatic `@codex review` attempt per campaign and head; its round and
   allowance are consumed before the external mutation and are never restored.
 - The durable RESERVED guard is the handoff to the request executor; the
   executor never reserves or consumes again.
 - Unknown or incomplete evidence is never treated as absence.
 - Ambiguous external mutation fails closed and keeps the ownership lock.
-- The committed `remediation_committed["threads"]` enumeration is the batch's
-  only target list; the persisted batch snapshot holds the matching raw frozen
-  evidence and contains no additional targets and no second membership
-  manifest. The worker never scans the snapshot to enlarge the batch.
-- A pre-mutation structured `refused` result (a target outside the committed
-  batch, an empty Fix-now selection, or duplicate target IDs) proves the
-  mutation never began and never by itself forces retained-lock recovery;
-  damaged or inconsistent frozen evidence still fails closed and requires
-  explicit recovery.
 - An owned delivery that still verifiably owns the retained permanent lock may
   make one best-effort pause attempt against its directly self-identified
   exact native Automation before stopping for manual recovery; later busy
@@ -139,8 +149,23 @@ Manual recovery of the permanent lock is an explicit human boundary; see
   existing fail-closed or recovery rule.
 - Discovery metadata never authorizes a live run. Development work on this
   repository is not a product run.
-- Phase 3 externalizes only already-committed actions through deterministic
-  mutation-specific boundaries: final evidence and ownership revalidation, at
-  most one mutation attempt per boundary, and authoritative confirmed /
-  definitively-failed / ambiguous classification. Raw transport mutators are
-  not alternate packaged product paths.
+- Only the remediation transaction has migrated to the deterministic control
+  plane. The top-level campaign routing and the review-request and reaction
+  lifecycle remain Phase-2-unmigrated compatibility paths; the native
+  Automation lifecycle remains a later phase. Durable campaign authority
+  (identity, configuration, rounds, guards, lock, terminality) differs from
+  disposable speculative artifacts (packets, snapshots, worktrees,
+  hook-free commits that were never published).
+- Remediation external mutations flow only through the deterministic
+  finalizer (`remediation.py finalize`): one controller-owned preparation
+  packet, one controller-derived proposal-bound tree from the complete
+  non-ignored worktree delta, hook-free authoritative commit creation, one
+  push, at most one mutation attempt per issue and thread boundary, the
+  fixed external mutation order, and authoritative confirmed /
+  definitively-failed / ambiguous classification. Definitive failure stops
+  the external suffix but never the mandatory bookkeeping; ambiguity remains
+  fail closed. The final result is informational, and lost finalizer output
+  never leaves a completed transaction locked. Full-access Codex execution
+  is not hard capability isolation, and GitHub thread resolution is not an
+  atomic compare-and-swap. Raw transport mutators are not alternate packaged
+  product paths.

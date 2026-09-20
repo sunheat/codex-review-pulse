@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 from copy import deepcopy
 from datetime import datetime
+import hashlib
+import json
 import re
 import secrets
 from typing import Any, Iterable
@@ -135,6 +137,24 @@ def unique_logins(
     if not result:
         raise ValueError(f"At least one {label} login is required")
     return result
+
+
+def campaign_source_digest(campaign: dict[str, Any]) -> str:
+    """Canonical digest of one durable campaign record (the source witness).
+
+    This is the campaign-source compare-and-swap representation: the digest
+    changes whenever the record changes, so every authoritative transition
+    that would make a proposal prepared from the previous source stale also
+    invalidates the witness observed by later finalization. It is derived
+    from the record itself, never synchronized as a second campaign state.
+    """
+    canonical = json.dumps(
+        campaign,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def parse_timestamp(value: object) -> datetime:

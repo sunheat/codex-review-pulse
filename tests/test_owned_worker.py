@@ -24,6 +24,7 @@ sys.path.insert(0, str(SCRIPTS))
 import campaign_model as model  # noqa: E402
 import externalize  # noqa: E402
 import owned  # noqa: E402
+import remediation  # noqa: E402
 import storage  # noqa: E402
 
 
@@ -75,13 +76,16 @@ def snapshot(
     }
 
 
-def thread(thread_id: str, *, login: str = CODEX) -> dict:
+def thread(thread_id: str, *, login: str = CODEX, resolved: bool = False) -> dict:
     return {
         "id": thread_id,
-        "is_resolved": False,
+        "is_resolved": resolved,
         "root_login": login,
         "path": "x.py",
         "body": "change",
+        "root_comment_id": f"{thread_id}-rc1",
+        "root_updated_at": T0,
+        "url": f"https://example.test/{thread_id}",
     }
 
 
@@ -116,6 +120,7 @@ class WorkerDecisionFixture(unittest.TestCase):
         git(self.repo, "add", "f.txt")
         git(self.repo, "commit", "-m", "init")
         self.repository_path = self.repo
+        self.h1 = git(self.repo, "rev-parse", "HEAD")
         self.campaign = model.new_campaign(
             campaign_id=CAMPAIGN_ID,
             repository="owner/repo",
@@ -164,6 +169,7 @@ class WorkerDecisionFixture(unittest.TestCase):
             pr_number=7,
             owner_token=token or self.token,
             fetch_snapshot=self.fetch,
+            fetch_remote=lambda: None,
             repository_path=self.repository_path,
         )
 
@@ -281,16 +287,17 @@ class ObservationTests(WorkerDecisionFixture):
             storage.inspect_lock(
                 "owner/repo", 7, repository_path=self.repository_path
             )
-            return snapshot(threads=[thread("T1")])
+            return snapshot(threads=[thread("T1")], head=self.h1)
 
         outcome = owned.run_worker_decision(
             repository="owner/repo",
             pr_number=7,
             owner_token=self.token,
             fetch_snapshot=guarded_fetch,
+            fetch_remote=lambda: None,
             repository_path=self.repository_path,
         )
-        self.assertEqual(outcome["outcome"], "remediation_committed")
+        self.assertEqual(outcome["outcome"], "remediation_prepared")
 
     def test_stale_s0_cannot_authorize_remediation_after_fresh_resolution(self) -> None:
         # Admission (S0) may have seen feedback, but the boundary observes S1
@@ -381,26 +388,30 @@ class OrderingTests(WorkerDecisionFixture):
 
 
 class CommitmentTests(WorkerDecisionFixture):
-    def test_remediation_is_returned_only_after_one_durable_round(self) -> None:
-        self.fetches = [snapshot(threads=[thread("T1"), thread("T2")])]
+    def test_remediation_preparation_returns_without_consuming_a_round(self) -> None:
+        self.fetches = [
+            snapshot(threads=[thread("T1"), thread("T2")], head=self.h1)
+        ]
         outcome = self.decide()
-        self.assertEqual(outcome["outcome"], "remediation_committed")
-        self.assertTrue(outcome["round_committed"])
-        self.assertEqual(outcome["rounds_used"], 1)
-        self.assertEqual(
-            [t["id"] for t in outcome["threads"]], ["T1", "T2"]
-        )
-        self.assertEqual(outcome["expected_head"], H1)
-        self.assertEqual(outcome["ownership"], "retained")
+        self.assertEqual(outcome["outcome"], "remediation_prepared")
+        self.assertEqual(outcome["action"], "run_semantic_remediation")
+        self.assertFalse(outcome["round_committed"])
+        self.assertEqual(outcome["targets"], ["T1", "T2"])
+        self.assertEqual(outcome["prepared_head"], self.h1)
+        self.assertEqual(outcome["ownership"], "released")
         self.assertFalse(outcome["scheduler_cleanup_authorized"])
-        # The frozen batch is not persisted; only the round is durable.
-        self.assertEqual(self.on_disk()["rounds_used"], 1)
+        # Preparation consumes no round and holds no ownership: if the model
+        # disappears here, only disposable speculative artifacts remain.
+        self.assertEqual(self.on_disk()["rounds_used"], 0)
         self.assertEqual(self.on_disk()["guards"], [])
-        snapshot_on_disk = json.loads(
-            Path(outcome["snapshot_path"]).read_text(encoding="utf-8")
+        self.assertEqual(self.lock_status(), "absent")
+        packet = json.loads(
+            Path(outcome["packet_path"]).read_text(encoding="utf-8")
         )
-        self.assertEqual(snapshot_on_disk["head_oid"], H1)
-        Path(outcome["snapshot_path"]).unlink()
+        self.assertEqual(packet["prepared_head"], self.h1)
+        self.assertEqual([t["id"] for t in packet["targets"]], ["T1", "T2"])
+        self.assertNotIn("owner_token", json.dumps(packet))
+        self.assertTrue(Path(outcome["worktree"]).exists())
 
     def test_request_commitment_reserves_exactly_once(self) -> None:
         self.fetches = [snapshot()]
@@ -494,39 +505,46 @@ def raw_thread(
 
 
 class BatchProjectionTests(WorkerDecisionFixture):
-    """One authoritative remediation batch: directive == projected snapshot.
+    """One authoritative remediation batch: packet == projected snapshot.
 
     Incident regression for the 14-versus-17 authority mismatch: a worker once
     committed a 14-thread batch but persisted the full 17-thread S1, later
     scanned the snapshot to enlarge its batch, selected a thread outside the
     committed directive, and received an unstructured FrozenEvidenceError that
-    retained the ownership lock forever. The projected snapshot now contains
-    exactly the committed targets and nothing else.
+    retained the ownership lock forever. The preparation packet now contains
+    exactly the committed targets and nothing else, and the finalizer refuses
+    any proposal that does not cover that exact set one-for-one.
     """
 
     def raw_snapshot(self) -> dict:
         return snapshot(
+            head=self.h1,
             threads=[
                 raw_thread("T1"),
                 raw_thread("T2", resolved=True),
                 raw_thread("T3", login="human-reviewer"),
-            ]
+            ],
         )
 
     def read_batch_snapshot(self, outcome: dict) -> dict:
-        return json.loads(Path(outcome["snapshot_path"]).read_text(encoding="utf-8"))
+        packet = json.loads(
+            Path(outcome["packet_path"]).read_text(encoding="utf-8")
+        )
+        return json.loads(
+            Path(packet["batch_snapshot_path"]).read_text(encoding="utf-8")
+        )
 
     def test_projection_contains_exactly_the_committed_batch(self) -> None:
         s1 = self.raw_snapshot()
         self.fetches = [s1]
         outcome = self.decide()
-        self.assertEqual(outcome["outcome"], "remediation_committed")
+        self.assertEqual(outcome["outcome"], "remediation_prepared")
         # The pure decision selects only the unresolved applicable Codex thread.
-        self.assertEqual([t["id"] for t in outcome["threads"]], ["T1"])
+        self.assertEqual(outcome["targets"], ["T1"])
         written = self.read_batch_snapshot(outcome)
         self.assertEqual([t["id"] for t in written["threads"]], ["T1"])
         # The projected entry is the original raw S1 record, not a directive
-        # record: every Phase 3 field is preserved.
+        # record: every frozen identity field is preserved.
         self.assertEqual(written["threads"][0], s1["threads"][0])
         self.assertEqual(written["threads"][0]["root_login"], CODEX)
         self.assertIs(written["threads"][0]["is_resolved"], False)
@@ -538,78 +556,71 @@ class BatchProjectionTests(WorkerDecisionFixture):
         # One batch-membership representation only: the projection changes
         # nothing except the threads array itself.
         self.assertEqual(set(written.keys()), set(s1.keys()))
-        Path(outcome["snapshot_path"]).unlink()
 
-    def test_projection_failure_consumes_no_round(self) -> None:
+    def test_projection_failure_consumes_no_round_and_releases(self) -> None:
         # Two raw records share one ID: the directive would select the ID
         # twice, so the projection is an internal invariant failure that must
-        # fail closed before the remediation round is consumed.
+        # refuse preparation cleanly before any round is consumed.
         self.fetches = [
-            snapshot(threads=[raw_thread("T1"), raw_thread("T1")])
+            snapshot(
+                head=self.h1, threads=[raw_thread("T1"), raw_thread("T1")]
+            )
         ]
         outcome = self.decide()
-        self.assertEqual(outcome["outcome"], "local_fail_closed")
+        self.assertEqual(outcome["outcome"], "remediation_preparation_refused")
+        self.assertEqual(outcome["ownership"], "released")
         self.assertEqual(self.on_disk()["rounds_used"], 0)
+        self.assertEqual(self.lock_status(), "absent")
 
-    def test_empty_directive_target_list_fails_closed(self) -> None:
-        self.fetches = [snapshot()]
+    def test_empty_directive_target_list_refuses_preparation(self) -> None:
+        self.fetches = [snapshot(head=self.h1)]
         with unittest.mock.patch.object(
             model,
             "decide",
             return_value={"action": "remediation_batch", "threads": []},
         ):
             outcome = self.decide()
-        self.assertEqual(outcome["outcome"], "local_fail_closed")
+        self.assertEqual(outcome["outcome"], "remediation_preparation_refused")
+        self.assertEqual(outcome["ownership"], "released")
         self.assertEqual(self.on_disk()["rounds_used"], 0)
+        self.assertEqual(self.lock_status(), "absent")
 
-    def test_snapshot_persistence_failure_consumes_no_round(self) -> None:
+    def test_snapshot_persistence_failure_refuses_preparation(self) -> None:
         self.fetches = [self.raw_snapshot()]
         with unittest.mock.patch.object(
-            owned.admission,
+            owned.remediation.admission,
             "write_private_snapshot",
             side_effect=RuntimeError("disk full"),
         ):
             outcome = self.decide()
-        self.assertEqual(outcome["outcome"], "local_fail_closed")
+        self.assertEqual(outcome["outcome"], "remediation_preparation_refused")
+        self.assertEqual(outcome["ownership"], "released")
         self.assertEqual(self.on_disk()["rounds_used"], 0)
 
     def test_incident_regression_full_s1_cannot_enlarge_or_break_the_batch(self) -> None:
         # Scaled incident regression: the full S1 holds 5 threads, the
         # directive commits 3 applicable ones (originally 17 observed versus
-        # 14 committed). The persisted snapshot contains exactly the committed
-        # batch; externalization cannot select the extra S1 threads, extra
-        # threads cannot trigger FrozenEvidenceError during valid batch work,
-        # and a normal clean completion may release ownership.
+        # 14 committed). The packet contains exactly the committed batch; the
+        # finalizer resolves exactly those targets and no others, and a
+        # normal clean completion releases ownership.
         s1 = snapshot(
+            head=self.h1,
             threads=[
                 raw_thread("T1"),
                 raw_thread("T2"),
                 raw_thread("T5"),
                 raw_thread("T3", resolved=True),
                 raw_thread("T4", login="human-reviewer"),
-            ]
+            ],
         )
         self.fetches = [s1]
         outcome = self.decide()
-        self.assertEqual(outcome["outcome"], "remediation_committed")
-        self.assertEqual(
-            [t["id"] for t in outcome["threads"]], ["T1", "T2", "T5"]
-        )
+        self.assertEqual(outcome["outcome"], "remediation_prepared")
+        self.assertEqual(outcome["targets"], ["T1", "T2", "T5"])
         written = self.read_batch_snapshot(outcome)
         self.assertEqual(
             [t["id"] for t in written["threads"]], ["T1", "T2", "T5"]
         )
-
-        def current() -> dict:
-            return snapshot(
-                threads=[
-                    raw_thread("T1"),
-                    raw_thread("T2"),
-                    raw_thread("T5"),
-                    raw_thread("T3", resolved=True),
-                    raw_thread("T4", login="human-reviewer"),
-                ]
-            )
 
         resolved: list[str] = []
 
@@ -617,71 +628,41 @@ class BatchProjectionTests(WorkerDecisionFixture):
             resolved.append(tid)
             return {"id": tid, "isResolved": True}
 
-        kwargs = dict(
+        result = remediation.finalize_remediation(
             repository="owner/repo",
             pr_number=7,
-            owner_token=self.token,
-            snapshot_path=outcome["snapshot_path"],
-            expected_head=H1,
-            campaign_id=CAMPAIGN_ID,
-            rounds_used=outcome["rounds_used"],
+            packet_path=outcome["packet_path"],
+            proposal_text=json.dumps(
+                {
+                    "kind": remediation.PROPOSAL_KIND,
+                    "schema_version": remediation.PROPOSAL_SCHEMA_VERSION,
+                    "dispositions": [
+                        {"thread_id": "T1", "outcome": "no_fix_required",
+                         "rationale": "Already addressed upstream."},
+                        {"thread_id": "T2", "outcome": "no_fix_required",
+                         "rationale": "False positive; verified."},
+                        {"thread_id": "T5", "outcome": "no_fix_required",
+                         "rationale": "Explicitly unsupported configuration."},
+                    ],
+                }
+            ),
             repository_path=self.repository_path,
-            fetch_snapshot=current,
-            remote_head_call=lambda ref: H1,
+            fetch_snapshot=lambda: s1,
             list_issues=lambda: [],
-            viewer_call=lambda: "operator",
-            resolve_call=resolve_call,
-        )
-        first = externalize.resolve_review_thread(
-            thread_id="T1", outcome="no_fix_required", **kwargs,
-        )
-        self.assertEqual(first["classification"], "confirmed_success")
-        # A thread that was visible in the full S1 but is outside the
-        # committed batch returns a structured refusal, never a
-        # FrozenEvidenceError authority failure.
-        human = externalize.resolve_review_thread(
-            thread_id="T4", outcome="no_fix_required", **kwargs,
-        )
-        self.assertEqual(human["classification"], "refused")
-        self.assertIn("not part of the committed batch", human["reason"])
-        self.assertEqual(resolved, ["T1"])
-        stale = externalize.ensure_deferred_issue(
-            thread_id="T3",
-            triage_head=H1,
-            title="Deferred",
-            body="Deferred follow-up.",
             create_issue=lambda title, body: (_ for _ in ()).throw(
                 AssertionError("creation must not run")
             ),
-            repository="owner/repo",
-            pr_number=7,
-            owner_token=self.token,
-            snapshot_path=outcome["snapshot_path"],
-            campaign_id=CAMPAIGN_ID,
-            rounds_used=outcome["rounds_used"],
-            repository_path=self.repository_path,
-            fetch_snapshot=current,
-            list_issues=lambda: [],
             viewer_call=lambda: "operator",
+            resolve_call=resolve_call,
         )
-        self.assertEqual(stale["classification"], "refused")
-        second = externalize.resolve_review_thread(
-            thread_id="T2", outcome="no_fix_required", **kwargs,
+        self.assertEqual(
+            result["outcome"], "remediation_completed", json.dumps(result, indent=2)
         )
-        third = externalize.resolve_review_thread(
-            thread_id="T5", outcome="no_fix_required", **kwargs,
-        )
-        self.assertEqual(second["classification"], "confirmed_success")
-        self.assertEqual(third["classification"], "confirmed_success")
+        # The finalizer consumed exactly one round and resolved exactly the
+        # prepared targets; the extra S1 threads were never touched.
         self.assertEqual(resolved, ["T1", "T2", "T5"])
-        # Normal clean completion may release ownership.
-        release = storage.release_lock(
-            "owner/repo", 7, owner_token=self.token,
-            repository_path=self.repository_path,
-        )
-        self.assertTrue(release["released"])
+        self.assertEqual(self.on_disk()["rounds_used"], 1)
         self.assertEqual(self.lock_status(), "absent")
-        Path(outcome["snapshot_path"]).unlink()
 
 
 class TerminalConfirmationTests(WorkerDecisionFixture):
@@ -784,40 +765,41 @@ class TerminalConfirmationTests(WorkerDecisionFixture):
 
 
 class CleanUnsuccessfulReleaseRegression(WorkerDecisionFixture):
-    """Confirmed local pre-publication abandonment reaches the guarded release.
+    """Speculative local abandonment costs nothing; committed failures release.
 
-    Incident regression: a committed remediation round followed by a purely
-    local failure (no mutation-capable boundary invoked, every local command
-    known) must end through the existing guarded release, not a retained lock
-    with later busy no-ops. The consumed round stays consumed.
+    Incident regression reshaped by Phase 1: a committed remediation round
+    followed by a purely local failure used to require the guarded release to
+    avoid a retained lock with later busy no-ops. Preparation now consumes no
+    round and holds no ownership, so abandoning unpublished local work before
+    finalization is trivially clean. The committed-round equivalent (a
+    definitive external failure after the finalizer's commitment point) still
+    ends released with the round consumed; that behavior is covered by the
+    remediation finalizer tests.
     """
 
-    def test_confirmed_local_abandonment_releases_and_stays_active(self) -> None:
-        # Non-final-round fixture: one of six effective rounds consumed.
-        self.fetches = [snapshot(threads=[thread("T1")])]
-        committed = self.decide()
-        self.assertEqual(committed["outcome"], "remediation_committed")
-        self.assertEqual(committed["rounds_used"], 1)
-        self.assertEqual(self.on_disk()["status"], model.ACTIVE)
+    def test_abandoned_semantic_work_consumes_no_round_and_stays_released(self) -> None:
+        # Non-final-round fixture: no effective round consumed at all.
+        self.fetches = [snapshot(threads=[thread("T1")], head=self.h1)]
+        outcome = self.decide()
+        self.assertEqual(outcome["outcome"], "remediation_prepared")
+        self.assertEqual(outcome["ownership"], "released")
 
         # Confirmed local pre-publication abandonment: preparation, editing,
-        # and validation all completed with known results, no externalization
-        # boundary was invoked, and no mutation-capable operation remains in
-        # flight. The unpublished batch is abandoned, not resumed.
-        release = storage.release_lock(
-            "owner/repo", 7, owner_token=self.token,
-            repository_path=self.repository_path,
-        )
-        self.assertTrue(release["released"])
-
+        # and validation all completed with known results, no finalizer was
+        # invoked, and no mutation-capable operation remains in flight.
         record = self.on_disk()
-        self.assertEqual(record["rounds_used"], 1)
+        self.assertEqual(record["rounds_used"], 0)
         self.assertEqual(record["status"], model.ACTIVE)
         self.assertEqual(self.lock_status(), "absent")
 
 
 class FinalizationTests(WorkerDecisionFixture):
-    """Same-delivery exhaustion finalization after a successful final remediation."""
+    """Same-delivery exhaustion finalization after a successful final remediation.
+
+    The remediation round is committed the way the deterministic finalizer
+    commits it (a guarded consume_round transition); the tests then exercise
+    the same internal library boundary the finalizer invokes.
+    """
 
     def finalize(self) -> dict:
         return owned.finalize_exhaustion_owned(
@@ -827,18 +809,26 @@ class FinalizationTests(WorkerDecisionFixture):
             repository_path=self.repository_path,
         )
 
+    def consume_final_round(self, *, max_rounds: int) -> None:
+        record = self.on_disk()
+        record["config"]["max_rounds"] = max_rounds
+        record["rounds_used"] = max_rounds - 1
+        storage.save_json(self.campaign_path(), record)
+        storage.transition_active_campaign(
+            "owner/repo",
+            7,
+            owner_token=self.token,
+            transition=lambda r: model.consume_round(r, kind="remediation"),
+            repository_path=self.repository_path,
+        )
+
     def test_successful_final_remediation_finalizes_in_same_delivery(self) -> None:
-        # Active at max-1 rounds; the boundary commits the final remediation
-        # round; after the batch completes successfully the same delivery
+        # Active at max-1 rounds; the final remediation round is durably
+        # committed; after the batch completes successfully the same delivery
         # terminalizes rounds_exhausted and releases without needing another
         # scheduled delivery merely to discover exhaustion.
-        self.campaign["config"]["max_rounds"] = 2
-        self.campaign["rounds_used"] = 1
-        storage.save_json(self.campaign_path(), self.campaign)
-        self.fetches = [snapshot(threads=[thread("T1")])]
-        committed = self.decide()
-        self.assertEqual(committed["outcome"], "remediation_committed")
-        self.assertEqual(committed["rounds_used"], 2)
+        self.consume_final_round(max_rounds=2)
+        self.assertEqual(self.on_disk()["rounds_used"], 2)
         self.assertEqual(self.on_disk()["status"], model.ACTIVE)
 
         finalization = self.finalize()
@@ -856,7 +846,8 @@ class FinalizationTests(WorkerDecisionFixture):
 
     def test_finalization_refuses_while_request_window_is_outstanding(self) -> None:
         # A fully-consumed campaign with an open current-head request window
-        # stays active for non-counting lifecycle observation.
+        # stays active for non-counting lifecycle observation. The request
+        # reservation itself consumes the single allowed round.
         self.campaign["config"]["max_rounds"] = 1
         self.open_window()
         self.assertEqual(self.campaign["rounds_used"], 1)
@@ -869,11 +860,17 @@ class FinalizationTests(WorkerDecisionFixture):
         self.assertEqual(self.lock_status(), "active")
 
     def test_finalization_refuses_while_budget_remains(self) -> None:
-        self.fetches = [snapshot(threads=[thread("T1")])]
-        committed = self.decide()
-        self.assertEqual(committed["outcome"], "remediation_committed")
-        self.assertEqual(committed["rounds_used"], 1)
-        self.assertEqual(self.on_disk()["config"]["max_rounds"], 6)
+        record = self.on_disk()
+        record["config"]["max_rounds"] = 6
+        storage.save_json(self.campaign_path(), record)
+        storage.transition_active_campaign(
+            "owner/repo",
+            7,
+            owner_token=self.token,
+            transition=lambda r: model.consume_round(r, kind="remediation"),
+            repository_path=self.repository_path,
+        )
+        self.assertEqual(self.on_disk()["rounds_used"], 1)
         finalization = self.finalize()
         self.assertFalse(finalization["finalized"])
         self.assertEqual(finalization["outcome"], "not_applicable")
@@ -909,11 +906,8 @@ class FinalizationTests(WorkerDecisionFixture):
         self.assertEqual(self.lock_status(), "active")
 
     def test_terminalized_campaign_is_never_lost_on_release_failure(self) -> None:
-        self.campaign["config"]["max_rounds"] = 2
-        self.campaign["rounds_used"] = 1
-        storage.save_json(self.campaign_path(), self.campaign)
-        self.fetches = [snapshot(threads=[thread("T1")])]
-        self.assertEqual(self.decide()["outcome"], "remediation_committed")
+        self.consume_final_round(max_rounds=2)
+        self.assertEqual(self.on_disk()["rounds_used"], 2)
         with unittest.mock.patch.object(
             storage,
             "release_lock",
