@@ -772,11 +772,9 @@ def finalize_remediation(
                 published_commit: str | None = None
                 fix_now_mode: str | None = None
                 if item["outcome"] == "fix_now":
-                    if published_head is not None:
-                        fix_now_mode = externalize.FIX_NOW_PROSPECTIVE
+                    fix_now_mode = item["mode"]
+                    if fix_now_mode == externalize.FIX_NOW_PROSPECTIVE:
                         published_commit = published_head
-                    else:
-                        fix_now_mode = externalize.FIX_NOW_ALREADY_PRESENT
                 resolution = externalize.resolve_review_thread(
                     repository=canonical,
                     pr_number=pr_number,
@@ -879,46 +877,39 @@ def finalize_remediation(
     #     transition when durable state proves it, then dispose ownership.
     import owned  # local import: owned.py hands off into this module
 
-    finalization = owned.finalize_exhaustion_owned(
-        repository=canonical,
-        pr_number=pr_number,
-        owner_token=token,
-        repository_path=repository_path,
-    )
-    if finalization.get("finalized"):
-        printable["exhaustion_finalized"] = True
-        if finalization.get("ownership") == "released":
+    if stopped is None:
+        finalization = owned.finalize_exhaustion_owned(
+            repository=canonical,
+            pr_number=pr_number,
+            owner_token=token,
+            repository_path=repository_path,
+        )
+        if finalization.get("finalized"):
+            printable["exhaustion_finalized"] = True
+            if finalization.get("ownership") == "released":
+                return {
+                    **printable,
+                    "outcome": "remediation_completed",
+                    "detail": None,
+                    "ownership": "released",
+                    "scheduler_cleanup_authorized": True,
+                }
             return {
                 **printable,
-                "outcome": (
-                    "remediation_completed"
-                    if stopped is None
-                    else "remediation_failed_definitive"
-                ),
-                "detail": stopped[1] if stopped else None,
-                "ownership": "released",
-                "scheduler_cleanup_authorized": True,
+                "outcome": "remediation_completed",
+                "detail": None,
+                "ownership": "retained",
+                "scheduler_cleanup_authorized": False,
+                "reason": "exhaustion terminalized but release could not be confirmed",
             }
-        return {
-            **printable,
-            "outcome": (
-                "remediation_completed"
-                if stopped is None
-                else "remediation_failed_definitive"
-            ),
-            "detail": stopped[1] if stopped else None,
-            "ownership": "retained",
-            "scheduler_cleanup_authorized": False,
-            "reason": "exhaustion terminalized but release could not be confirmed",
-        }
-    if finalization.get("outcome") == "local_fail_closed":
-        return {
-            **printable,
-            "outcome": "local_fail_closed",
-            "reason": finalization.get("reason"),
-            "ownership": "retained",
-            "scheduler_cleanup_authorized": False,
-        }
+        if finalization.get("outcome") == "local_fail_closed":
+            return {
+                **printable,
+                "outcome": "local_fail_closed",
+                "reason": finalization.get("reason"),
+                "ownership": "retained",
+                "scheduler_cleanup_authorized": False,
+            }
 
     released = _try_release(
         canonical, pr_number, token, repository_path=repository_path

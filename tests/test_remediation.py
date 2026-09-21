@@ -837,9 +837,9 @@ class DefinitiveFailureTests(RemediationFixture):
         self.assertEqual(result["ownership"], "released")
         self.assertEqual(self.lock_status(), "absent")
 
-    def test_direct_exhaustion_applies_after_definitive_final_failure(self) -> None:
-        # One allowed round; a definitive publication failure still leaves the
-        # campaign durably exhausted, not indefinitely active.
+    def test_definitive_final_failure_defers_exhaustion_to_next_delivery(self) -> None:
+        # A clean unsuccessful attempt leaves terminal discovery to a later
+        # delivery, even when it consumed the final allowed round.
         record = self.on_disk()
         record["config"]["max_rounds"] = 1
         storage.save_json(self.campaign_path(), record)
@@ -869,10 +869,10 @@ class DefinitiveFailureTests(RemediationFixture):
         finally:
             gitlocal.push_publication_commit = original_push
         self.assertEqual(result["outcome"], "remediation_failed_definitive")
-        self.assertTrue(result.get("exhaustion_finalized"))
+        self.assertFalse(result.get("exhaustion_finalized", False))
         self.assertEqual(result["ownership"], "released")
-        self.assertTrue(result["scheduler_cleanup_authorized"])
-        self.assertEqual(self.on_disk()["status"], model.ROUNDS_EXHAUSTED)
+        self.assertFalse(result["scheduler_cleanup_authorized"])
+        self.assertEqual(self.on_disk()["status"], model.ACTIVE)
         self.assertEqual(self.lock_status(), "absent")
 
     def test_confirmed_prefix_is_preserved_when_suffix_stops(self) -> None:
