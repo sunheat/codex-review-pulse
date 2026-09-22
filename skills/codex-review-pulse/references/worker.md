@@ -277,6 +277,9 @@ enumeration is not part of this batch and waits for a later delivery.
    - `fix_now` with `mode` `already_present_on_prepared_head` — the finding
      is already satisfied by the prepared head itself; no new publication is
      needed for it. Never convert "already fixed" into `no_fix_required`.
+     Do not mix the two Fix-now modes in one proposal: they authorize
+     different heads, so the finalizer rejects the proposal before staging or
+     round commitment.
    - `fix_later` — with bounded `issue_title` and `issue_body`.
    - `no_fix_required` — with bounded `rationale`.
 
