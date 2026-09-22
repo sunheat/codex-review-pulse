@@ -57,6 +57,8 @@ class GitEnvironment:
 
 
 class PublishTests(unittest.TestCase):
+    """The publication primitives behind the deterministic finalizer."""
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.env = GitEnvironment(Path(self._tmp.name))
@@ -105,67 +107,76 @@ class PublishTests(unittest.TestCase):
         git(self.env.clone, "worktree", "remove", "--force", str(self.worktree))
         self._tmp.cleanup()
 
-    def test_publishes_one_commit_and_confirms_remote_head(self) -> None:
+    def stage_tree_and_commit(self, *, message: str = "remediation: fix") -> str:
+        gitlocal.stage_complete_delta(self.worktree)
+        return gitlocal.commit_index_hook_free(self.worktree, message=message)
+
+    def test_stage_write_tree_captures_the_complete_non_ignored_delta(self) -> None:
         (self.worktree / "file.txt").write_text("v2\n", encoding="utf-8")
-        result = gitlocal.publish_batch(
+        (self.worktree / "added.txt").write_text("new\n", encoding="utf-8")
+        gitlocal.stage_complete_delta(self.worktree)
+        tree = gitlocal.write_tree(self.worktree)
+        base = gitlocal.head_tree_oid(self.worktree)
+        self.assertNotEqual(tree, base)
+        names = require(
+            self.worktree, "ls-tree", "-r", "--name-only", tree
+        ).split()
+        self.assertIn("added.txt", names)
+
+    def test_ignored_files_are_excluded_from_the_delta(self) -> None:
+        (self.worktree / "skip.log").write_text("noise\n", encoding="utf-8")
+        (self.worktree / ".gitignore").write_text("skip.log\n", encoding="utf-8")
+        gitlocal.stage_complete_delta(self.worktree)
+        tree = gitlocal.write_tree(self.worktree)
+        names = require(
+            self.worktree, "ls-tree", "-r", "--name-only", tree
+        ).split()
+        self.assertNotIn("skip.log", names)
+        self.assertIn(".gitignore", names)
+
+    def test_empty_delta_write_tree_equals_head_tree(self) -> None:
+        gitlocal.stage_complete_delta(self.worktree)
+        self.assertEqual(
+            gitlocal.write_tree(self.worktree), gitlocal.head_tree_oid(self.worktree)
+        )
+
+    def test_hook_free_commit_ignores_configured_hooks(self) -> None:
+        hooks = self.env.clone / "configured-hooks"
+        hooks.mkdir()
+        (hooks / "pre-commit").write_text(
+            "#!/bin/sh\ntouch HOOK-RAN\nexit 1\n", encoding="utf-8"
+        )
+        require(self.env.clone, "config", "core.hooksPath", str(hooks))
+        (self.worktree / "file.txt").write_text("v2\n", encoding="utf-8")
+        commit = self.stage_tree_and_commit()
+        self.assertNotEqual(commit, self.head1)
+        self.assertFalse((self.env.clone / "HOOK-RAN").exists())
+        self.assertFalse((self.worktree / "HOOK-RAN").exists())
+        self.assertEqual(
+            require(self.worktree, "rev-parse", f"{commit}^{{tree}}"),
+            gitlocal.write_tree(self.worktree),
+        )
+
+    def test_push_publication_commit_pushes_once_and_confirms(self) -> None:
+        (self.worktree / "file.txt").write_text("v2\n", encoding="utf-8")
+        local = self.stage_tree_and_commit()
+        result = gitlocal.push_publication_commit(
             worktree=self.worktree,
             branch="main",
-            paths=["file.txt"],
-            commit_message="remediation: fix",
+            expected_head=self.head1,
+            local_commit=local,
             repository=self.repo,
             pr_number=self.pr,
             owner_token=self.token,
-            expected_head=self.head1,
             repository_path=self.env.clone,
         )
         self.assertTrue(result["published"])
         self.assertEqual(result["status"], "pushed")
         self.assertEqual(
-            gitlocal.remote_head(self.env.clone, "main"), result["commit"]
+            gitlocal.remote_head(self.env.clone, "main"), local
         )
-        log = require(self.env.clone, "log", "--format=%s", "-1", result["commit"])
+        log = require(self.env.clone, "log", "--format=%s", "-1", local)
         self.assertEqual(log, "remediation: fix")
-
-    def test_no_changes_creates_no_commit(self) -> None:
-        before = gitlocal.remote_head(self.env.clone, "main")
-        result = gitlocal.publish_batch(
-            worktree=self.worktree,
-            branch="main",
-            paths=["file.txt"],
-            commit_message="should not happen",
-            repository=self.repo,
-            pr_number=self.pr,
-            owner_token=self.token,
-            expected_head=before,
-            repository_path=self.env.clone,
-        )
-        self.assertFalse(result["published"])
-        self.assertEqual(result["status"], "no_changes")
-        self.assertEqual(gitlocal.remote_head(self.env.clone, "main"), before)
-
-    def test_remote_advancement_aborts_publication(self) -> None:
-        # Someone else lands a commit on the PR branch.
-        (self.env.clone / "file.txt").write_text("v3\n", encoding="utf-8")
-        require(self.env.clone, "add", "file.txt")
-        require(self.env.clone, "commit", "-m", "other work")
-        require(self.env.clone, "push", "origin", "main")
-        advanced = gitlocal.remote_head(self.env.clone, "main")
-
-        (self.worktree / "file.txt").write_text("v2\n", encoding="utf-8")
-        result = gitlocal.publish_batch(
-            worktree=self.worktree,
-            branch="main",
-            paths=["file.txt"],
-            commit_message="remediation: fix",
-            repository=self.repo,
-            pr_number=self.pr,
-            owner_token=self.token,
-            expected_head=self.head1,
-            repository_path=self.env.clone,
-        )
-        self.assertFalse(result["published"])
-        self.assertEqual(result["status"], "remote_head_advanced")
-        self.assertEqual(result["remote_head"], advanced)
 
     def test_push_command_never_uses_force(self) -> None:
         recorded: list[list[str]] = []
@@ -176,15 +187,15 @@ class PublishTests(unittest.TestCase):
             return real_git(*args, cwd=cwd)
 
         (self.worktree / "file.txt").write_text("v2\n", encoding="utf-8")
-        result = gitlocal.publish_batch(
+        local = self.stage_tree_and_commit()
+        result = gitlocal.push_publication_commit(
             worktree=self.worktree,
             branch="main",
-            paths=["file.txt"],
-            commit_message="remediation: fix",
+            expected_head=self.head1,
+            local_commit=local,
             repository=self.repo,
             pr_number=self.pr,
             owner_token=self.token,
-            expected_head=self.head1,
             repository_path=self.env.clone,
             runner=recorder,
         )
@@ -194,32 +205,42 @@ class PublishTests(unittest.TestCase):
         self.assertNotIn("--force-with-lease", push_args)
         self.assertIn("HEAD:refs/heads/main", push_args)
 
-    def test_publish_refuses_paths_outside_worktree(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "escapes the worktree"):
-            gitlocal.publish_batch(
-                worktree=self.worktree,
-                branch="main",
-                paths=["../evil.txt"],
-                commit_message="x",
-                repository=self.repo,
-                pr_number=self.pr,
-                owner_token=self.token,
-                expected_head=self.head1,
-                repository_path=self.env.clone,
-            )
+    def test_remote_advancement_aborts_the_push(self) -> None:
+        # Someone else lands a commit on the PR branch.
+        (self.env.clone / "file.txt").write_text("v3\n", encoding="utf-8")
+        require(self.env.clone, "add", "file.txt")
+        require(self.env.clone, "commit", "-m", "other work")
+        require(self.env.clone, "push", "origin", "main")
+        advanced = gitlocal.remote_head(self.env.clone, "main")
 
-    def test_publish_requires_ownership(self) -> None:
         (self.worktree / "file.txt").write_text("v2\n", encoding="utf-8")
+        local = self.stage_tree_and_commit()
+        result = gitlocal.push_publication_commit(
+            worktree=self.worktree,
+            branch="main",
+            expected_head=self.head1,
+            local_commit=local,
+            repository=self.repo,
+            pr_number=self.pr,
+            owner_token=self.token,
+            repository_path=self.env.clone,
+        )
+        self.assertFalse(result["published"])
+        self.assertEqual(result["status"], "remote_head_advanced_after_commit")
+        self.assertEqual(result["remote_head"], advanced)
+
+    def test_push_requires_ownership(self) -> None:
+        (self.worktree / "file.txt").write_text("v2\n", encoding="utf-8")
+        local = self.stage_tree_and_commit()
         with self.assertRaises(RuntimeError):
-            gitlocal.publish_batch(
+            gitlocal.push_publication_commit(
                 worktree=self.worktree,
                 branch="main",
-                paths=["file.txt"],
-                commit_message="x",
+                expected_head=self.head1,
+                local_commit=local,
                 repository=self.repo,
                 pr_number=self.pr,
                 owner_token="wrong-token",
-                expected_head=self.head1,
                 repository_path=self.env.clone,
             )
 

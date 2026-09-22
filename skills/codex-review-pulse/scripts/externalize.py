@@ -1,39 +1,39 @@
 #!/usr/bin/env python3
-"""Phase 3 externalization boundaries for committed remediation actions.
+"""Internal mutation library for the deterministic remediation finalizer.
 
-Phase 2 (``owned.py``) commits effective actions before any external work.
-This module externalizes exactly those committed remediation actions under the
-same permanent ownership scope:
+This module is not a model-visible CLI and defines no product entry point of
+its own. The deterministic remediation finalizer (``remediation.py``) is the
+single authoritative remediation path: it derives the mutation plan, performs
+the ordering, classifies every result, persists the mandatory campaign
+bookkeeping, and disposes ownership itself. The helpers here are internal
+library boundaries it reuses:
 
-- ``publish-fix-now``: the one-commit, one-push Fix-now publication boundary;
-- ``ensure-issue``: the deferred-issue ensure/create boundary (deterministic
-  marker plus versioned evidence-fingerprint identity, cooperative provenance,
-  at most one creation attempt);
-- ``resolve-thread``: the independent target-specific review-thread resolution
-  boundary.
+- ``ensure_deferred_issue``: the deferred-issue ensure/create boundary
+  (deterministic marker plus versioned evidence-fingerprint identity,
+  cooperative provenance, at most one creation attempt);
+- ``resolve_review_thread``: the independent target-specific review-thread
+  resolution boundary, including the Fix-now already-present submode.
 
-Every boundary performs the same safety-critical sequence itself: load the
-committed-action inputs and Python-owned frozen evidence; perform the required
-fresh authoritative external observation; compare current target/head evidence
-with the frozen evidence; revalidate matching local ownership as the final
-local authority operation immediately before the mutation; perform at most one
-external mutation attempt; classify the result (``confirmed_success``,
-``definitive_failure``, ``ambiguous``, or a pre-mutation ``refused``); and
-return one closed structured outcome.
+The legacy model-orchestrated path (publish-fix-now, ensure-issue, and
+resolve-thread as separately invoked product commands that the model had to
+sequence while carrying receipts and an owner token) has been removed.
+
+Every helper performs the same safety-critical sequence itself: load the
+delivery-local frozen evidence; perform the required fresh authoritative
+external observation; compare current target/head evidence with the frozen
+evidence; revalidate matching local ownership as the final local authority
+operation immediately before the mutation; perform at most one external
+mutation attempt; and classify the result (``confirmed_success``,
+``definitive_failure``, ``ambiguous``, or a pre-mutation ``refused``).
 
 Caller-controlled target-selection mistakes (a selected ID outside the
-committed batch, an empty Fix-now selection, duplicate target IDs) return a
-pre-mutation structured ``refused`` result: no mutation began, nothing is
-ambiguous, and the refusal alone never requires retained-lock recovery. Damaged
-or inconsistent frozen evidence still fails closed through
-``FrozenEvidenceError``.
+frozen batch) return a pre-mutation structured ``refused`` result: no mutation
+began, nothing is ambiguous. Damaged or inconsistent frozen evidence still
+fails closed through ``FrozenEvidenceError``.
 
-No boundary consumes a round, reserves a request, reconstructs a lost batch
-from campaign state, or retries after an ambiguous result. The committed
-remediation handoff is delivery-local and ephemeral: the caller must pass the
-exact ``remediation_committed`` campaign id, round count, and the batch snapshot
-path that received the structured result. Missing, malformed, or incomplete
-frozen evidence grants no mutation authority.
+No helper consumes a round, reserves a request, reconstructs a lost batch
+from campaign state, or retries after an ambiguous result. Missing, malformed,
+or incomplete frozen evidence grants no mutation authority.
 """
 
 from __future__ import annotations
@@ -42,7 +42,6 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-import sys
 from typing import Any, Callable
 
 import campaign_model as model
@@ -54,6 +53,12 @@ import storage
 ISSUE_FINGERPRINT_VERSION = "crpf1"
 
 OUTCOMES = ("fix_now", "fix_later", "no_fix_required")
+
+# Fix-now submodes (semantic model judgment; the controller verifies only
+# tree identity, never semantic code correctness).
+FIX_NOW_PROSPECTIVE = "satisfied_by_prospective_tree"
+FIX_NOW_ALREADY_PRESENT = "already_present_on_prepared_head"
+FIX_NOW_MODES = (FIX_NOW_PROSPECTIVE, FIX_NOW_ALREADY_PRESENT)
 
 
 class FrozenEvidenceError(RuntimeError):
@@ -144,7 +149,8 @@ def _establish_authority(
 
     Requires the semantically valid permanent lock, the exact owner token, a
     valid supported active campaign, the exact committed campaign identity, and
-    a round count that still matches the ``remediation_committed`` handoff.
+    a round count that still matches the finalizer's committed remediation
+    round.
     """
     metadata = storage.ensure_active_campaign_owner(
         repository, pr_number, owner_token, repository_path=repository_path
@@ -242,145 +248,6 @@ def _validate_applicable_target(
         raise FrozenEvidenceError(
             f"Target thread evidence changed since classification: {target['id']}"
         )
-
-
-# ---------------------------------------------------------------------------
-# Fix-now publication boundary
-
-
-def publish_fix_now(
-    *,
-    repository: str,
-    pr_number: int,
-    owner_token: str,
-    snapshot_path: str | Path,
-    thread_ids: list[str],
-    expected_head: str,
-    worktree: str | Path,
-    paths: list[str],
-    commit_message: str,
-    campaign_id: str,
-    rounds_used: int,
-    repository_path: str | Path = ".",
-    fetch_snapshot: Callable[[], dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Externalize Fix-now publication for the committed remediation batch.
-
-    Owns frozen Fix-now target revalidation, current PR and remote-head
-    validation, the final active ownership check immediately before the push,
-    at most one non-force push, and the authoritative remote-result
-    classification. Refuses before any mutation when the frozen evidence or
-    current head/thread evidence no longer matches. The head ref is derived
-    from the boundary's own fresh observation, never from the caller.
-    """
-    canonical = model.canonical_repository(repository)
-    if fetch_snapshot is None:
-        fetch_snapshot = lambda: github_api.fetch_snapshot(canonical, pr_number)  # noqa: E731
-
-    frozen = load_frozen_evidence(snapshot_path)
-    if frozen.get("repository") != canonical or frozen.get("pr_number") != pr_number:
-        raise FrozenEvidenceError("Frozen evidence belongs to a different target")
-    if frozen.get("head_oid") != expected_head:
-        raise FrozenEvidenceError(
-            "Frozen evidence head does not match the expected publication head"
-        )
-    if not thread_ids:
-        return _result(
-            "publish_fix_now",
-            "refused",
-            reason="no Fix-now target was selected for publication",
-        )
-    if len(set(thread_ids)) != len(thread_ids):
-        return _result(
-            "publish_fix_now",
-            "refused",
-            reason="duplicate target IDs in the Fix-now selection",
-        )
-    campaign = _establish_authority(
-        repository,
-        pr_number,
-        owner_token,
-        repository_path=repository_path,
-        campaign_id=campaign_id,
-        rounds_used=rounds_used,
-    )
-    reviewers = set(campaign["config"]["reviewer_logins"])
-    try:
-        targets = [_frozen_thread(frozen, thread_id) for thread_id in thread_ids]
-    except TargetSelectionError as error:
-        return _result("publish_fix_now", "refused", reason=str(error))
-    for target in targets:
-        if target["root_author"] not in reviewers:
-            raise FrozenEvidenceError(
-                f"Frozen thread root author is not an applicable Codex identity: "
-                f"{target['id']}"
-            )
-
-    try:
-        current = fetch_snapshot()
-        _validate_current_repository(
-            current, canonical=canonical, pr_number=pr_number, expected_head=expected_head
-        )
-        for target in targets:
-            _validate_applicable_target(current, target)
-    except FrozenEvidenceError as error:
-        return _result("publish_fix_now", "refused", reason=str(error))
-    branch = current.get("head_ref_name")
-    if not isinstance(branch, str) or not branch:
-        return _result(
-            "publish_fix_now",
-            "refused",
-            reason="the fresh observation does not expose a supported head ref",
-        )
-
-    def final_authority_check() -> None:
-        """The final local authority operation before the push attempt."""
-        _establish_authority(
-            repository,
-            pr_number,
-            owner_token,
-            repository_path=repository_path,
-            campaign_id=campaign_id,
-            rounds_used=rounds_used,
-        )
-
-    published = gitlocal.publish_batch(
-        worktree=worktree,
-        branch=branch,
-        paths=paths,
-        commit_message=commit_message,
-        expected_head=expected_head,
-        repository=canonical,
-        pr_number=pr_number,
-        owner_token=owner_token,
-        repository_path=repository_path,
-        before_push=final_authority_check,
-    )
-    status = published.get("status")
-    if published.get("published") is True and status == "pushed":
-        return _result(
-            "publish_fix_now",
-            "confirmed_success",
-            published_head=published["commit"],
-            expected_head=expected_head,
-        )
-    if status == "ambiguous_publication":
-        return _result(
-            "publish_fix_now",
-            "ambiguous",
-            status=status,
-            local_commit=published.get("local_commit"),
-            remote_head=published.get("remote_head"),
-        )
-    # no_changes, remote_head_advanced, remote_head_advanced_after_commit, and
-    # push_failed_clean all authoritatively prove no publication occurred.
-    return _result(
-        "publish_fix_now",
-        "definitive_failure",
-        status=status,
-        local_commit=published.get("local_commit"),
-        remote_head=published.get("remote_head"),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -656,6 +523,7 @@ def resolve_review_thread(
     rounds_used: int,
     published_commit: str | None = None,
     issue_number: int | None = None,
+    fix_now_mode: str | None = None,
     repository_path: str | Path = ".",
     fetch_snapshot: Callable[[], dict[str, Any]] | None = None,
     remote_head_call: Callable[[str], str] | None = None,
@@ -663,14 +531,16 @@ def resolve_review_thread(
     viewer_call: Callable[[], str] | None = None,
     resolve_call: Callable[[str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Externalize one thread resolution for the committed remediation batch.
+    """Externalize one thread resolution for the frozen remediation batch.
 
     Validates each target independently against the frozen evidence; sibling
     threads are never prerequisites. Enforces the ordering rules
-    deterministically: Fix-now requires the confirmed publication commit (a
-    different, currently-pushed, current head); Fix-later requires a
-    trustworthy exact current-evidence open issue; No-fix requires only the
-    final revalidation.
+    deterministically: Fix-now in the prospective-tree submode requires the
+    confirmed publication commit (a different, currently-pushed, current
+    head); Fix-now in the already-present submode requires the prepared head
+    itself to remain the authoritative remote head and forbids a publication
+    commit; Fix-later requires a trustworthy exact current-evidence open
+    issue; No-fix requires only the final revalidation.
     """
     canonical = model.canonical_repository(repository)
     if fetch_snapshot is None:
@@ -714,6 +584,12 @@ def resolve_review_thread(
         )
     if outcome not in OUTCOMES:
         raise RuntimeError(f"Unknown remediation outcome: {outcome!r}")
+    if fix_now_mode is not None and outcome != "fix_now":
+        raise RuntimeError("fix_now_mode applies only to the fix_now outcome")
+    if outcome == "fix_now" and fix_now_mode is None:
+        fix_now_mode = FIX_NOW_PROSPECTIVE
+    if outcome == "fix_now" and fix_now_mode not in FIX_NOW_MODES:
+        raise RuntimeError(f"Unknown Fix-now submode: {fix_now_mode!r}")
 
     try:
         current = fetch_snapshot()
@@ -747,7 +623,31 @@ def resolve_review_thread(
             reason=f"target thread evidence changed since classification: {thread_id}",
         )
 
-    if outcome == "fix_now":
+    if outcome == "fix_now" and fix_now_mode == FIX_NOW_ALREADY_PRESENT:
+        # The finding is already satisfied by the authoritative prepared tree.
+        # The controller verifies only tree identity: the prepared head must
+        # still be the expected current head and the remote branch head, and
+        # no publication commit may be claimed for this submode.
+        if isinstance(published_commit, str) and published_commit:
+            return _result(
+                "resolve_review_thread",
+                "refused",
+                reason="already-present Fix-now resolution must not claim a publication commit",
+            )
+        if expected_head != frozen.get("head_oid"):
+            return _result(
+                "resolve_review_thread",
+                "refused",
+                reason="already-present Fix-now resolution must target the prepared head",
+            )
+        remote = remote_head_call(current.get("head_ref_name") or "")
+        if remote != expected_head:
+            return _result(
+                "resolve_review_thread",
+                "refused",
+                reason="the remote branch head does not match the prepared head",
+            )
+    elif outcome == "fix_now":
         if not isinstance(published_commit, str) or not published_commit:
             return _result(
                 "resolve_review_thread",
@@ -881,121 +781,25 @@ def _classify_resolution_failure(
 # ---------------------------------------------------------------------------
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Build the documented CLI; every subparser inherits the common options."""
+def library_main() -> None:
+    """Library self-check only; there is deliberately no product CLI here.
+
+    The model-visible externalization commands were removed with the legacy
+    long-lock remediation path. The deterministic remediation finalizer
+    (``remediation.py``) is the single authoritative remediation product path
+    and calls these helpers as internal library boundaries.
+    """
     parser = argparse.ArgumentParser(
         description=(
-            "Phase 3 externalization boundaries for committed remediation "
-            "actions (publish-fix-now, ensure-issue, resolve-thread)"
+            "Internal mutation library for the deterministic remediation "
+            "finalizer; no product CLI is exposed here"
         )
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--repo", required=True)
-    common.add_argument("--pr", required=True, type=int)
-    common.add_argument("--repository-path", default=".")
-    common.add_argument("--owner-token", required=True)
-    common.add_argument("--snapshot", required=True, type=Path)
-    common.add_argument("--campaign-id", required=True)
-    common.add_argument("--rounds-used", required=True, type=int)
-
-    publish = subparsers.add_parser(
-        "publish-fix-now",
-        help="One-commit one-push Fix-now publication",
-        parents=[common],
-    )
-    publish.add_argument("--thread-id", action="append", required=True, dest="thread_ids")
-    publish.add_argument("--expected-head", required=True)
-    publish.add_argument("--worktree", required=True)
-    publish.add_argument("--path", action="append", required=True, dest="paths")
-    publish.add_argument("--message", required=True)
-
-    issue = subparsers.add_parser(
-        "ensure-issue",
-        help="Reuse or create the deferred Fix-later issue",
-        parents=[common],
-    )
-    issue.add_argument("--thread-id", required=True)
-    issue.add_argument("--expected-head", required=True)
-    issue.add_argument("--title", required=True)
-    issue.add_argument("--body-file", required=True, type=Path)
-
-    resolve = subparsers.add_parser(
-        "resolve-thread",
-        help="Resolve one independently validated review thread",
-        parents=[common],
-    )
-    resolve.add_argument("--thread-id", required=True)
-    resolve.add_argument("--expected-head", required=True)
-    resolve.add_argument(
-        "--outcome",
-        choices=list(OUTCOMES),
-        required=True,
-    )
-    resolve.add_argument("--published-commit")
-    resolve.add_argument("--issue-number", type=int)
-
-    return parser
-
-
-def main() -> None:
-    args = build_parser().parse_args()
-    if args.command == "publish-fix-now":
-        result = publish_fix_now(
-            repository=args.repo,
-            pr_number=args.pr,
-            owner_token=args.owner_token,
-            snapshot_path=args.snapshot,
-            thread_ids=list(args.thread_ids),
-            expected_head=args.expected_head,
-            worktree=args.worktree,
-            paths=list(args.paths),
-            commit_message=args.message,
-            campaign_id=args.campaign_id,
-            rounds_used=args.rounds_used,
-            repository_path=args.repository_path,
-        )
-    elif args.command == "ensure-issue":
-        body = (
-            args.body_file.read_text(encoding="utf-8")
-            if str(args.body_file) != "-"
-            else sys.stdin.read()
-        )
-        result = ensure_deferred_issue(
-            repository=args.repo,
-            pr_number=args.pr,
-            owner_token=args.owner_token,
-            snapshot_path=args.snapshot,
-            thread_id=args.thread_id,
-            triage_head=args.expected_head,
-            title=args.title,
-            body=body,
-            campaign_id=args.campaign_id,
-            rounds_used=args.rounds_used,
-            repository_path=args.repository_path,
-        )
-    else:
-        result = resolve_review_thread(
-            repository=args.repo,
-            pr_number=args.pr,
-            owner_token=args.owner_token,
-            snapshot_path=args.snapshot,
-            thread_id=args.thread_id,
-            expected_head=args.expected_head,
-            outcome=args.outcome,
-            campaign_id=args.campaign_id,
-            rounds_used=args.rounds_used,
-            published_commit=args.published_commit,
-            issue_number=args.issue_number,
-            repository_path=args.repository_path,
-        )
-    print(json.dumps(result, indent=2))
+    parser.add_argument("--selftest", action="store_true")
+    args = parser.parse_args()
+    if args.selftest:
+        print("externalize ok")
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as error:
-        print(storage.error_text(error), file=sys.stderr)
-        raise SystemExit(1) from error
+    library_main()

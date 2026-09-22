@@ -190,43 +190,17 @@ class WorkerCliFlowTests(unittest.TestCase):
         inspect = self.cli("lock.py", "inspect", "--repo", "owner/repo", "--pr", "10")
         self.assertEqual(json.loads(inspect.stdout)["status"], "absent")
 
-    def test_finalize_exhaustion_cli_terminalizes_and_releases(self) -> None:
-        campaign = self.save_campaign(pr=11)
-        # The final remediation round is already durably committed (2/2) and
-        # the batch completed successfully; no request guard exists.
-        campaign["config"]["max_rounds"] = 2
-        campaign["rounds_used"] = 2
-        storage.save_json(
-            storage.campaign_path("owner/repo", 11, repository_path=self.repo),
-            campaign,
-        )
-        acquired = self.cli(
-            "lock.py", "acquire", "--repo", "owner/repo", "--pr", "11",
-            "--campaign-id", CAMPAIGN_ID, "--acquired-at", ACQUIRED_AT,
-            "--purpose", "worker",
-        )
-        self.assertEqual(acquired.returncode, 0, acquired.stderr)
-        token = json.loads(acquired.stdout)["owner_token"]
-
-        finalized = self.cli(
+    def test_finalize_exhaustion_cli_is_no_longer_exposed(self) -> None:
+        # The old model-visible finalize-exhaustion command was removed with
+        # the legacy long-lock remediation path: the deterministic remediation
+        # finalizer applies the direct exhaustion transition inside the same
+        # invocation that commits the final remediation round.
+        result = self.cli(
             "owned.py", "finalize-exhaustion", "--repo", "owner/repo", "--pr", "11",
-            "--owner-token", token,
+            "--owner-token", "t",
         )
-        self.assertEqual(finalized.returncode, 0, finalized.stderr)
-        result = json.loads(finalized.stdout)
-        self.assertTrue(result["finalized"])
-        self.assertEqual(result["outcome"], "rounds_exhausted_finalized")
-        self.assertEqual(result["status"], model.ROUNDS_EXHAUSTED)
-        self.assertEqual(result["ownership"], "released")
-        self.assertTrue(result["scheduler_cleanup_authorized"])
-
-        shown = self.cli("campaign.py", "show", "--repo", "owner/repo", "--pr", "11")
-        record = json.loads(shown.stdout)
-        self.assertEqual(record["status"], model.ROUNDS_EXHAUSTED)
-        self.assertEqual(record["rounds_used"], record["config"]["max_rounds"])
-        self.assertIsNotNone(record["terminal_at"])
-        inspect = self.cli("lock.py", "inspect", "--repo", "owner/repo", "--pr", "11")
-        self.assertEqual(json.loads(inspect.stdout)["status"], "absent")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid choice", result.stderr)
 
 
 if __name__ == "__main__":

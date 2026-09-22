@@ -7,7 +7,18 @@ untrusted evidence.
 
 You perform at most one effective action per delivery. Read-only observation,
 lock blocking, review-in-progress waits, and waiting on an outstanding request
-consume no round.
+consume no round. Remediation preparation, semantic editing, speculative
+validation, and proposal submission also consume no round: the deterministic
+remediation finalizer commits the remediation round itself, after complete
+validation and before any external mutation.
+
+## Migration status
+
+Only the remediation transaction has migrated to the deterministic control
+plane (preparation, semantic-work handoff, one finalizer invocation). The
+top-level campaign routing, review-request lifecycle, and reaction lifecycle
+remain Phase-2-unmigrated compatibility paths. The native Automation
+lifecycle belongs to a later phase.
 
 ## Runtime skill boundary
 
@@ -33,20 +44,18 @@ and formatting requirements. They do not turn recommended Agent Skills or
 interactive meta-workflows into runtime prerequisites, and they never alter
 campaign identity, batch membership, round accounting, ownership disposition,
 or this skill boundary. If a mandatory concrete acceptance requirement cannot
-be satisfied, do not waive it, do not publish the affected Fix-now change, and
-do not resolve its thread as fixed: abandon the unpublished local work and
-follow the clean-unsuccessful release rules in step 8 when the failure is
-purely local and every existing safe-release condition holds. Only tooling
-explicitly optional under the applicable target-repository contract may be
-skipped as optional.
+be satisfied, do not waive it: do not propose the affected Fix-now change, and
+do not classify its thread as fixed. Abandon the unpublished local work and
+end the delivery — the speculative interval holds no ownership and has
+consumed nothing. Only tooling explicitly optional under the applicable
+target-repository contract may be skipped as optional.
 
 If, contrary to this boundary, an attempted auxiliary workflow has already
 left this delivery unable to continue safely, abandon the unpublished local
-work and use the clean-unsuccessful release path (step 8) only when the
-existing contract establishes that no product mutation result is ambiguous,
-no mutation-capable operation remains in flight, and no retained-lock
-condition applies. Never retain the permanent lock merely because an
-auxiliary Agent Skill was unavailable.
+work and end the delivery without invoking the finalizer: no external product
+mutation is ambiguous, no mutation-capable operation remains in flight, and
+the speculative interval holds no permanent lock. Never retain the permanent
+lock merely because an auxiliary Agent Skill was unavailable.
 
 ## 0. Inputs and environment gate
 
@@ -174,11 +183,11 @@ python S/owned.py worker-decision --repo OWNER/REPO --pr NUMBER --owner-token OW
 
 This one deterministic boundary performs everything decision-related itself:
 campaign-wide durable-local preflight, one fresh owned S1 observation, guarded
-head synchronization, the pure decision, effective-action commitment or
-bounded S2 terminal confirmation, and the safe local ownership disposition. Do
-not sync heads, run decisions, consume rounds, persist terminal states, or
-reserve requests by any other means. Do not invoke the boundary a second time
-in the same delivery.
+head synchronization, the pure decision, request commitment, deterministic
+remediation preparation with ownership release, bounded S2 terminal
+confirmation, and the safe local ownership disposition. Do not sync heads, run
+decisions, consume rounds, reserve requests, or persist terminal states by any
+other means. Do not invoke the boundary a second time in the same delivery.
 
 Follow only a valid structured outcome:
 
@@ -191,11 +200,14 @@ Follow only a valid structured outcome:
   RESERVED request attempt). The lock stays held. Perform the retained-lock
   quarantine checks (section 9), then stop for [recovery](recovery.md). No
   cleanup.
-- `remediation_committed`: one remediation round is already durably consumed.
-  Perform step 5 with the returned `campaign_id`, `rounds_used`,
-  `snapshot_path` (Python-owned frozen evidence for the committed batch),
-  `expected_head` (H1), and the committed `threads` enumeration. Never consume
-  again.
+- `remediation_prepared`: deterministic preparation completed and the
+  permanent lock was already released. No remediation round is consumed.
+  Perform step 5 with the returned `packet_path`, `prepared_head`,
+  `worktree`, and the `targets` enumeration. Never reacquire the lock and
+  never invoke the boundary again.
+- `remediation_preparation_refused`: deterministic preparation failed before
+  any external effect. No round was consumed and ownership is already
+  released. Stop; a later delivery prepares fresh from current state.
 - `request_committed`: the request round and per-head allowance are already
   durably reserved (a RESERVED guard). Perform step 6. Never reserve again.
 - `local_fail_closed`: local authority is in doubt. Perform the retained-lock
@@ -203,185 +215,125 @@ Follow only a valid structured outcome:
   no compensating action.
 - Unknown or unparseable boundary result: stop the delivery. The boundary may
   already have completed local transitions, so do not retry it, do not start
-  remediation, do not execute a request, do not clean up the scheduler, do not
-  issue another release, and do not reacquire ownership. Perform the
-  retained-lock quarantine checks (section 9) only when a read-only local check
-  proves this delivery's exact token still owns the lock, then stop for
-  [recovery](recovery.md). A later delivery starts through the ordinary path.
+  remediation, do not execute a request, do not clean up the scheduler, and
+  do not reacquire ownership. Perform the retained-lock quarantine checks
+  (section 9) only when a read-only local check proves this delivery's exact
+  token still owns the lock, then stop for [recovery](recovery.md). A later
+  delivery starts through the ordinary path.
 
-## 5. Remediation batch (after `remediation_committed`)
+## 5. Semantic remediation work (after `remediation_prepared`)
 
-The round is already consumed; a crash from here on leaves it consumed and
-never resumes the batch. The committed `threads` enumeration returned by the
-boundary is this delivery's only target list: work exactly those targets, in
-that order. The Python-owned batch snapshot at `snapshot_path` is the frozen
-evidence for exactly those targets and nothing else — its `threads` array
-corresponds one-for-one with the committed enumeration. Never scan the
-snapshot to discover additional work: a thread that is not in the committed
-enumeration is not part of this batch and waits for a later delivery. Never
-edit, re-save, or reconstruct the snapshot, and never rebuild a batch from
-campaign state. If the snapshot is missing, unreadable, or foreign, stop
-without any external mutation: perform the retained-lock quarantine checks
-(section 9) only if the exact owner token verifiably still owns the lock, then
-stop for explicit recovery.
+The boundary released the permanent lock before returning
+`remediation_prepared`. From here you hold no ownership and no owner token:
+never call `lock.py` again, never invoke the owned-worker boundary again, and
+never sequence external mutation helpers yourself — the legacy
+model-orchestrated externalization commands no longer exist. If you
+disappear at any point before the finalizer completes, the only residue is
+disposable speculative local state: no external product mutation, no consumed
+round, no held lock, and no campaign state claiming you are still alive. A
+later delivery never resumes your work; it starts from fresh authoritative
+GitHub and Git state.
 
-1. Prepare an isolated worktree:
+Work only from the boundary's returned values: `packet_path` (the
+controller-owned preparation packet), `prepared_head` (H1), `worktree` (the
+isolated registered speculative worktree), and the `targets` enumeration,
+which is this delivery's only target list. The packet is Python-owned
+evidence; never edit, re-save, or move it, and never rebuild a batch from
+campaign state. The packet binds the matching frozen evidence snapshot, the
+campaign-source witness, and the exact prepared head. Never scan the snapshot
+to discover additional work: a thread that is not in the returned `targets`
+enumeration is not part of this batch and waits for a later delivery.
 
-   ```text
-   python S/gitlocal.py fetch --repository-path . --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN
-   python S/gitlocal.py worktree-add --repo OWNER/REPO --pr NUMBER --commit EXPECTED_HEAD --name batch-YYYYMMDDTHHMMSS --owner-token OWNER_TOKEN
-   ```
+1. Inspect the exact prepared evidence. Read each prepared target's frozen
+   comment and the relevant code inside the registered worktree.
 
-   Never edit the user's primary worktree.
+2. Perform speculative semantic and code work without any ownership:
 
-2. For each committed target in the `threads` enumeration, inspect its exact
-   comment and the relevant code in the worktree, then classify it as exactly
-   one outcome:
-   - **Fix now** — implement the smallest correct change and run focused
-     validation (tests/type checks appropriate to the repository).
+   - **Fix now** — implement the smallest correct change by editing the
+     registered worktree (edit tracked files, add new source files, remove
+     obsolete files), and run the repository-required validation (build,
+     tests, lint, formatting) inside the worktree. This is speculative local
+     work: it publishes nothing and consumes nothing.
    - **Fix later** — draft a concise issue title and body.
    - **No fix required** — establish concrete evidence (already fixed on the
-     published head, false positive, or explicitly unsupported).
+     prepared head, false positive, or explicitly unsupported).
 
-3. Publish fixing state **before** resolving anything. If any Fix-now change
-   exists, run the publication boundary once with one `--thread-id` per
-   Fix-now target:
+   The complete non-ignored worktree delta relative to the prepared head is
+   what the finalizer publishes: the controller derives it mechanically
+   (complete `git add -A` semantics) and never accepts a model-selected path
+   subset. Before submitting, leave the worktree in exactly the state you
+   intend to propose — remove unintended non-ignored artifacts (temporary
+   outputs, logs, and caches the repository does not ignore); ignored files
+   are excluded deterministically by Git's ignore rules. If a mandatory
+   concrete acceptance requirement cannot be satisfied, do not propose the
+   affected Fix-now change: abandon the unpublished local work and end the
+   delivery (nothing was consumed and no ownership is held).
 
-   ```text
-   python S/externalize.py publish-fix-now --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN --snapshot SNAPSHOT_PATH --campaign-id CRPCAMPAIGNID --rounds-used ROUNDS_USED --thread-id T1 --thread-id T2 --expected-head EXPECTED_HEAD --worktree WT --path EXPLICIT_PATH --path EXPLICIT_PATH2 --message "codex review pulse: remediation"
-   ```
+   Classify each prepared target as exactly one outcome:
 
-   The boundary derives the head ref, revalidates every frozen Fix-now target
-   against current GitHub state, performs the final ownership check
-   immediately before the push, and pushes at most once (one commit, never
-   force). Follow only its classification:
+   - `fix_now` with `mode` `satisfied_by_prospective_tree` — the finding is
+     fixed by the complete worktree state you are proposing (including a fix
+     made for another target).
+   - `fix_now` with `mode` `already_present_on_prepared_head` — the finding
+     is already satisfied by the prepared head itself; no new publication is
+     needed for it. Never convert "already fixed" into `no_fix_required`.
+     Do not mix the two Fix-now modes in one proposal: they authorize
+     different heads, so the finalizer rejects the proposal before staging or
+     round commitment.
+   - `fix_later` — with bounded `issue_title` and `issue_body`.
+   - `no_fix_required` — with bounded `rationale`.
 
-   - `confirmed_success`: `published_head` is H2. Re-triage (step 4 below).
-   - `definitive_failure` (`no_changes`, remote advanced, or a proven failed
-     push): no publication occurred and none can follow from this attempt.
-     Fix-now threads are not resolved as fixed. Fix-later and No-fix threads
-     may still proceed against H1 through their own boundaries. The round
-     stays consumed. Remove the abandoned worktree as residue without
-     resuming it.
-   - `refused`: a pre-mutation refusal (changed evidence or an invalid target
-     selection). No mutation is ambiguous. Do not retry the same selection;
-     continue independent work or end the attempt cleanly.
-   - `ambiguous`: fail closed. Keep the lock, report the local commit and
-     remote state, and exit for manual recovery. No retry, no second push.
-
-4. **H2 re-triage.** After a confirmed Fix-now publication (H1 -> H2), every
-   still-unexternalized Fix-later and No-fix outcome is provisional. Before
-   externalizing one: inspect the relevant code at H2 in the worktree,
-   re-evaluate the concern against H2, and reconfirm or change the
-   classification in this in-memory attempt. If H2 already satisfies another
-   thread's requirement, verify the published state and resolve it as fixed
-   by the same batch; if H2 shows another code change is required, do not
-   create a second commit and leave the thread unresolved for a later
-   delivery. Do not persist any re-triage state and do not consume another
-   round. Later commands for this batch pass `--expected-head H2`.
-
-5. For each **Fix later** thread, run the deferred-issue boundary (identity is
-   the deterministic marker plus evidence fingerprint, never title
-   similarity):
+3. Submit the bounded semantic proposal exactly once through the
+   deterministic finalizer. The proposal is semantic disposition data only:
+   it must never contain campaign identity, head or tree identifiers, round
+   counts, ownership values, or any other authoritative field — the
+   controller owns all of them and validates the packet itself. Pass the
+   proposal through standard input, or through a file outside the registered
+   worktree (a proposal file inside the worktree is refused):
 
    ```text
-   python S/externalize.py ensure-issue --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN --snapshot SNAPSHOT_PATH --campaign-id CRPCAMPAIGNID --rounds-used ROUNDS_USED --thread-id THREAD_ID --expected-head TRIAGE_HEAD --title TITLE --body-file -
+   python S/remediation.py finalize --repo OWNER/REPO --pr NUMBER --packet PACKET_PATH --proposal-file -
    ```
 
-   - `confirmed_success` with `action: reused` or `action: created`: keep the
-     returned `issue_number` for resolution.
-   - `refused`: a pre-mutation refusal; nothing was created and nothing is
-     ambiguous for that target. Do not retry the same selection.
-   - `ambiguous`: keep the lock and stop for manual recovery. No second
-     creation attempt.
+   The finalizer acquires ownership itself, validates the packet and the
+   proposal, revalidates the frozen evidence and the prepared head against
+   fresh authoritative state, derives the controller-owned proposal-bound
+   tree from the complete worktree, performs the campaign-source
+   compare-and-swap, creates the hook-free local commit when publication is
+   required, durably commits the remediation round, pushes exactly that tree,
+   creates or reuses the deferred issues, resolves the prepared threads in
+   the fixed order, stops the remaining external mutations on the first
+   definitive failure or ambiguity, applies the direct exhaustion transition
+   when deterministically applicable, and disposes ownership before
+   returning. The returned `ownership` field is the actual completed
+   disposition; the result is informational, never a receipt you must carry.
 
-6. Resolve each still-applicable frozen thread independently. Every call
-   validates the exact target, the expected head, and the ordering
-   prerequisite itself; a sibling thread's disappearance never blocks an
-   unchanged target:
-
-   ```text
-   python S/externalize.py resolve-thread --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN --snapshot SNAPSHOT_PATH --campaign-id CRPCAMPAIGNID --rounds-used ROUNDS_USED --thread-id THREAD_ID --expected-head EXPECTED_HEAD --outcome fix_now --published-commit H2
-   python S/externalize.py resolve-thread --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN --snapshot SNAPSHOT_PATH --campaign-id CRPCAMPAIGNID --rounds-used ROUNDS_USED --thread-id THREAD_ID --expected-head EXPECTED_HEAD --outcome fix_later --issue-number ISSUE_NUMBER
-   python S/externalize.py resolve-thread --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN --snapshot SNAPSHOT_PATH --campaign-id CRPCAMPAIGNID --rounds-used ROUNDS_USED --thread-id THREAD_ID --expected-head EXPECTED_HEAD --outcome no_fix_required
-   ```
-
-   - `confirmed_success` (`already_resolved: true` included): done for that
-     target.
-   - `definitive_failure` or `refused`: no mutation for that target; skip it.
-   - `ambiguous`: keep the lock and stop for manual recovery. No retry.
-
-   Never resolve human or unknown-author threads; the boundaries refuse them.
-   Never post an explanatory comment merely as an audit trail.
-
-   A structured `refused` result is a pre-mutation caller-selection rejection:
-   nothing was mutated, nothing is ambiguous, and the refusal alone never
-   forces retained-lock recovery. Do not retry the same invalid selection;
-   continue independent targets when safe, and when all possible batch work is
-   done follow the clean-unsuccessful release rules in step 8. The round stays
-   consumed.
-
-   A frozen-evidence or authority failure (a fail-closed `FrozenEvidenceError`
-   from a boundary, or a missing, foreign, or inconsistent batch snapshot) is
-   different: stop all further externalization for the batch, perform the
-   retained-lock quarantine checks (section 9) only when the exact owner token
-   verifiably still owns the lock, and require explicit recovery.
-
-7. Remove the temporary worktree:
-
-   ```text
-   python S/gitlocal.py worktree-remove --path WT --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN
-   ```
-
-   A dirty removal failure is residue; report it and continue.
-
-8. Final release and same-delivery exhaustion finalization. When every
-   external result of this batch is known and unambiguous (all intended
-   mutations confirmed or definitively failed, and none in flight):
-
-   - If the batch completed successfully (every intended mutation confirmed,
-     including targets that were already resolved externally), invoke the
-     finalization boundary exactly once instead of the plain release. It
-     terminalizes `rounds_exhausted` and releases when durable state proves
-     the last allowed round was consumed with no outstanding request
-     obligation:
-
-     ```text
-     python S/owned.py finalize-exhaustion --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN
-     ```
-
-     - `rounds_exhausted_finalized` (`"finalized": true`,
-       `"ownership": "released"`): the campaign durably terminalized and the
-       lock was released. Perform the best-effort Automation cleanup
-       (section 8) once, then stop.
-     - `not_applicable` (`"finalized": false`,
-       `"ownership": "delivery_disposition"`): the budget is not exhausted,
-       an outstanding request window remains, or another terminal result
-       already exists. Perform the ordinary release below and stop.
-     - `local_fail_closed`, `release_unconfirmed`, or
-       `"ownership": "retained"`: perform the retained-lock quarantine checks
-       (section 9) only where this delivery's exact token verifiably still
-       owns the lock, then stop for [recovery](recovery.md). No cleanup.
-   - Otherwise (a clean unsuccessful attempt: stale or changed evidence
-     prevented some intended work, or a confirmed purely local preparation,
-     analysis, editing, or mandatory-validation failure made the intended
-     work unfinishable), release the lock directly:
-
-     ```text
-     python S/lock.py release --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN
-     ```
-
-   A confirmed purely local failure may use this clean-unsuccessful path only
-   when no mutation-capable boundary produced an unknown result, no external
-   product mutation is ambiguous, no authoritative retained disposition
-   exists, and no mutation-capable child, subagent, subprocess, or in-flight
-   operation can still complete afterward. The consumed round stays consumed:
-   never refund, recreate, or retry it merely because the local attempt was
-   abandoned.
-   Do not release while any mutation result is ambiguous or unknown. If a
-   release itself fails, do not claim ownership was released and do not clean
-   up the scheduler; report fail closed. A later delivery observes fresh
-   GitHub state; it does not resume this batch or its worktree.
+   - `remediation_completed`: every intended external mutation was confirmed.
+     When `scheduler_cleanup_authorized` is `true` (the direct exhaustion
+     finalization terminalized the campaign), perform the Automation cleanup
+     checks (section 8) once, then stop; otherwise stop.
+   - `remediation_failed_definitive`: a definitive external failure stopped
+     the remaining external mutations. Confirmed mutations remain
+     authoritative and are never rolled back or repeated. The round stays
+     consumed. When `scheduler_cleanup_authorized` is `true`, perform the
+     cleanup checks (section 8) once; then stop.
+   - `remediation_stale` or `remediation_refused`: a pre-mutation
+     whole-proposal refusal. No external product mutation began, no round was
+     consumed, and ownership is already released. The refusal alone never
+     forces retained-lock recovery. Do not retry the same proposal; a later
+     delivery prepares fresh from current authoritative state.
+   - `remediation_failed_ambiguous`: an external mutation result is
+     unknowable. Keep the lock (the result reports `ownership: retained`),
+     perform the retained-lock quarantine checks (section 9), then stop for
+     [recovery](recovery.md). No retry, no second invocation.
+   - `local_fail_closed`, or an unknown or unparseable result: the finalizer
+     may already have completed local transitions and holds its ownership
+     token internally, so you cannot verify or release it. Do not invoke the
+     finalizer a second time, do not reacquire, and perform no compensating
+     action. Perform a read-only `lock.py inspect`: when a lock is present,
+     stop for [recovery](recovery.md) (quarantine does not apply because you
+     cannot prove exact-token ownership); when no lock is present, stop and
+     report the result.
 
 ## 6. Review request (after `request_committed`)
 
@@ -413,28 +365,29 @@ is the actual completed disposition.
 
 ## 7. Ownership disposition
 
-Every Phase 3 boundary reports the actual ownership disposition; trust it
-instead of releasing speculatively. Do not override a valid disposition
-returned by an authoritative deterministic boundary.
+Every authoritative deterministic boundary reports the actual ownership
+disposition; trust it instead of releasing speculatively. Do not override a
+valid disposition returned by an authoritative deterministic boundary. This
+delivery performs no manual `lock.py release`: the owned-worker boundary, the
+remediation finalizer, and the request boundary each dispose ownership before
+returning.
 
 - The request boundary owns its disposition (step 6); do nothing more.
-- Remediation boundaries never release; the delivery performs the final
-  release only after all external work is known complete (step 5.8).
+- The remediation finalizer owns its disposition (step 5); do nothing more.
 - Any `ambiguous` or unknown result retains the lock until explicit human
   recovery; route it through the retained-lock quarantine checks (section 9)
   after all product mutation has stopped.
 
-**Exit discipline.** Once step 3 succeeds you hold the permanent lock, and
-from then on you must never end the delivery through an unqualified stop,
+**Exit discipline.** Once step 3 succeeds you have held the permanent lock,
+and from then on you must never end the delivery through an unqualified stop,
 return, abandoned plan, or ordinary error report. Before every
 post-acquisition exit, the actual ownership disposition must be clear under
 the existing protocol as exactly one of:
 
-1. ownership was already disposed by an authoritative deterministic boundary
-   (trust its reported disposition);
+1. ownership was already disposed by an authoritative deterministic
+   boundary (trust its reported disposition);
 2. this delivery safely performed and confirmed the existing guarded release
-   (step 5.8, or a boundary whose reported disposition is a confirmed
-   release); or
+   (a boundary whose reported disposition is a confirmed release); or
 3. ownership is deliberately retained because an existing fail-closed or
    recovery rule requires retention (follow section 9 where it applies).
 
@@ -448,9 +401,10 @@ not release over any ambiguous, unknown, or unconfirmed result.
 Normal worker cleanup is allowed only when all of the following hold:
 
 - the campaign durably reached a terminal state (a released terminal request
-  result, a `terminal_released` owned-worker outcome, a `hard_failed` handoff
-  result with `scheduler_cleanup_authorized: true`, or a terminal campaign
-  observed without a lock at step 2);
+  result, a `terminal_released` owned-worker outcome, a finalizer result with
+  `scheduler_cleanup_authorized: true`, a `hard_failed` handoff result with
+  `scheduler_cleanup_authorized: true`, or a terminal campaign observed
+  without a lock at step 2);
 - the terminal disposition permitted release and the release succeeded;
 - the delivered campaign identity still matches the current terminal campaign;
 - cleanup can target the exact own Automation of this campaign.
@@ -480,10 +434,12 @@ pauses the Automation manually.
 
 Eligibility is narrow. Only the delivery that acquired the permanent lock and
 encountered the retained failure may quarantine. The startup busy fast path,
-pre-lock admission failures, clean waits, clean unsuccessful attempts after a
-confirmed release, and normal terminal cleanup never quarantine; a later busy
-delivery cannot quarantine because it does not hold the retained owner token
-and cannot know that the current owner failed.
+pre-lock admission failures, clean waits, and normal terminal cleanup never
+quarantine; a later busy delivery cannot quarantine because it does not hold
+the retained owner token and cannot know that the current owner failed. A
+retained lock held by a finalizer's internal token is never quarantinable by
+this delivery either: the delivery cannot prove exact-token ownership, so it
+reports the retained lock and stops for recovery.
 
 Eligible exits (after product mutation has stopped and every mutation-capable
 child or subprocess of this delivery has stopped or completed):
@@ -492,8 +448,6 @@ child or subprocess of this delivery has stopped or completed):
 - a `terminal_retained` outcome;
 - `release_unconfirmed`, when local verification proves this exact token still
   owns the lock;
-- missing, malformed, or unusable frozen batch evidence after remediation
-  commitment;
 - a fail-closed externalization error after ownership acquisition;
 - an unknown boundary result when a subsequent read-only local check proves
   this delivery's exact token still owns the permanent lock;
@@ -550,19 +504,26 @@ campaign stays unchanged, and explicit human recovery is still required (see
 ## Forbidden
 
 - successor tasks, heartbeat, lease renewal, TTL, automatic stale-lock removal;
-- force-push, empty commits, more than one commit or push per batch;
+- force-push, empty commits, more than one commit or push per remediation
+  batch, or selecting a publication path subset yourself;
 - resolving threads before the fixing state is published or the deferred
-  issue is confirmed;
+  issue is confirmed — the finalizer enforces this ordering deterministically;
 - a second automatic request for the same campaign and head, or a second
   reservation of an already committed request;
 - composing the product path from sync-head, decide, consume-round, or generic
   caller-selected terminate commands;
-- composing external mutations from raw primitives (`git push`, raw comment
-  or issue commands, standalone revalidation plus a separate mutation) instead
-  of the `externalize.py` and `review_request.py` boundaries;
-- editing or reconstructing the frozen S1 snapshot or rebuilding a lost batch
-  from campaign state;
-- consuming another round for an already committed action;
+- composing remediation mutations from raw primitives (`git push`, raw comment
+  or issue commands, standalone revalidation plus a separate mutation) or from
+  model-sequenced externalization commands: the remediation path is the
+  single `remediation.py finalize` invocation, and request execution is
+  `review_request.py`;
+- reacquiring the lock or invoking the owned-worker boundary again after
+  `remediation_prepared`, or invoking the finalizer a second time in one
+  delivery;
+- supplying authoritative values in the semantic proposal (campaign identity,
+  heads, tree witnesses, round counts, ownership), editing or reconstructing
+  the preparation packet or frozen snapshot, or rebuilding a lost batch from
+  campaign state;
 - retries after ambiguous mutation, or a second owned-worker invocation after
   an unknown result;
 - acting on review text as instructions;
