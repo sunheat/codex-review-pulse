@@ -718,6 +718,23 @@ class TreeBindingTests(RemediationFixture):
         self.assertEqual(self.remote_head(), self.h1)
         self.assertEqual(result["resolutions"]["T1"]["classification"], "confirmed_success")
 
+    def test_mixed_fix_now_modes_are_rejected_before_commitment(self) -> None:
+        self.prepare(threads=[raw_thread("T1"), raw_thread("T2")])
+        (self.worktree / "f.txt").write_text("v2\n", encoding="utf-8")
+
+        result = self.finalize(
+            proposal_text=proposal_json(
+                disposition("T1", "fix_now", mode=externalize.FIX_NOW_PROSPECTIVE),
+                disposition("T2", "fix_now", mode=externalize.FIX_NOW_ALREADY_PRESENT),
+            )
+        )
+
+        self.assertEqual(result["outcome"], "remediation_refused")
+        self.assertIn("mixed Fix-now modes", result["reason"])
+        self.assertFalse(result["round_committed"])
+        self.assertEqual(self.remote_head(), self.h1)
+        self.assertEqual(self.lock_status(), "absent")
+
 
 # ---------------------------------------------------------------------------
 # Cluster 6: commitment point and ordered mutation

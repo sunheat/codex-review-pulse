@@ -381,6 +381,14 @@ def parse_proposal(proposal_text: str) -> list[dict[str, Any]]:
             )
         else:
             raise RemediationRefused(f"proposal disposition has an unknown outcome")
+    fix_now_modes = {
+        item["mode"] for item in parsed if item["outcome"] == "fix_now"
+    }
+    if len(fix_now_modes) > 1:
+        raise RemediationRefused(
+            "proposal has mixed Fix-now modes; all Fix-now targets must authorize "
+            "the same tree"
+        )
     return parsed
 
 
