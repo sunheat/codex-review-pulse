@@ -25,6 +25,8 @@ evidence; revalidate matching local ownership as the final local authority
 operation immediately before the mutation; perform at most one external
 mutation attempt; and classify the result (``confirmed_success``,
 ``definitive_failure``, ``ambiguous``, or a pre-mutation ``refused``).
+Read-only observation failures before a mutation return ``refused``; they do
+not make previously confirmed external results ambiguous.
 
 Caller-controlled target-selection mistakes (a selected ID outside the
 frozen batch) return a pre-mutation structured ``refused`` result: no mutation
@@ -432,8 +434,10 @@ def ensure_deferred_issue(
             current, canonical=canonical, pr_number=pr_number, expected_head=triage_head
         )
         _validate_applicable_target(current, target)
-    except FrozenEvidenceError as error:
-        return _result("ensure_deferred_issue", "refused", reason=str(error))
+    except Exception as error:  # noqa: BLE001 - observation precedes creation
+        return _result(
+            "ensure_deferred_issue", "refused", reason=storage.error_text(error)
+        )
 
     def final_authority_check() -> None:
         _establish_authority(
@@ -600,8 +604,10 @@ def resolve_review_thread(
             expected_head=expected_head,
             require_open=False,
         )
-    except FrozenEvidenceError as error:
-        return _result("resolve_review_thread", "refused", reason=str(error))
+    except Exception as error:  # noqa: BLE001 - observation precedes resolution
+        return _result(
+            "resolve_review_thread", "refused", reason=storage.error_text(error)
+        )
 
     live = _thread_by_id(current, target["id"])
     if live is None:
@@ -640,13 +646,6 @@ def resolve_review_thread(
                 "refused",
                 reason="already-present Fix-now resolution must target the prepared head",
             )
-        remote = remote_head_call(current.get("head_ref_name") or "")
-        if remote != expected_head:
-            return _result(
-                "resolve_review_thread",
-                "refused",
-                reason="the remote branch head does not match the prepared head",
-            )
     elif outcome == "fix_now":
         if not isinstance(published_commit, str) or not published_commit:
             return _result(
@@ -665,13 +664,6 @@ def resolve_review_thread(
                 "resolve_review_thread",
                 "refused",
                 reason="the published commit does not match the expected current head",
-            )
-        remote = remote_head_call(current.get("head_ref_name") or "")
-        if remote != published_commit:
-            return _result(
-                "resolve_review_thread",
-                "refused",
-                reason="the remote branch head does not match the published commit",
             )
     elif outcome == "fix_later":
         if not isinstance(issue_number, int):
@@ -710,6 +702,23 @@ def resolve_review_thread(
                 "resolve_review_thread",
                 "refused",
                 reason="no trustworthy exact current-evidence open issue matches",
+            )
+
+    if outcome == "fix_now":
+        try:
+            remote = remote_head_call(current.get("head_ref_name") or "")
+        except Exception as error:  # noqa: BLE001 - no resolution attempted
+            return _result(
+                "resolve_review_thread", "refused", reason=storage.error_text(error)
+            )
+        if remote != expected_head:
+            witness = (
+                "prepared head" if fix_now_mode == FIX_NOW_ALREADY_PRESENT
+                else "published commit"
+            )
+            return _result(
+                "resolve_review_thread", "refused",
+                reason=f"the remote branch head does not match the {witness}",
             )
 
     def final_authority_check() -> None:

@@ -818,6 +818,92 @@ class CommitmentOrderTests(RemediationFixture):
 
 
 class DefinitiveFailureTests(RemediationFixture):
+    def test_issue_snapshot_failure_releases_without_external_mutation(self) -> None:
+        self.prepare()
+        calls = 0
+
+        def fetch() -> dict:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("snapshot network down")
+            return self.live_github()
+
+        resolved, resolve_call = self.resolving()
+        result = self.finalize(
+            proposal_text=proposal_json(disposition("T1", "fix_later")),
+            fetch=fetch,
+            resolve_call=resolve_call,
+        )
+        self.assertEqual(result["outcome"], "remediation_failed_definitive")
+        self.assertEqual(result["issues"]["T1"]["classification"], "refused")
+        self.assertEqual(self.created_issues, [])
+        self.assertEqual(resolved, [])
+        self.assertEqual(self.on_disk()["rounds_used"], 1)
+        self.assertEqual(self.on_disk()["status"], model.ACTIVE)
+        self.assertEqual(result["ownership"], "released")
+        self.assertEqual(self.lock_status(), "absent")
+        self.assertFalse(result["scheduler_cleanup_authorized"])
+
+    def test_resolution_snapshot_failure_preserves_prefix_and_releases(self) -> None:
+        self.prepare(threads=[raw_thread("T1"), raw_thread("T2")])
+        calls = 0
+
+        def fetch() -> dict:
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise RuntimeError("snapshot network down")
+            return self.live_github()
+
+        resolved, resolve_call = self.resolving()
+        result = self.finalize(
+            proposal_text=proposal_json(
+                disposition("T1", "no_fix_required"),
+                disposition("T2", "no_fix_required"),
+            ),
+            fetch=fetch,
+            resolve_call=resolve_call,
+        )
+        self.assertEqual(result["outcome"], "remediation_failed_definitive")
+        self.assertEqual(result["resolutions"]["T1"]["classification"], "confirmed_success")
+        self.assertEqual(result["resolutions"]["T2"]["classification"], "refused")
+        self.assertEqual(resolved, ["T1"])
+        self.assertEqual(self.on_disk()["rounds_used"], 1)
+        self.assertEqual(self.on_disk()["status"], model.ACTIVE)
+        self.assertEqual(result["ownership"], "released")
+        self.assertEqual(self.lock_status(), "absent")
+
+    def test_remote_observation_failure_after_confirmed_push_releases(self) -> None:
+        self.prepare()
+        (self.worktree / "f.txt").write_text("v2\n", encoding="utf-8")
+        calls = 0
+
+        def remote_head(ref: str) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("remote observation network down")
+            return self.remote_head()
+
+        resolved, resolve_call = self.resolving()
+        result = self.finalize(
+            proposal_text=proposal_json(
+                disposition("T1", "fix_now", mode=externalize.FIX_NOW_PROSPECTIVE)
+            ),
+            remote_head_call=remote_head,
+            resolve_call=resolve_call,
+        )
+        self.assertEqual(result["outcome"], "remediation_failed_definitive")
+        self.assertTrue(result["publication"]["published"])
+        self.assertEqual(self.remote_head(), result["published_head"])
+        self.assertEqual(result["resolutions"]["T1"]["classification"], "refused")
+        self.assertEqual(resolved, [])
+        self.assertEqual(self.on_disk()["rounds_used"], 1)
+        self.assertEqual(self.on_disk()["status"], model.ACTIVE)
+        self.assertEqual(result["ownership"], "released")
+        self.assertEqual(self.lock_status(), "absent")
+
     def test_definitive_publication_failure_stops_the_external_suffix(self) -> None:
         self.prepare(threads=[raw_thread("T1"), raw_thread("T2")])
         (self.worktree / "f.txt").write_text("v2\n", encoding="utf-8")
