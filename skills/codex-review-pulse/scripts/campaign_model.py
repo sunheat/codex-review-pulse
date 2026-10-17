@@ -209,9 +209,10 @@ def creation_baseline_reaction_ids(
     """Applicable pre-existing lifecycle reaction IDs for the creation baseline.
 
     Collected from one complete owned snapshot captured before the campaign
-    record exists. Baseline reactions neither prove review-in-progress for the
-    new campaign, nor approve it, nor create lifecycle-attribution waiting, nor
-    consume or block its per-head request allowance.
+    record exists. Baseline lifecycle reactions neither prove review-in-progress
+    for the new campaign, nor create lifecycle-attribution waiting, nor consume
+    its per-head request allowance. PR-level THUMBS_UP approval is independent
+    of this lifecycle baseline.
     """
     reviewer_keys = set(reviewer_logins)
     approval_keys = set(approval_logins)
@@ -912,17 +913,35 @@ def evaluate(
 
     threads = applicable_unresolved_threads(snapshot, config["reviewer_logins"])
 
-    # Independently authoritative approval: a commit-bound APPROVED review.
+    # PR-level thumbs-up approves the whole PR, independently of commits,
+    # campaign/request baselines, timestamps, and request windows. Prefer its
+    # PR-wide proof when a commit-bound approved review is also present.
     approval: dict[str, Any] | None = None
-    for review in snapshot.get("reviews", []):
+    for reaction in snapshot.get("reactions", []):
         if (
-            isinstance(review, dict)
-            and review.get("state") == APPROVED
-            and review.get("login") in approval_keys
-            and review.get("commit_oid") == head_oid
+            isinstance(reaction, dict)
+            and reaction.get("content") == THUMBS_UP
+            and reaction.get("login") in approval_keys
+            and isinstance(reaction.get("id"), str)
         ):
-            approval = {"kind": "review", "id": review.get("id")}
+            approval = {
+                "kind": "reaction",
+                "id": reaction["id"],
+                "created_at": reaction.get("created_at"),
+            }
             break
+
+    # Independently authoritative approval: a commit-bound APPROVED review.
+    if approval is None:
+        for review in snapshot.get("reviews", []):
+            if (
+                isinstance(review, dict)
+                and review.get("state") == APPROVED
+                and review.get("login") in approval_keys
+                and review.get("commit_oid") == head_oid
+            ):
+                approval = {"kind": "review", "id": review.get("id")}
+                break
 
     eligible_eyes: list[dict[str, Any]] = []
     if approval is None:
@@ -942,28 +961,6 @@ def evaluate(
                 eligible_eyes.append(
                     {"id": reaction["id"], "created_at": reaction["created_at"]}
                 )
-
-    # Reaction approval needs the same bounded temporal eligibility.
-    if approval is None:
-        for reaction in snapshot.get("reactions", []):
-            if (
-                isinstance(reaction, dict)
-                and reaction.get("content") == THUMBS_UP
-                and reaction.get("login") in approval_keys
-                and _eligible(
-                    reaction,
-                    created_field="created_at",
-                    campaign=campaign,
-                    guard=guard,
-                    floor=floor,
-                )
-            ):
-                approval = {
-                    "kind": "reaction",
-                    "id": reaction["id"],
-                    "created_at": reaction["created_at"],
-                }
-                break
 
     completed_reviews: list[dict[str, Any]] = []
     ambiguous_artifacts: list[dict[str, Any]] = []
@@ -1027,7 +1024,7 @@ def evaluate(
             )
 
     # Without a guard there is no authoritative temporal floor, so an applicable
-    # Codex reaction exists but current-head attribution cannot be proven. It
+    # Codex EYES exists but current-head attribution cannot be proven. It
     # may only cause a non-counting wait; it never proves progress or approval.
     unattributable_reactions: list[dict[str, Any]] = []
     if guard is None:
@@ -1037,9 +1034,7 @@ def evaluate(
             if _in_baseline(campaign, None, reaction.get("id")):
                 continue
             content = reaction.get("content")
-            if (content == EYES and reaction.get("login") in reviewer_keys) or (
-                content == THUMBS_UP and reaction.get("login") in approval_keys
-            ):
+            if content == EYES and reaction.get("login") in reviewer_keys:
                 unattributable_reactions.append(
                     {
                         "id": reaction["id"],
@@ -1156,7 +1151,7 @@ def decide(campaign: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]
             "reaction_ids": [item["id"] for item in evidence["eyes"]],
         }
 
-    # An applicable Codex reaction without a guard cannot be proven current-head.
+    # Applicable Codex EYES without a guard cannot be proven current-head.
     # With round budget remaining this is a non-counting fail-closed wait: no
     # round, no guard, no request. Once the budget is exhausted with no request
     # guard, waiting would repeat forever, so exhaustion takes precedence; the

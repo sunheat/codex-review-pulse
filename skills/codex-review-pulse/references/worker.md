@@ -335,6 +335,22 @@ enumeration is not part of this batch and waits for a later delivery.
      cannot prove exact-token ownership); when no lock is present, stop and
      report the result.
 
+### PR-wide approval
+
+A THUMBS_UP reaction on the PR itself from a configured Codex approval actor
+approves the entire PR. It needs no commit linkage, campaign request guard,
+response window, or timestamp comparison, and remains approval even if it
+predates the campaign or a later head change. Creation and request baselines
+do not exclude it. Human or unknown actors and reactions on comments are not
+PR-wide Codex approval.
+
+With zero applicable unresolved threads, the owned-worker boundary confirms
+approval through the normal fresh S2 snapshot, terminalizes `succeeded`,
+releases ownership, and authorizes best-effort Automation cleanup without
+consuming another round. Do not request another review or wait for commit
+attribution. Applicable unresolved feedback still takes precedence; EYES and
+non-approval completion retain their existing lifecycle eligibility rules.
+
 ## 6. Review request (after `request_committed`)
 
 The durable RESERVED guard created by the boundary is the handoff. Run the

@@ -27,7 +27,7 @@ The tree now contains the first usable v2 implementation:
   revalidated, classified mutations;
 - network-free tests for the high-frequency branches and safety invariants.
 
-`VERSION` is `2.1.3`, but **no v2 release has been published or tagged**. This
+`VERSION` is `2.1.5`, but **no v2 release has been published or tagged**. This
 is an unreleased development build. Native Codex Automation creation and
 scheduled execution have **not** been exercised in the Codex app; that requires
 a separately authorized live canary. Network-free tests do not prove native
@@ -81,8 +81,10 @@ primary worktree is never modified.
   detection, or stealing; explicit user-authorized recovery only.
 - Effective rounds are consumed only after ownership and authoritative
   revalidation establish that an effective action is required.
-- Applicable evidence requires stable Codex identity attribution and current-head
-  applicability; unknown or incomplete evidence is never treated as absence.
+- Applicable evidence requires stable Codex identity attribution. A Codex
+  THUMBS_UP on the PR itself is PR-wide approval without commit linkage;
+  EYES and non-approval completion retain current-lifecycle eligibility rules.
+  Unknown or incomplete evidence is never treated as absence.
 - Each remediation attempt is one bounded in-memory batch: at most one commit
   and one push, never force-push, fixing state published before any thread is
   resolved, Fix-later issues created with deterministic marker identity.

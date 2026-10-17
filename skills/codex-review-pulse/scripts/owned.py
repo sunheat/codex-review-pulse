@@ -691,10 +691,20 @@ def run_worker_decision(
                 + storage.error_text(error)
             )
 
-        # Head consistency is required for current-head-dependent results; a
-        # target-unavailable conclusion does not depend on the head.
+        confirmation = model.decide(post_sync, s2)
+        # PR-wide approval in either observation permits a head change; S2 must
+        # still independently confirm success below. Other conclusions stay bound
+        # to the decision head, except for target availability.
+        pr_approval = (
+            status == model.SUCCEEDED
+            and any(
+                (decision.get("proof") or {}).get("kind") == "reaction"
+                for decision in (directive, confirmation)
+            )
+        )
         if (
             status != model.TARGET_UNAVAILABLE
+            and not pr_approval
             and s2["head_oid"] != s1["head_oid"]
         ):
             if release():
@@ -708,7 +718,6 @@ def run_worker_decision(
                 }
             return _fail_closed("confirmation head changed and release is unconfirmed")
 
-        confirmation = model.decide(post_sync, s2)
         if (
             confirmation.get("action") != "terminal"
             or confirmation.get("status") != status

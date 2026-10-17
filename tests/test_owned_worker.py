@@ -666,6 +666,115 @@ class BatchProjectionTests(WorkerDecisionFixture):
 
 
 class TerminalConfirmationTests(WorkerDecisionFixture):
+    def test_push_triggered_approval_without_guard_stops_after_confirmation(self) -> None:
+        # job-hunter PR #8: four successful remediation pushes, automatic
+        # reviews, then a PR-level thumbs-up with no campaign request guard.
+        self.campaign["rounds_used"] = 4
+        storage.save_json(self.campaign_path(), self.campaign)
+        self.fetches = [
+            snapshot(time=T_EARLY, reactions=[reaction(model.THUMBS_UP, "auto-up")]),
+            snapshot(time=T_AFTER, reactions=[reaction(model.THUMBS_UP, "auto-up")]),
+        ]
+        outcome = self.decide()
+        self.assertEqual(outcome["outcome"], "terminal_released")
+        self.assertEqual(outcome["status"], model.SUCCEEDED)
+        self.assertEqual(outcome["terminal_basis"], "observation")
+        self.assertFalse(outcome["round_committed"])
+        self.assertEqual(outcome["ownership"], "released")
+        self.assertTrue(outcome["scheduler_cleanup_authorized"])
+        self.assertEqual(len(self.fetches), 0)
+        record = self.on_disk()
+        self.assertEqual(record["status"], model.SUCCEEDED)
+        self.assertEqual(record["terminal_at"], T_AFTER)
+        self.assertEqual(record["rounds_used"], 4)
+        self.assertEqual(record["guards"], [])
+        self.assertEqual(self.lock_status(), "absent")
+        self.assertEqual(
+            model.decide(record, snapshot())["action"], "campaign_terminal"
+        )
+
+    def test_pr_approval_does_not_stop_if_confirmation_has_feedback(self) -> None:
+        self.fetches = [
+            snapshot(time=T_EARLY, reactions=[reaction(model.THUMBS_UP, "auto-up")]),
+            snapshot(time=T_AFTER, threads=[thread("new-feedback")]),
+        ]
+        outcome = self.decide()
+        self.assertEqual(outcome["outcome"], "observation_failed_released")
+        self.assertFalse(outcome["scheduler_cleanup_authorized"])
+        self.assertEqual(self.on_disk()["status"], model.ACTIVE)
+        self.assertEqual(self.on_disk()["rounds_used"], 0)
+        self.assertEqual(self.lock_status(), "absent")
+
+    def test_pr_approval_confirmation_does_not_require_matching_heads(self) -> None:
+        self.fetches = [
+            snapshot(time=T_EARLY, reactions=[reaction(model.THUMBS_UP, "pr-up")]),
+            snapshot(
+                time=T_AFTER, head=H2,
+                reactions=[reaction(model.THUMBS_UP, "pr-up")],
+                reviews=[review(head=H2)],
+            ),
+        ]
+        outcome = self.decide()
+        self.assertEqual(outcome["status"], model.SUCCEEDED)
+        self.assertTrue(outcome["scheduler_cleanup_authorized"])
+        self.assertEqual(self.on_disk()["status"], model.SUCCEEDED)
+        self.assertEqual(self.on_disk()["rounds_used"], 0)
+        self.assertEqual(self.lock_status(), "absent")
+
+    def test_pr_approval_can_be_confirmed_by_new_head_approved_review(self) -> None:
+        self.fetches = [
+            snapshot(time=T_EARLY, reactions=[reaction(model.THUMBS_UP, "pr-up")]),
+            snapshot(time=T_AFTER, head=H2, reviews=[review(head=H2)]),
+        ]
+        outcome = self.decide()
+        self.assertEqual(outcome["outcome"], "terminal_released")
+        self.assertEqual(outcome["status"], model.SUCCEEDED)
+        self.assertEqual(outcome["status_detail"], "approval:rv1")
+        self.assertFalse(outcome["round_committed"])
+        self.assertTrue(outcome["scheduler_cleanup_authorized"])
+        self.assertEqual(self.fetches, [])
+        self.assertEqual(self.on_disk()["status"], model.SUCCEEDED)
+        self.assertEqual(self.on_disk()["rounds_used"], 0)
+        self.assertEqual(self.lock_status(), "absent")
+
+    def test_removed_pr_approval_cannot_be_confirmed_by_old_head_review(self) -> None:
+        self.fetches = [
+            snapshot(time=T_EARLY, reactions=[reaction(model.THUMBS_UP, "pr-up")]),
+            snapshot(time=T_AFTER, head=H2, reviews=[review(head=H1)]),
+        ]
+        outcome = self.decide()
+        self.assertEqual(outcome["outcome"], "observation_failed_released")
+        self.assertFalse(outcome["scheduler_cleanup_authorized"])
+        self.assertEqual(self.on_disk()["status"], model.ACTIVE)
+        self.assertEqual(self.on_disk()["rounds_used"], 0)
+        self.assertEqual(self.lock_status(), "absent")
+
+    def test_removed_pr_approval_cannot_confirm_success(self) -> None:
+        self.fetches = [
+            snapshot(time=T_EARLY, reactions=[reaction(model.THUMBS_UP, "pr-up")]),
+            snapshot(time=T_AFTER),
+        ]
+        outcome = self.decide()
+        self.assertEqual(outcome["outcome"], "observation_failed_released")
+        self.assertFalse(outcome["scheduler_cleanup_authorized"])
+        self.assertEqual(self.on_disk()["status"], model.ACTIVE)
+        self.assertEqual(self.lock_status(), "absent")
+
+    def test_requested_thumbs_up_confirms_success_and_authorizes_cleanup(self) -> None:
+        self.open_window()
+        self.fetches = [
+            snapshot(time=T_EARLY, reactions=[reaction(model.THUMBS_UP, "requested-up")]),
+            snapshot(time=T_AFTER, reactions=[reaction(model.THUMBS_UP, "requested-up")]),
+        ]
+        outcome = self.decide()
+        self.assertEqual(outcome["outcome"], "terminal_released")
+        self.assertEqual(outcome["status"], model.SUCCEEDED)
+        self.assertFalse(outcome["round_committed"])
+        self.assertTrue(outcome["scheduler_cleanup_authorized"])
+        self.assertEqual(self.on_disk()["status"], model.SUCCEEDED)
+        self.assertEqual(self.on_disk()["rounds_used"], 1)
+        self.assertEqual(self.lock_status(), "absent")
+
     def test_observed_approval_is_confirmed_by_s2_and_released(self) -> None:
         self.fetches = [
             snapshot(time=T_EARLY, reviews=[review(review_id="rv1")]),
