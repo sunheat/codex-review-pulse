@@ -129,8 +129,13 @@ Manual recovery of the permanent lock is an explicit human boundary; see
   it is not cleaned just because `rounds_used == max_rounds`. A successful
   final remediation with no outstanding request obligation terminalizes
   `rounds_exhausted` in the same delivery, releases, and only then enters
-  best-effort cleanup; an unattributable reaction never outranks exhaustion
+  best-effort cleanup; an unattributable EYES reaction never outranks exhaustion
   when no request window exists.
+- A PR-level THUMBS_UP from a configured Codex approval actor approves the
+  entire PR, regardless of commit linkage, request guards, timestamps, or
+  creation/request baselines. With no applicable unresolved feedback, confirm
+  `succeeded`, release, and clean up the Automation; never request another
+  review or wait for commit attribution. This approval outranks exhaustion.
 - The review-response grace is at least the configured interval and never under
   20 minutes, independent of the scheduler cadence.
 - The unattended runtime is independent of auxiliary Agent Skills. A

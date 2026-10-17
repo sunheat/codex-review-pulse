@@ -352,7 +352,7 @@ Do not treat a command as read-only merely because its purpose is observation.
 
 Product mutations flow through a few narrow deterministic owned boundaries, not composable mutating CLIs.
 
-**Owned campaign creation.** Normal setup and rollover derive all creation evidence themselves from one fresh post-acquisition authoritative GitHub snapshot taken while setup or rollover ownership is held. Callers cannot select the snapshot, its `created_at`, lifecycle-reaction baselines, canonical target evidence, or head evidence. Campaign identity is preallocated on the setup lock and is never regenerated from snapshot server time. A creation lifecycle-reaction baseline of pre-existing applicable reactions neither proves review-in-progress, nor approves, nor creates attribution waiting, nor blocks the request allowance; unresolved review threads remain immediately actionable.
+**Owned campaign creation.** Normal setup and rollover derive all creation evidence themselves from one fresh post-acquisition authoritative GitHub snapshot taken while setup or rollover ownership is held. Callers cannot select the snapshot, its `created_at`, lifecycle-reaction baselines, canonical target evidence, or head evidence. Campaign identity is preallocated on the setup lock and is never regenerated from snapshot server time. A creation lifecycle-reaction baseline of pre-existing applicable reactions does not prove review-in-progress or create attribution waiting; PR-level Codex THUMBS_UP remains approval independently of that baseline. Unresolved review threads remain immediately actionable.
 
 **Owned worker decision.** Each acquired delivery makes one deterministic decision through a single owned boundary: campaign-wide durable-local preflight, one fresh owned S1 observation, guarded head synchronization, the pure decision from the post-sync campaign, then request commitment, deterministic remediation preparation with ownership release, terminal confirmation, or safe local release/retention. The pre-ownership admission snapshot is S0 and authorizes only cheap rejection, preliminary validation, and diagnostics — never synchronization, decisions, commitment, or terminalization, even at a matching head. The boundary performs the ownership disposition itself and reports facts, not recommendations. An unknown caller-visible result allows no compensating action and no second invocation.
 
@@ -366,7 +366,7 @@ Product mutations flow through a few narrow deterministic owned boundaries, not 
 
 **Successful final-remediation exhaustion.** When a delivery's remediation batch completes successfully under the deterministic finalizer and durable campaign state alone proves the last effective round was consumed with no other terminal result, no open request window, and no unclassified request attempt on any head, the finalizer terminalizes `rounds_exhausted` in the same invocation, releases the matching terminal lock, and only then authorizes best-effort scheduler cleanup. No later delivery is required merely to discover that the successful final remediation used the last round. Clean-unsuccessful and ambiguous attempts keep their existing release and retention semantics, and correctness never depends on this finalization: a later delivery terminalizes the same exhausted state through the owned-worker decision.
 
-**Response grace.** A request may become `codex_review_service_unresponsive` only at or after `max(interval_minutes, 20)` minutes of authoritative elapsed grace, independent of the scheduler cadence. Effective-round exhaustion prevents new effective actions but never erases an already-started asynchronous review lifecycle: an outstanding current-head request window, applicable 👀 within it, approval, and attributable completion keep precedence over generic exhaustion, and observing them consumes no round. With no outstanding request window, an applicable but current-head-unattributable Codex reaction does not keep an exhausted campaign waiting: exhaustion terminalizes `rounds_exhausted`, and the reaction still proves neither approval nor review progress.
+**Response grace.** A request may become `codex_review_service_unresponsive` only at or after `max(interval_minutes, 20)` minutes of authoritative elapsed grace, independent of the scheduler cadence. Effective-round exhaustion prevents new effective actions but never erases an already-started asynchronous review lifecycle: an outstanding current-head request window, applicable 👀 within it, approval, and attributable completion keep precedence over generic exhaustion, and observing them consumes no round. With no outstanding request window, an applicable but current-head-unattributable Codex EYES reaction does not keep an exhausted campaign waiting: exhaustion terminalizes `rounds_exhausted`, and the reaction still proves neither approval nor review progress.
 
 Only the remediation slice of the external Git/GitHub mutation boundaries has migrated into the deterministic remediation finalizer (one-commit one-push Fix-now publication of the exact proposal-bound tree, deferred-issue ensure/create with marker plus evidence-fingerprint identity, and independent target-specific review-thread resolution, each with fresh evidence revalidation, a final ownership check immediately before the mutation, at most one mutation attempt, and confirmed / definitively-failed / ambiguous classification). The review-request boundary keeps its existing form. The runtime is canary-ready only after a separately authorized live canary.
 
@@ -380,8 +380,13 @@ Human, unknown, and merely lookalike authors must not be used to authorize autom
 
 ## Review lifecycle
 
-Codex lifecycle evidence must apply to the current PR head or current review lifecycle.
-Older-head reactions are not authoritative for the current head.
+Codex EYES and non-approval completion evidence must apply to the current PR
+head or current review lifecycle. A THUMBS_UP reaction on the PR itself from a
+configured Codex approval actor approves the entire PR. It requires no commit
+linkage, request guard, response window, timestamp comparison, or exclusion
+from creation/request baselines. A later head change does not invalidate a
+still-present PR-level THUMBS_UP. Human or unknown actors and comment reactions
+do not authorize PR-wide approval.
 
 Distinguish:
 
@@ -397,7 +402,7 @@ Applicable review feedback must still be processed even if an older 👀 remains
 
 The campaign succeeds early only when:
 
-- applicable current-head Codex approval is proven; and
+- applicable Codex PR-level THUMBS_UP or a current-head approved review is proven; and
 - zero applicable unresolved Codex review threads remain.
 
 A 👍 must never hide applicable unresolved review feedback.
@@ -481,7 +486,7 @@ When:
 
 - zero applicable unresolved Codex review threads remain;
 - no applicable current-head review is still in progress;
-- current-head approval has not been achieved;
+- applicable Codex approval has not been achieved;
 - and no earlier current-head review-request attempt remains outstanding or has an ambiguous creation result;
 
 campaign policy determines whether to create another Codex review request.
@@ -639,7 +644,7 @@ Tests should prove the invariants above, especially:
 - stale scheduler delivery cannot control a newer campaign;
 - round accounting remains bounded across failures;
 - human, unknown, or lookalike reviewer identities cannot authorize automatic mutation or completion;
-- old lifecycle evidence cannot incorrectly block or approve a current head;
+- old lifecycle evidence cannot incorrectly prove current-head progress; PR-level Codex THUMBS_UP remains PR-wide approval independently of head changes;
 - stale triage evidence cannot be used to resolve a thread after relevant external change;
 - completion is not mistaken for approval;
 - ambiguous external results never trigger blind automatic retries, and duplicate side effects are avoided through authoritative re-observation and deterministic identity where the platform supports it;

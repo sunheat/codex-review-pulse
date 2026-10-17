@@ -287,6 +287,20 @@ class RequestBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(self.fixture.lock_status(), "absent")
 
+    def test_existing_pr_thumbs_up_prevents_another_review_post(self) -> None:
+        posted = []
+        result = self.run_boundary(
+            observer=lambda: snap(time=T1, reactions=[{
+                "id": "pr-up", "content": m.THUMBS_UP, "login": CODEX,
+                "created_at": "2026-09-13T12:00:00Z",
+            }]),
+            commenter=lambda *args: posted.append(args) or {},
+        )
+        self.assertEqual(result["outcome"], "invalidated")
+        self.assertEqual(posted, [])
+        self.assertEqual(result["rounds_used"], 1)
+        self.assertEqual(self.fixture.lock_status(), "absent")
+
     def test_post_mutation_head_mismatch_terminates_unbracketed_and_releases(self) -> None:
         sequence = [snap(time=T1), snap(time=T2, head="changed")]
         result = self.run_boundary(
