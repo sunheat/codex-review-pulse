@@ -333,7 +333,10 @@ enumeration is not part of this batch and waits for a later delivery.
      action. Perform a read-only `lock.py inspect`: when a lock is present,
      stop for [recovery](recovery.md) (quarantine does not apply because you
      cannot prove exact-token ownership); when no lock is present, stop and
-     report the result.
+     report the result. An unconfirmed release returns `local_fail_closed`
+     even when every external mutation succeeded or exhaustion was already
+     persisted. Preserve the reported confirmed results and consumed round;
+     never infer permission for cleanup or another finalizer invocation.
 
 ### PR-wide approval
 

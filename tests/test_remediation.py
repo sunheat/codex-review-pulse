@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "codex-review-pulse" / "scripts"
@@ -1007,6 +1008,58 @@ class DefinitiveFailureTests(RemediationFixture):
         self.assertTrue(result["round_committed"])
         self.assertEqual(self.on_disk()["rounds_used"], 1)
         self.assertEqual(result["ownership"], "released")
+
+
+class ReleaseFailureTests(RemediationFixture):
+    def test_completed_release_failure_requires_recovery(self) -> None:
+        self.prepare()
+        resolved, resolve_call = self.resolving()
+        with patch.object(storage, "release_lock", side_effect=OSError("release denied")):
+            result = self.finalize(resolve_call=resolve_call)
+        self.assertEqual(result["outcome"], "local_fail_closed")
+        self.assertEqual(resolved, ["T1"])
+        self.assertEqual(result["resolutions"]["T1"]["classification"], "confirmed_success")
+        self.assertTrue(result["round_committed"])
+        self.assertEqual(self.on_disk()["rounds_used"], 1)
+        self.assertEqual(self.on_disk()["status"], model.ACTIVE)
+        self.assertEqual(self.lock_status(), "active")
+        self.assertIn("release", result["reason"])
+        self.assertFalse(result["scheduler_cleanup_authorized"])
+
+    def test_definitive_release_failure_requires_recovery(self) -> None:
+        self.prepare()
+
+        def rejected_resolution(thread_id: str) -> dict:
+            raise github_api.GithubRejectionError("GitHub GraphQL errors: denied")
+
+        with patch.object(storage, "release_lock", side_effect=OSError("release denied")):
+            result = self.finalize(resolve_call=rejected_resolution)
+        self.assertEqual(result["outcome"], "local_fail_closed")
+        self.assertEqual(result["resolutions"]["T1"]["classification"], "definitive_failure")
+        self.assertTrue(result["round_committed"])
+        self.assertEqual(self.on_disk()["rounds_used"], 1)
+        self.assertEqual(self.on_disk()["status"], model.ACTIVE)
+        self.assertEqual(self.lock_status(), "active")
+        self.assertIn("release", result["reason"])
+        self.assertFalse(result["scheduler_cleanup_authorized"])
+
+    def test_exhausted_release_failure_requires_recovery(self) -> None:
+        record = self.on_disk()
+        record["config"]["max_rounds"] = 1
+        storage.save_json(self.campaign_path(), record)
+        self.prepare()
+        resolved, resolve_call = self.resolving()
+        with patch.object(storage, "release_lock", side_effect=OSError("release denied")):
+            result = self.finalize(resolve_call=resolve_call)
+        self.assertEqual(result["outcome"], "local_fail_closed")
+        self.assertEqual(resolved, ["T1"])
+        self.assertTrue(result["exhaustion_finalized"])
+        self.assertTrue(result["round_committed"])
+        self.assertEqual(self.on_disk()["rounds_used"], 1)
+        self.assertEqual(self.on_disk()["status"], model.ROUNDS_EXHAUSTED)
+        self.assertEqual(self.lock_status(), "active")
+        self.assertIn("release", result["reason"])
+        self.assertFalse(result["scheduler_cleanup_authorized"])
 
 
 class AmbiguousFailureTests(RemediationFixture):

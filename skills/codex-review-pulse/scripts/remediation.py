@@ -904,7 +904,7 @@ def finalize_remediation(
                 }
             return {
                 **printable,
-                "outcome": "remediation_completed",
+                "outcome": "local_fail_closed",
                 "detail": None,
                 "ownership": "retained",
                 "scheduler_cleanup_authorized": False,
@@ -922,6 +922,16 @@ def finalize_remediation(
     released = _try_release(
         canonical, pr_number, token, repository_path=repository_path
     )
+    if not released:
+        return {
+            **printable,
+            "outcome": "local_fail_closed",
+            "detail": stopped[1] if stopped else None,
+            "reason": "remediation ended but ownership release could not be confirmed",
+            "exhaustion_finalized": False,
+            "ownership": "release_unconfirmed",
+            "scheduler_cleanup_authorized": False,
+        }
     return {
         **printable,
         "outcome": (
@@ -931,7 +941,7 @@ def finalize_remediation(
         ),
         "detail": stopped[1] if stopped else None,
         "exhaustion_finalized": False,
-        "ownership": "released" if released else "release_unconfirmed",
+        "ownership": "released",
         "scheduler_cleanup_authorized": False,
     }
 
