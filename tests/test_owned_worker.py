@@ -721,6 +721,34 @@ class TerminalConfirmationTests(WorkerDecisionFixture):
         self.assertEqual(self.on_disk()["rounds_used"], 0)
         self.assertEqual(self.lock_status(), "absent")
 
+    def test_pr_approval_can_be_confirmed_by_new_head_approved_review(self) -> None:
+        self.fetches = [
+            snapshot(time=T_EARLY, reactions=[reaction(model.THUMBS_UP, "pr-up")]),
+            snapshot(time=T_AFTER, head=H2, reviews=[review(head=H2)]),
+        ]
+        outcome = self.decide()
+        self.assertEqual(outcome["outcome"], "terminal_released")
+        self.assertEqual(outcome["status"], model.SUCCEEDED)
+        self.assertEqual(outcome["status_detail"], "approval:rv1")
+        self.assertFalse(outcome["round_committed"])
+        self.assertTrue(outcome["scheduler_cleanup_authorized"])
+        self.assertEqual(self.fetches, [])
+        self.assertEqual(self.on_disk()["status"], model.SUCCEEDED)
+        self.assertEqual(self.on_disk()["rounds_used"], 0)
+        self.assertEqual(self.lock_status(), "absent")
+
+    def test_removed_pr_approval_cannot_be_confirmed_by_old_head_review(self) -> None:
+        self.fetches = [
+            snapshot(time=T_EARLY, reactions=[reaction(model.THUMBS_UP, "pr-up")]),
+            snapshot(time=T_AFTER, head=H2, reviews=[review(head=H1)]),
+        ]
+        outcome = self.decide()
+        self.assertEqual(outcome["outcome"], "observation_failed_released")
+        self.assertFalse(outcome["scheduler_cleanup_authorized"])
+        self.assertEqual(self.on_disk()["status"], model.ACTIVE)
+        self.assertEqual(self.on_disk()["rounds_used"], 0)
+        self.assertEqual(self.lock_status(), "absent")
+
     def test_removed_pr_approval_cannot_confirm_success(self) -> None:
         self.fetches = [
             snapshot(time=T_EARLY, reactions=[reaction(model.THUMBS_UP, "pr-up")]),

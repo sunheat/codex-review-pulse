@@ -692,11 +692,15 @@ def run_worker_decision(
             )
 
         confirmation = model.decide(post_sync, s2)
-        # PR-wide thumbs-up approval and target availability do not depend on
-        # head identity. Other current-head-dependent conclusions still do.
+        # PR-wide approval in either observation permits a head change; S2 must
+        # still independently confirm success below. Other conclusions stay bound
+        # to the decision head, except for target availability.
         pr_approval = (
             status == model.SUCCEEDED
-            and (confirmation.get("proof") or {}).get("kind") == "reaction"
+            and any(
+                (decision.get("proof") or {}).get("kind") == "reaction"
+                for decision in (directive, confirmation)
+            )
         )
         if (
             status != model.TARGET_UNAVAILABLE
