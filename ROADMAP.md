@@ -5,7 +5,8 @@
 The usable, unreleased v2 runtime is delivered through packaged Agent Skills
 and native Codex Automations in the Codex app. The current version is recorded
 in [`skills/codex-review-pulse/VERSION`](skills/codex-review-pulse/VERSION).
-The post-PR-#5 integration baseline is `f0e4563` on `feature/v2-runtime`.
+The earlier post-PR-#5 baseline was `f0e4563`. Request Handoff Closure builds
+on the runtime-truth cleanup at `d644493` on `feature/v2-runtime`.
 
 Implemented deterministic paths include:
 
@@ -31,33 +32,26 @@ Semantic judgment and actual code repair remain model work. The runtime still
 has specific model-mediated orchestration seams; it is not fully deterministic
 end to end or claimed production-validated.
 
-## Next candidate: Request Handoff Closure
+## Implemented: Request Handoff Closure
 
-The current request path is:
-
-```text
-deterministic request reservation -> request_committed -> LLM handoff
-    -> deterministic review request executor
-```
-
-The next small reliability candidate would close that handoff:
+The request path is now:
 
 ```text
-deterministic request reservation -> deterministic review request executor
-    -> final structured result returned to the LLM
+deterministic request reservation -> deterministic committed-request executor
+    -> final structured result returned to the model
 ```
 
-Implementation is deferred to a separate change; this housekeeping PR does not
-implement Request Handoff Closure. The intent is to preserve the already-tested
-`review_request.py` transaction semantics, including request commitment,
-at-most-once posting, classification, persistence, and lock disposition. The
-worker currently still receives `request_committed` and follows step 6 to invoke
-`review_request.py`.
+The model-mediated request handoff has been closed inside one
+`owned.run_worker_decision()` invocation. The durable RESERVED guard remains
+the authority boundary. The existing `review_request.py` transaction preserves
+fresh revalidation, at-most-once posting, classification, persistence, and lock
+disposition; its standalone CLI remains available for focused tests. No durable
+campaign, lock, or request-guard schema changes are needed.
 
-## Reassess after that slice
+## Reassess remaining seams
 
-After closing and validating the request handoff, inventory residual
-nondeterminism again. Change only model-mediated decisions whose failure can
+With the request handoff closed, reassess residual nondeterminism against
+concrete failure modes. Change only model-mediated decisions whose failure can
 materially affect external Git/GitHub mutation, round accounting, permanent lock
 disposition, or erroneous terminalization. Leave stable deterministic paths alone
 unless a concrete failure mode justifies a change. Do not pre-commit to a broad
@@ -75,8 +69,8 @@ Repository evidence does not establish an end-to-end canary of `f0e4563`.
 Validation of the final designated build remains a future, explicitly authorized
 step binding the exact commit/package and target PR. It must verify native model,
 reasoning, interval and project binding, independent scheduled delivery, live
-mutation behavior, terminal cleanup, and stale-delivery safety. This housekeeping
-change runs no live canary or campaign.
+mutation behavior, terminal cleanup, and stale-delivery safety. This request-handoff
+change runs no live canary or campaign and does not validate the changed build.
 
 ## Deferred scope
 

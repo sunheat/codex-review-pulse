@@ -30,10 +30,10 @@ The tree now contains the first usable v2 implementation:
 
 The current unreleased version is recorded in
 [`VERSION`](skills/codex-review-pulse/VERSION). Request decision, reservation,
-and execution are deterministic; the handoff from `request_committed` to
-`review_request.py` still passes through the model. Closing that handoff is the
-next candidate reliability slice, deferred to a separate change; see
-[ROADMAP.md](ROADMAP.md). Semantic judgment and code repair remain model work;
+and execution are deterministically composed in one worker invocation, which
+returns the existing request executor's final classified/disposed result.
+The durable RESERVED authority boundary and request transaction semantics remain
+intact; see [ROADMAP.md](ROADMAP.md). Semantic judgment and code repair remain model work;
 native Automation lifecycle hardening remains deferred.
 
 The repository records [historical supervised pilots](docs/design/live-pilot-readiness.md#completed-pilot-evidence),

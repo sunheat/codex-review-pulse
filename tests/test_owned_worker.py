@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import io
+from contextlib import redirect_stdout
 from copy import deepcopy
 import subprocess
 import sys
@@ -23,6 +25,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import campaign_model as model  # noqa: E402
 import externalize  # noqa: E402
+import github_api  # noqa: E402
 import owned  # noqa: E402
 import remediation  # noqa: E402
 import storage  # noqa: E402
@@ -302,9 +305,9 @@ class ObservationTests(WorkerDecisionFixture):
     def test_stale_s0_cannot_authorize_remediation_after_fresh_resolution(self) -> None:
         # Admission (S0) may have seen feedback, but the boundary observes S1
         # itself: with no threads at S1, the fresh evidence wins.
-        self.fetches = [snapshot()]
+        self.fetches = [snapshot(), snapshot(threads=[thread("new")])]
         outcome = self.decide()
-        self.assertEqual(outcome["outcome"], "request_committed")
+        self.assertEqual(outcome["outcome"], "invalidated")
         self.assertEqual(self.on_disk()["rounds_used"], 1)
 
     def test_open_request_window_blocks_a_second_request(self) -> None:
@@ -349,16 +352,16 @@ class OrderingTests(WorkerDecisionFixture):
         # The window belongs to H1; S1 observes head H2. Sync-head supersedes
         # the stale window, and the committed request is reserved for H2.
         self.open_window(head=H1, opened_at=T0)
-        self.fetches = [snapshot(head=H2, time=T_AFTER)]
+        self.fetches = [snapshot(head=H2, time=T_AFTER), snapshot(head=H1)]
         outcome = self.decide()
-        self.assertEqual(outcome["outcome"], "request_committed")
+        self.assertEqual(outcome["outcome"], "invalidated")
         self.assertEqual(outcome["guard_head"], H2)
         record = self.on_disk()
         self.assertEqual(
             model.guard_for_head(record, H1)["state"], model.SUPERSEDED
         )
         self.assertEqual(
-            model.guard_for_head(record, H2)["state"], model.RESERVED
+            model.guard_for_head(record, H2)["state"], model.INVALIDATED
         )
 
     def test_stale_expected_source_is_never_overwritten(self) -> None:
@@ -388,6 +391,61 @@ class OrderingTests(WorkerDecisionFixture):
 
 
 class CommitmentTests(WorkerDecisionFixture):
+    def test_one_invocation_opens_last_round_request_window(self) -> None:
+        self.campaign["config"]["max_rounds"] = 1
+        storage.save_json(self.campaign_path(), self.campaign)
+        events = []
+        original_check = storage.ensure_active_campaign_owner
+
+        def check(*args, **kwargs):
+            result = original_check(*args, **kwargs)
+            events.append("authority")
+            return result
+
+        def observe() -> dict:
+            # The normal guarded read must work during every network call.
+            self.assertEqual(self.lock_status(), "active")
+            if "S1" not in events:
+                events.append("S1")
+                return snapshot(time=T_EARLY)
+            record = self.on_disk()
+            self.assertEqual(record["rounds_used"], 1)
+            self.assertEqual(len(record["guards"]), 1)
+            self.assertEqual(record["guards"][0]["state"], model.RESERVED)
+            events.append("post_observation" if "POST" in events else "revalidation")
+            return snapshot(time=T_AFTER if "POST" in events else T_GRACE)
+
+        def post(subject: str, body: str) -> dict:
+            self.assertEqual(events[-1], "authority")
+            self.assertEqual(self.lock_status(), "active")
+            self.assertEqual((subject, body), ("pr-node-1", "@codex review"))
+            events.append("POST")
+            return {"node_id": "req1", "created_at": T_GRACE, "url": "https://example.test/req1"}
+
+        with unittest.mock.patch.object(storage, "ensure_active_campaign_owner", check), unittest.mock.patch.object(
+            github_api, "add_comment", side_effect=post
+        ) as commenter:
+            outcome = owned.run_worker_decision(
+                repository="owner/repo", pr_number=7, owner_token=self.token,
+                fetch_snapshot=observe, repository_path=self.repository_path,
+            )
+        self.assertEqual(commenter.call_count, 1)
+        self.assertLess(events.index("S1"), events.index("revalidation"))
+        self.assertLess(events.index("revalidation"), events.index("POST"))
+        self.assertLess(events.index("POST"), events.index("post_observation"))
+        self.assertEqual(outcome["outcome"], "window_open")
+        self.assertEqual(outcome["campaign_id"], CAMPAIGN_ID)
+        self.assertEqual(outcome["guard_head"], H1)
+        self.assertTrue(outcome["round_committed"])
+        self.assertEqual(outcome["guard_state"], model.GUARD_ACTIVE)
+        self.assertEqual(outcome["rounds_used"], 1)
+        self.assertEqual(outcome["campaign_status"], model.ACTIVE)
+        self.assertFalse(outcome["terminal"])
+        self.assertFalse(outcome["scheduler_cleanup_authorized"])
+        self.assertEqual(outcome["ownership"], "released")
+        self.assertEqual(self.lock_status(), "absent")
+        self.assertEqual(self.on_disk()["guards"][0]["state"], model.GUARD_ACTIVE)
+
     def test_remediation_preparation_returns_without_consuming_a_round(self) -> None:
         self.fetches = [
             snapshot(threads=[thread("T1"), thread("T2")], head=self.h1)
@@ -414,23 +472,23 @@ class CommitmentTests(WorkerDecisionFixture):
         self.assertTrue(Path(outcome["worktree"]).exists())
 
     def test_request_commitment_reserves_exactly_once(self) -> None:
-        self.fetches = [snapshot()]
+        self.fetches = [snapshot(), snapshot(head=H2)]
         outcome = self.decide()
-        self.assertEqual(outcome["outcome"], "request_committed")
+        self.assertEqual(outcome["outcome"], "invalidated")
         self.assertTrue(outcome["round_committed"])
         self.assertEqual(outcome["rounds_used"], 1)
-        self.assertEqual(outcome["guard_state"], model.RESERVED)
+        self.assertEqual(outcome["guard_state"], model.INVALIDATED)
         self.assertEqual(outcome["guard_head"], H1)
-        self.assertEqual(outcome["ownership"], "retained")
+        self.assertEqual(outcome["ownership"], "released")
         self.assertFalse(outcome["scheduler_cleanup_authorized"])
         record = self.on_disk()
         self.assertEqual(record["rounds_used"], 1)
         self.assertEqual(
-            model.guard_for_head(record, H1)["state"], model.RESERVED
+            model.guard_for_head(record, H1)["state"], model.INVALIDATED
         )
 
-    def test_request_committed_handoff_needs_no_new_tokens(self) -> None:
-        self.fetches = [snapshot()]
+    def test_final_request_result_needs_no_new_tokens(self) -> None:
+        self.fetches = [snapshot(), snapshot(head=H2)]
         outcome = self.decide()
         self.assertEqual(
             set(outcome.keys()),
@@ -443,6 +501,9 @@ class CommitmentTests(WorkerDecisionFixture):
                 "rounds_used",
                 "ownership",
                 "scheduler_cleanup_authorized",
+                "detail",
+                "terminal",
+                "campaign_status",
             },
         )
         # The durable handoff identity is campaign + owner lock + exact guard.
@@ -462,9 +523,16 @@ class CommitmentTests(WorkerDecisionFixture):
         self.fetches = [snapshot()]
         with unittest.mock.patch.object(
             storage, "transition_active_campaign", sync_then_mutate
-        ):
+        ), unittest.mock.patch.object(github_api, "add_comment") as commenter, unittest.mock.patch.object(
+            model, "reserve_request", wraps=model.reserve_request
+        ) as reserve:
             outcome = self.decide()
+        self.assertEqual(commenter.call_count, 0)
+        self.assertEqual(reserve.call_count, 0)
         self.assertEqual(outcome["outcome"], "local_fail_closed")
+        self.assertNotIn("round_committed", outcome)
+        self.assertIn("request commitment refused", outcome["reason"])
+        self.assertEqual(outcome["ownership"], "retained")
         record = self.on_disk()
         self.assertEqual(record["status"], model.ACTIVE)
         self.assertEqual(record["rounds_used"], 0)
@@ -481,6 +549,154 @@ class CommitmentTests(WorkerDecisionFixture):
             outcome = self.decide()
         self.assertEqual(outcome["outcome"], "local_fail_closed")
         self.assertEqual(self.on_disk()["rounds_used"], 0)
+
+
+class RequestClosureFailureTests(WorkerDecisionFixture):
+    def run_request(self, *, revalidation=None, post_snapshot=None, error=None) -> tuple[dict, int]:
+        sequence = [snapshot(), revalidation or snapshot(time=T_GRACE), post_snapshot or snapshot(time=T_AFTER)]
+
+        def observe() -> dict:
+            self.assertEqual(self.lock_status(), "active")
+            value = sequence.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        with unittest.mock.patch.object(
+            github_api, "add_comment", side_effect=error,
+            return_value={"node_id": "req1", "created_at": T_GRACE, "url": "u"},
+        ) as commenter:
+            result = owned.run_worker_decision(
+                repository="owner/repo", pr_number=7, owner_token=self.token,
+                fetch_snapshot=observe, repository_path=self.repository_path,
+            )
+        self.assertLessEqual(commenter.call_count, 1)
+        self.assertEqual(result["campaign_id"], CAMPAIGN_ID)
+        self.assertEqual(result["guard_head"], H1)
+        self.assertTrue(result["round_committed"])
+        self.assertEqual(self.on_disk()["rounds_used"], 1)
+        self.assertEqual(len(self.on_disk()["guards"]), 1)
+        self.assertNotIn("commitment refused", result.get("reason", ""))
+        return result, commenter.call_count
+
+    def test_fresh_feedback_invalidates_before_post(self) -> None:
+        result, posts = self.run_request(revalidation=snapshot(threads=[thread("new")]))
+        self.assertEqual(posts, 0)
+        self.assertEqual(result["outcome"], "invalidated")
+        self.assertEqual(result["guard_state"], model.INVALIDATED)
+        self.assertEqual(result["ownership"], "released")
+        self.assertEqual(self.lock_status(), "absent")
+
+    def test_fresh_approval_invalidates_before_post(self) -> None:
+        result, posts = self.run_request(revalidation=snapshot(reactions=[reaction(model.THUMBS_UP, "up")]))
+        self.assertEqual(posts, 0)
+        self.assertEqual(result["outcome"], "invalidated")
+        self.assertEqual(result["guard_state"], model.INVALIDATED)
+        self.assertEqual(result["ownership"], "released")
+
+    def test_authoritative_rejection_releases_terminal_result(self) -> None:
+        result, posts = self.run_request(error=github_api.GithubRejectionError("rejected"))
+        self.assertEqual(posts, 1)
+        self.assertEqual(result["outcome"], "creation_failed")
+        self.assertTrue(result["terminal"])
+        self.assertEqual(result["campaign_status"], model.REQUEST_CREATION_FAILED)
+        self.assertEqual(result["ownership"], "released")
+        self.assertTrue(result["scheduler_cleanup_authorized"])
+        self.assertEqual(self.lock_status(), "absent")
+
+    def test_transport_failure_retains_without_retry(self) -> None:
+        result, posts = self.run_request(error=TimeoutError("unknown POST outcome"))
+        self.assertEqual(posts, 1)
+        self.assertEqual(result["outcome"], "ambiguous")
+        self.assertEqual(result["ownership"], "retained")
+        self.assertFalse(result["scheduler_cleanup_authorized"])
+        self.assertEqual(self.lock_status(), "active")
+
+    def test_returned_head_mismatch_is_unbracketed(self) -> None:
+        result, posts = self.run_request(post_snapshot=snapshot(head=H2))
+        self.assertEqual(posts, 1)
+        self.assertEqual(result["outcome"], "unbracketed")
+        self.assertTrue(result["terminal"])
+        self.assertEqual(result["campaign_status"], model.MANUAL_INTERVENTION_REQUIRED)
+        self.assertEqual(result["ownership"], "released")
+        self.assertTrue(result["scheduler_cleanup_authorized"])
+
+    def test_returned_incomplete_snapshot_is_unbracketed(self) -> None:
+        result, posts = self.run_request(post_snapshot=snapshot(complete=False))
+        self.assertEqual(posts, 1)
+        self.assertEqual(result["outcome"], "unbracketed")
+        self.assertTrue(result["terminal"])
+        self.assertEqual(result["ownership"], "released")
+        self.assertTrue(result["scheduler_cleanup_authorized"])
+
+    def assert_uncertain_result(self, result: dict) -> None:
+        self.assertEqual(result["outcome"], "local_fail_closed")
+        self.assertEqual(result["ownership"], "retained")
+        self.assertFalse(result["scheduler_cleanup_authorized"])
+        for field in ("campaign_status", "guard_state", "rounds_used"):
+            self.assertNotIn(field, result)
+        self.assertEqual(self.on_disk()["guards"][0]["state"], model.RESERVED)
+        self.assertEqual(self.lock_status(), "active")
+
+    def test_post_observer_exception_preserves_fail_closed(self) -> None:
+        result, posts = self.run_request(post_snapshot=RuntimeError("observation failed"))
+        self.assertEqual(posts, 1)
+        self.assert_uncertain_result(result)
+
+    def test_post_persistence_failure_preserves_fail_closed(self) -> None:
+        original = storage.apply_campaign_transition_if_current
+        calls = []
+
+        def persist(*args, **kwargs):
+            calls.append(None)
+            if len(calls) == 2:
+                raise RuntimeError("post-POST persistence refused")
+            return original(*args, **kwargs)
+
+        with unittest.mock.patch.object(storage, "apply_campaign_transition_if_current", persist):
+            result, posts = self.run_request()
+        self.assertEqual(posts, 1)
+        self.assert_uncertain_result(result)
+
+    def test_release_failure_preserves_terminal_state(self) -> None:
+        with unittest.mock.patch.object(storage, "release_lock", side_effect=RuntimeError("release refused")):
+            result, posts = self.run_request(error=github_api.GithubRejectionError("rejected"))
+        self.assertEqual(posts, 1)
+        self.assertEqual(result["outcome"], "local_fail_closed")
+        self.assertEqual(result["ownership"], "release_unconfirmed")
+        self.assertTrue(result["terminal"])
+        self.assertEqual(result["campaign_status"], model.REQUEST_CREATION_FAILED)
+        self.assertFalse(result["scheduler_cleanup_authorized"])
+        self.assertEqual(self.on_disk()["status"], model.REQUEST_CREATION_FAILED)
+        self.assertEqual(self.lock_status(), "active")
+
+    def test_release_failure_preserves_active_window(self) -> None:
+        with unittest.mock.patch.object(storage, "release_lock", side_effect=RuntimeError("release refused")):
+            result, posts = self.run_request()
+        self.assertEqual(posts, 1)
+        self.assertEqual(result["outcome"], "local_fail_closed")
+        self.assertEqual(result["ownership"], "release_unconfirmed")
+        self.assertFalse(result["terminal"])
+        self.assertEqual(result["campaign_status"], model.ACTIVE)
+        self.assertEqual(result["guard_state"], model.GUARD_ACTIVE)
+        self.assertFalse(result["scheduler_cleanup_authorized"])
+
+    def test_worker_main_emits_final_request_json(self) -> None:
+        output = io.StringIO()
+        with unittest.mock.patch.object(sys, "argv", [
+            "owned.py", "worker-decision", "--repo", "owner/repo", "--pr", "7",
+            "--owner-token", self.token, "--repository-path", str(self.repository_path),
+        ]), unittest.mock.patch.object(
+            github_api, "fetch_snapshot", side_effect=[snapshot(), snapshot(time=T_GRACE), snapshot(time=T_AFTER)]
+        ), unittest.mock.patch.object(
+            github_api, "add_comment", return_value={"node_id": "req1", "created_at": T_GRACE, "url": "u"}
+        ) as commenter, redirect_stdout(output):
+            owned.main()
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["outcome"], "window_open")
+        self.assertEqual(result["ownership"], "released")
+        self.assertEqual(commenter.call_count, 1)
+        self.assertNotIn("request_committed", output.getvalue())
 
 
 def raw_thread(

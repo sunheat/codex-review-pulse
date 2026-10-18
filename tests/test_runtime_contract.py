@@ -388,17 +388,18 @@ class OwnershipCompletionAlgebraTests(unittest.TestCase):
             "terminal_retained",
             "remediation_prepared",
             "remediation_preparation_refused",
-            "request_committed",
             "local_fail_closed",
         )
         for outcome in expected:
             self.assertIn(f'"{outcome}"', source, f"missing outcome {outcome}")
 
-    def test_request_committed_retains_and_denies_cleanup(self) -> None:
-        source = (SCRIPTS / "owned.py").read_text(encoding="utf-8")
-        # request_committed sets ownership retained and cleanup unauthorized.
-        self.assertIn('"request_committed"', source)
-        self.assertIn('"ownership": "retained"', source)
+    def test_worker_guide_routes_final_request_disposition(self) -> None:
+        worker = _read(REFERENCES / "worker.md")
+        self.assertNotIn("python S/review_request.py", worker)
+        for outcome in ("window_open", "invalidated", "creation_failed", "unbracketed", "ambiguous"):
+            self.assertIn(f"`{outcome}`", worker)
+        self.assertIn("scheduler_cleanup_authorized", worker)
+        self.assertIn("release_unconfirmed", worker)
 
     def test_terminal_released_authorizes_cleanup_only_after_release(self) -> None:
         source = (SCRIPTS / "owned.py").read_text(encoding="utf-8")

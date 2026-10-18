@@ -158,9 +158,12 @@ Manual recovery of the permanent lock is an explicit human boundary; see
 - Owned campaign/worker decisions, reaction/review evaluation, terminal
   confirmation, review-request decision/reservation and committed request
   execution are deterministic. Remediation is deterministic around speculative
-  semantic/model work. The `request_committed` handoff to `review_request.py`
-  remains model-mediated: follow worker step 6; closing that handoff is deferred
-  to a separate change. Native Automation lifecycle hardening remains deferred
+  semantic/model work. Request reservation immediately enters the existing
+  committed-request executor inside one `owned.py worker-decision` invocation,
+  returning its final result; follow worker step 6 for final outcome routing.
+  Missing or unknown worker output never authorizes another POST, compensating
+  release, or a hard-fail handoff after possibly ambiguous mutation.
+  Native Automation lifecycle hardening remains deferred
   for host/model-mediated creation/configuration verification, cleanup, and
   quarantine/pause actions. Durable campaign authority
   (identity, configuration, rounds, guards, lock, terminality) differs from
