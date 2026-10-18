@@ -16,22 +16,33 @@ The canonical behavior contract is [`AGENTS.md`](AGENTS.md);
 [ADR 0008](docs/adr/0008-v2-runtime-architecture-reset.md) records the v2
 architecture reset.
 
-## Repository status: v2 implemented, unreleased, awaiting canary
+## Repository status: usable v2 runtime, unreleased
 
 The tree now contains the first usable v2 implementation:
 
 - a skill-driven launcher and scheduled-worker path for the Codex app;
 - deterministic helpers for observation, ownership, round accounting,
   publication, deferred issues, exact thread resolution, and review requests;
-- Phase 3 externalization boundaries that turn committed actions into final
-  revalidated, classified mutations;
+- deterministic owned worker decisions, reaction/review evaluation and terminal
+  confirmation, plus a remediation transaction around speculative model work;
+- external mutation boundaries that revalidate authority and classify results;
 - network-free tests for the high-frequency branches and safety invariants.
 
-`VERSION` is `2.1.5`, but **no v2 release has been published or tagged**. This
-is an unreleased development build. Native Codex Automation creation and
-scheduled execution have **not** been exercised in the Codex app; that requires
-a separately authorized live canary. Network-free tests do not prove native
-host integration, and discovery metadata never authorizes a live run.
+The current unreleased version is recorded in
+[`VERSION`](skills/codex-review-pulse/VERSION). Request decision, reservation,
+and execution are deterministic; the handoff from `request_committed` to
+`review_request.py` still passes through the model. Closing that handoff is the
+next candidate reliability slice, deferred to a separate change; see
+[ROADMAP.md](ROADMAP.md). Semantic judgment and code repair remain model work;
+native Automation lifecycle hardening remains deferred.
+
+The repository records [historical supervised pilots](docs/design/live-pilot-readiness.md#completed-pilot-evidence),
+including an [operator-reported bounded recurring pilot](docs/pilots/2026-08-25-job-hunter-pr-2-bounded-recurring.md).
+These older builds do not validate the post-PR-#5 runtime at `f0e4563`.
+Repository evidence does not establish an end-to-end canary of that build;
+validation of the final designated build remains a separately authorized step.
+Network-free tests do not prove native host integration, and discovery metadata
+never authorizes a live run.
 
 The previous 0.3.1 runtime is retained as quarantined historical evidence under
 [`legacy/v0.3.1/`](legacy/v0.3.1/README.md). It is not an active entry point and

@@ -1,4 +1,4 @@
-"""Phase 1 guarded authority/state kernel tests.
+"""Guarded campaign authority/state kernel tests.
 
 Covers guarded initialization, active-campaign ordinary authority, guarded
 local transition serialization, same-owner stale-write protection, ordinary
@@ -278,7 +278,7 @@ class AuthorityTests(unittest.TestCase):
             )
 
     def test_setup_lock_with_absent_campaign_cannot_authorize_mutation(self) -> None:
-        # Explicit Phase 1 invariant: a setup owner before initialization has
+        # Explicit ownership invariant: a setup owner before initialization has
         # no ordinary product mutation authority.
         self.test_absent_campaign_fails_ordinary_authority()
 

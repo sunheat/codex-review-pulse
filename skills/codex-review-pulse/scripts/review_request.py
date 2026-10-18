@@ -3,7 +3,7 @@
 
 The durable RESERVED guard is the authoritative handoff from the owned-worker
 boundary (which consumed the round and reserved the per-head allowance) to
-this Phase 3 boundary. Ordering is safety-critical:
+this committed-request execution boundary. Ordering is safety-critical:
 
   1. establish current authority from durable state: matching campaign and
      lock identity, active campaign, exactly one committed RESERVED guard;
@@ -14,7 +14,7 @@ this Phase 3 boundary. Ordering is safety-critical:
   5. immediately re-observe and bind a response window only when the
      pre/post head OIDs agree;
   6. classify the result and persist every campaign transition through the
-     guarded Phase 1 stale-write protection;
+     guarded campaign stale-write protection;
   7. complete the local ownership disposition: release only after the durable
      result is confirmed, retain on ambiguity.
 
@@ -82,7 +82,7 @@ def run_committed_request(
     observer: Callable[[], dict[str, Any]] | None = None,
     commenter: Callable[[str, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """The Phase 3 committed-request execution boundary.
+    """The deterministic committed-request execution boundary.
 
     Derives the durable handoff (exact campaign identity, owner lock/token,
     one exact RESERVED guard) itself, performs final pre-POST ownership
@@ -247,7 +247,7 @@ def execute_request_attempt(
 
     Every model transition is handed to ``persist_transition`` so the guard
     state on disk never trails the mutation order and stale writes are
-    refused by the Phase 1 guarded primitive.
+    refused by the guarded campaign transition primitive.
     """
     result: dict[str, Any] = {
         "outcome": None,

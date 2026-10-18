@@ -12,13 +12,26 @@ validation, and proposal submission also consume no round: the deterministic
 remediation finalizer commits the remediation round itself, after complete
 validation and before any external mutation.
 
-## Migration status
+## Current runtime status
 
-Only the remediation transaction has migrated to the deterministic control
-plane (preparation, semantic-work handoff, one finalizer invocation). The
-top-level campaign routing, review-request lifecycle, and reaction lifecycle
-remain Phase-2-unmigrated compatibility paths. The native Automation
-lifecycle belongs to a later phase.
+The remediation transaction is deterministic around semantic/model work:
+preparation freezes the targets and releases ownership before speculative work;
+one finalizer revalidates authority, commits the round, orders and classifies
+external mutations, performs bookkeeping, and disposes ownership. Semantic
+judgment and actual code repair remain the model's responsibility.
+
+Core campaign/worker routing, reaction/review lifecycle evaluation, and terminal
+decisions (including S2 confirmation of observation-derived outcomes) are
+deterministic. Review-request decision/reservation and committed request
+execution are also deterministic. The handoff between them remains
+model-mediated: the owned worker returns `request_committed`, then you follow
+step 6 to invoke `review_request.py`. Request Handoff Closure is a candidate
+future reliability slice, not implemented here; existing request semantics and
+the procedure below remain in effect.
+
+Native Codex Automations already deliver workers. Parts of creation/configuration
+verification, terminal cleanup, and retained-lock quarantine/pause remain
+host/model-mediated; lifecycle hardening is deferred.
 
 ## Runtime skill boundary
 

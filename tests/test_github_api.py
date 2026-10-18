@@ -170,7 +170,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertIsNone(by_id["T_UNKNOWN"]["root_login"])
         self.assertTrue(by_id["T_RESOLVED"]["is_resolved"])
         self.assertFalse(by_id["T_CODEX"]["is_resolved"])
-        # Frozen-evidence identity fields the Phase 3 boundaries derive.
+        # Frozen-evidence identity fields the external mutation boundaries derive.
         self.assertEqual(by_id["T_CODEX"]["root_comment_id"], "C1")
         self.assertEqual(by_id["T_CODEX"]["body"], "Fix the null check here.")
         self.assertEqual(by_id["T_CODEX"]["root_updated_at"], "2026-09-14T12:00:00Z")

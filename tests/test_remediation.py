@@ -1,4 +1,4 @@
-"""Behavioral tests for the deterministic remediation subprotocol (Phase 1).
+"""Behavioral tests for the deterministic remediation transaction.
 
 Covers the eight required regression clusters: preparation disappearance and
 clean restart, closed remediation routing and legacy-path removal, malformed

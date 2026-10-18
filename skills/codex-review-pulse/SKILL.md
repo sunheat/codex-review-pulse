@@ -27,9 +27,10 @@ using **native Codex Automations** and packaged Agent Skills. There is no
 repository-side scheduler client and no alternative host. See
 [setup and host requirements](references/setup.md).
 
-Native Automation creation and execution in the Codex app have **not** been
-exercised by an authorized canary from this development tree; see the status
-section in [the repository README](../../README.md).
+Historical pilots exercised older builds; repository evidence does not establish
+an end-to-end canary of the post-PR-#5 build. Validation of the final designated
+build remains a separately authorized step; see the status section in
+[the repository README](../../README.md).
 
 ## One-sentence invocation
 
@@ -154,10 +155,14 @@ Manual recovery of the permanent lock is an explicit human boundary; see
   existing fail-closed or recovery rule.
 - Discovery metadata never authorizes a live run. Development work on this
   repository is not a product run.
-- Only the remediation transaction has migrated to the deterministic control
-  plane. The top-level campaign routing and the review-request and reaction
-  lifecycle remain Phase-2-unmigrated compatibility paths; the native
-  Automation lifecycle remains a later phase. Durable campaign authority
+- Owned campaign/worker decisions, reaction/review evaluation, terminal
+  confirmation, review-request decision/reservation and committed request
+  execution are deterministic. Remediation is deterministic around speculative
+  semantic/model work. The `request_committed` handoff to `review_request.py`
+  remains model-mediated: follow worker step 6; closing that handoff is deferred
+  to a separate change. Native Automation lifecycle hardening remains deferred
+  for host/model-mediated creation/configuration verification, cleanup, and
+  quarantine/pause actions. Durable campaign authority
   (identity, configuration, rounds, guards, lock, terminality) differs from
   disposable speculative artifacts (packets, snapshots, worktrees,
   hook-free commits that were never published).

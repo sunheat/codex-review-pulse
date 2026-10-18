@@ -7,9 +7,9 @@ partial connection, or a head move during observation raises instead of being
 normalized into "absent".
 
 The transport functions here are internal implementation details and unit-test
-seams. Product-facing external mutations go through the deterministic Phase 3
-mutation boundaries (``externalize.py`` and ``review_request.py``), never by
-composing these primitives directly.
+seams. Product-facing external mutations go through the deterministic
+remediation finalizer (using ``externalize.py``) or the committed-request
+executor (``review_request.py``), never by composing these primitives directly.
 """
 
 from __future__ import annotations
