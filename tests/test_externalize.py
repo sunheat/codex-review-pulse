@@ -153,32 +153,6 @@ class ExternalizeTests(unittest.TestCase):
 
     # -- shared callers -----------------------------------------------------
 
-    def publish(self, *, fake_publish: dict | None = None, **overrides) -> dict:
-        kwargs = dict(
-            repository="owner/repo",
-            pr_number=7,
-            owner_token=self.fixture.token,
-            snapshot_path=self.snapshot_path,
-            thread_ids=["T1"],
-            expected_head=H1,
-            worktree="/tmp/wt",
-            paths=["src/a.py"],
-            commit_message="codex review pulse: remediation",
-            campaign_id=CAMPAIGN_ID,
-            rounds_used=1,
-            repository_path=self.fixture.path,
-            fetch_snapshot=lambda: snapshot(),
-        )
-        kwargs.update(overrides)
-        if fake_publish is None:
-            return externalize.publish_fix_now(**kwargs)
-        original = externalize.gitlocal.publish_batch
-        externalize.gitlocal.publish_batch = lambda **kw: fake_publish
-        try:
-            return externalize.publish_fix_now(**kwargs)
-        finally:
-            externalize.gitlocal.publish_batch = original
-
     def ensure_issue(self, *, created_error: Exception | None = None, **overrides):
         created: list[tuple[str, str]] = []
 
@@ -259,16 +233,12 @@ class ExternalizeTests(unittest.TestCase):
 class FrozenEvidenceAuthorityTests(ExternalizeTests):
     def test_missing_frozen_evidence_grants_no_mutation_authority(self) -> None:
         with self.assertRaises(externalize.FrozenEvidenceError):
-            self.publish(snapshot_path=self.fixture.path / "missing.json")
-
-    def test_frozen_head_mismatch_grants_no_authority(self) -> None:
-        with self.assertRaises(externalize.FrozenEvidenceError):
-            self.publish(expected_head="another-head")
+            self.ensure_issue(snapshot_path=self.fixture.path / "missing.json")
 
     def test_human_author_thread_grants_no_authority(self) -> None:
         self.fixture.write_frozen(snapshot(threads=[thread(author="human-reviewer")]))
         with self.assertRaises(externalize.FrozenEvidenceError):
-            self.publish()
+            self.resolve()
 
     def test_unknown_author_thread_grants_no_authority(self) -> None:
         self.fixture.write_frozen(snapshot(threads=[thread(author=None)]))
@@ -281,7 +251,6 @@ class FrozenEvidenceAuthorityTests(ExternalizeTests):
         import inspect
 
         for boundary in (
-            externalize.publish_fix_now,
             externalize.ensure_deferred_issue,
             externalize.resolve_review_thread,
         ):
@@ -292,11 +261,6 @@ class FrozenEvidenceAuthorityTests(ExternalizeTests):
             ):
                 self.assertNotIn(forbidden, parameters, boundary.__name__)
 
-    def test_empty_fix_now_selection_is_refused(self) -> None:
-        result = self.publish(thread_ids=[])
-        self.assertEqual(result["classification"], "refused")
-        self.assertIn("no Fix-now target", result["reason"])
-
 
 # ---------------------------------------------------------------------------
 # Ownership and handoff authority
@@ -305,15 +269,15 @@ class FrozenEvidenceAuthorityTests(ExternalizeTests):
 class MutationAuthorityTests(ExternalizeTests):
     def test_wrong_owner_token_blocks_mutation(self) -> None:
         with self.assertRaises(RuntimeError):
-            self.publish(owner_token="not-the-owner")
+            self.resolve(owner_token="not-the-owner")
 
     def test_changed_campaign_identity_blocks_mutation(self) -> None:
         with self.assertRaises(RuntimeError):
-            self.publish(campaign_id="crp-20260914T120000Z-ffffee")
+            self.resolve(campaign_id="crp-20260914T120000Z-ffffee")
 
     def test_changed_round_count_blocks_remediation_mutation(self) -> None:
         with self.assertRaises(RuntimeError):
-            self.publish(rounds_used=2)
+            self.resolve(rounds_used=2)
 
     def test_terminal_campaign_blocks_ordinary_mutation(self) -> None:
         path = storage.campaign_path("owner/repo", 7, repository_path=self.fixture.path)
@@ -323,164 +287,80 @@ class MutationAuthorityTests(ExternalizeTests):
             model.terminate(record, status=model.SUCCEEDED, at=T1),
         )
         with self.assertRaises(RuntimeError):
-            self.publish()
+            self.resolve()
 
 
 # ---------------------------------------------------------------------------
-# Fix-now publication boundary
+# Fix-now submodes (tree-authority verification only)
 
 
-class PublishFixNowTests(ExternalizeTests):
-    def test_confirmed_publication_returns_h2(self) -> None:
-        result = self.publish(
-            fake_publish={"published": True, "status": "pushed", "commit": H2},
+class FixNowSubmodeTests(ExternalizeTests):
+    def test_prospective_tree_submode_is_the_default(self) -> None:
+        result, resolved = self.resolve(
+            outcome="fix_now",
+            expected_head=H2,
+            current=snapshot(head=H2),
+            published_commit=H2,
+            remote_head_call=lambda ref: H2,
         )
         self.assertEqual(result["classification"], "confirmed_success")
-        self.assertEqual(result["published_head"], H2)
+        self.assertEqual(resolved, ["T1"])
 
-    def test_confirmed_publication_with_real_git_push(self) -> None:
-        origin = Path(self._tmp.name) / "origin.git"
-        seed = Path(self._tmp.name) / "seed"
-        subprocess.run(
-            ["git", "init", "--bare", str(origin)], check=True, capture_output=True
+    def test_already_present_submode_requires_the_prepared_head(self) -> None:
+        result, resolved = self.resolve(
+            outcome="fix_now",
+            fix_now_mode=externalize.FIX_NOW_ALREADY_PRESENT,
+            expected_head=H2,
+            current=snapshot(head=H2),
+            remote_head_call=lambda ref: H2,
         )
-        seed.mkdir()
-        git(seed, "init", "-b", "feature")
-        git(seed, "config", "user.email", "t@e.test")
-        git(seed, "config", "user.name", "T")
-        (seed / "code.py").write_text("v1\n", encoding="utf-8")
-        git(seed, "add", "code.py")
-        git(seed, "commit", "-m", "initial")
-        git(seed, "remote", "add", "origin", str(origin))
-        git(seed, "push", "origin", "feature")
-        git(self.fixture.path, "remote", "add", "origin", str(origin))
-        gitlocal.fetch(
-            self.fixture.path,
-            repository="owner/repo",
-            pr_number=7,
-            owner_token=self.fixture.token,
+        self.assertEqual(result["classification"], "refused")
+        self.assertIn("must target the prepared head", result["reason"])
+        self.assertEqual(resolved, [])
+
+    def test_already_present_submode_requires_the_remote_prepared_head(self) -> None:
+        result, resolved = self.resolve(
+            outcome="fix_now",
+            fix_now_mode=externalize.FIX_NOW_ALREADY_PRESENT,
+            remote_head_call=lambda ref: "other-oid",
         )
-        h1 = subprocess.run(
-            ["git", "-C", str(seed), "rev-parse", "HEAD"],
-            capture_output=True, text=True,
-        ).stdout.strip()
-        # The frozen evidence must carry the actual pre-publication head.
-        self.fixture.write_frozen(snapshot(head=h1))
-        added = gitlocal.add_worktree(
-            "owner/repo", 7, h1,
-            owner_token=self.fixture.token,
-            repository_path=self.fixture.path, name="phase3",
+        self.assertEqual(result["classification"], "refused")
+        self.assertIn("prepared head", result["reason"])
+        self.assertEqual(resolved, [])
+
+    def test_already_present_submode_forbids_a_publication_commit(self) -> None:
+        result, resolved = self.resolve(
+            outcome="fix_now",
+            fix_now_mode=externalize.FIX_NOW_ALREADY_PRESENT,
+            published_commit=H2,
         )
-        try:
-            (Path(added["path"]) / "code.py").write_text("v2\n", encoding="utf-8")
-            result = externalize.publish_fix_now(
-                repository="owner/repo",
-                pr_number=7,
-                owner_token=self.fixture.token,
-                snapshot_path=self.snapshot_path,
-                thread_ids=["T1"],
-                expected_head=h1,
-                worktree=added["path"],
-                paths=["code.py"],
-                commit_message="codex review pulse: remediation",
-                campaign_id=CAMPAIGN_ID,
-                rounds_used=1,
-                repository_path=self.fixture.path,
-                fetch_snapshot=lambda: snapshot(head=h1),
+        self.assertEqual(result["classification"], "refused")
+        self.assertIn("must not claim a publication commit", result["reason"])
+        self.assertEqual(resolved, [])
+
+    def test_already_present_submode_resolves_against_the_prepared_head(self) -> None:
+        result, resolved = self.resolve(
+            outcome="fix_now",
+            fix_now_mode=externalize.FIX_NOW_ALREADY_PRESENT,
+            remote_head_call=lambda ref: H1,
+        )
+        self.assertEqual(result["classification"], "confirmed_success")
+        self.assertEqual(resolved, ["T1"])
+
+    def test_unknown_fix_now_submode_is_a_programmer_error(self) -> None:
+        with self.assertRaises(RuntimeError):
+            self.resolve(
+                outcome="fix_now",
+                fix_now_mode="vibes_based",
+                remote_head_call=lambda ref: H1,
             )
-            self.assertEqual(result["classification"], "confirmed_success")
-            remote = gitlocal.remote_head(self.fixture.path, "feature")
-            self.assertEqual(result["published_head"], remote)
-            self.assertNotEqual(remote, h1)
-        finally:
-            git(self.fixture.path, "worktree", "remove", "--force", added["path"])
 
-    def test_current_head_changed_blocks_push(self) -> None:
-        result = self.publish(fetch_snapshot=lambda: snapshot(head="advanced-oid"))
-        self.assertEqual(result["classification"], "refused")
-        self.assertIn("head", result["reason"])
-
-    def test_closed_pull_request_blocks_push(self) -> None:
-        result = self.publish(fetch_snapshot=lambda: snapshot(pr_state="CLOSED"))
-        self.assertEqual(result["classification"], "refused")
-        self.assertIn("open", result["reason"])
-
-    def test_changed_frozen_target_evidence_blocks_push(self) -> None:
-        result = self.publish(
-            fetch_snapshot=lambda: snapshot(threads=[thread(body="The comment was edited.")]),
-        )
-        self.assertEqual(result["classification"], "refused")
-        self.assertIn("changed", result["reason"])
-
-    def test_missing_target_blocks_push(self) -> None:
-        result = self.publish(fetch_snapshot=lambda: snapshot(threads=[]))
-        self.assertEqual(result["classification"], "refused")
-        self.assertIn("no longer present", result["reason"])
-
-    def test_remote_branch_advanced_before_push_is_definitive_failure(self) -> None:
-        result = self.publish(
-            fake_publish={
-                "published": False,
-                "status": "remote_head_advanced_after_commit",
-                "local_commit": "local-1",
-                "remote_head": "other-oid",
-            },
-        )
-        self.assertEqual(result["classification"], "definitive_failure")
-        self.assertEqual(result["status"], "remote_head_advanced_after_commit")
-
-    def test_push_failed_clean_is_definitive_failure(self) -> None:
-        result = self.publish(
-            fake_publish={
-                "published": False,
-                "status": "push_failed_clean",
-                "remote_head": H1,
-                "local_commit": "local-1",
-            },
-        )
-        self.assertEqual(result["classification"], "definitive_failure")
-
-    def test_no_changes_is_definitive_failure_without_publication(self) -> None:
-        result = self.publish(fake_publish={"published": False, "status": "no_changes"})
-        self.assertEqual(result["classification"], "definitive_failure")
-
-    def test_ambiguous_publication_retains_ownership(self) -> None:
-        result = self.publish(
-            fake_publish={
-                "published": False,
-                "status": "ambiguous_publication",
-                "local_commit": "local-1",
-                "remote_head": "unknown",
-            },
-        )
-        self.assertEqual(result["classification"], "ambiguous")
-        self.assertEqual(result["ownership"], "retain")
-
-    def test_final_authority_check_runs_immediately_before_push(self) -> None:
-        calls = {"ensure": 0}
-        real_ensure = storage.ensure_active_campaign_owner
-
-        def counting_ensure(*args, **kwargs):
-            calls["ensure"] += 1
-            if calls["ensure"] >= 2:
-                raise RuntimeError("authority vanished before push")
-            return real_ensure(*args, **kwargs)
-
-        original_publish = externalize.gitlocal.publish_batch
-
-        def fake_publish(**kwargs):
-            kwargs["before_push"]()
-            return {"published": True, "status": "pushed", "commit": "x"}
-
-        storage.ensure_active_campaign_owner = counting_ensure
-        externalize.gitlocal.publish_batch = fake_publish
-        try:
-            with self.assertRaises(RuntimeError):
-                self.publish()
-        finally:
-            storage.ensure_active_campaign_owner = real_ensure
-            externalize.gitlocal.publish_batch = original_publish
-        self.assertEqual(calls["ensure"], 2)
+    def test_fix_now_mode_on_non_fix_now_outcome_is_a_programmer_error(self) -> None:
+        with self.assertRaises(RuntimeError):
+            self.resolve(
+                outcome="no_fix_required",
+                fix_now_mode=externalize.FIX_NOW_ALREADY_PRESENT,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -851,25 +731,15 @@ class ResolveReviewThreadTests(ExternalizeTests):
 
 
 class TargetSelectionRefusalTests(ExternalizeTests):
-    """The three defined caller target-selection mistakes refuse pre-mutation.
+    """Caller target-selection mistakes refuse pre-mutation, structured.
 
     Incident context: a worker once selected a thread outside the committed
     batch and received an unstructured FrozenEvidenceError, treating a target
     mistake as an unrecoverable authority failure and retaining the lock
-    forever. A structured refusal proves no mutation began.
+    forever. A structured refusal proves no mutation began. (The batch
+    membership itself is now enforced one-for-one by the deterministic
+    remediation finalizer; see test_remediation.py.)
     """
-
-    def test_outside_batch_publish_target_refuses_atomically(self) -> None:
-        attempts: list[dict] = []
-        original = externalize.gitlocal.publish_batch
-        externalize.gitlocal.publish_batch = lambda **kw: attempts.append(kw) or {}
-        try:
-            result = self.publish(thread_ids=["T1", "T9"])
-        finally:
-            externalize.gitlocal.publish_batch = original
-        self.assertEqual(result["classification"], "refused")
-        self.assertIn("not part of the committed batch", result["reason"])
-        self.assertEqual(attempts, [])
 
     def test_outside_batch_issue_target_refuses_without_creation(self) -> None:
         result, created = self.ensure_issue(thread_id="T9")
@@ -883,21 +753,7 @@ class TargetSelectionRefusalTests(ExternalizeTests):
         self.assertIn("not part of the committed batch", result["reason"])
         self.assertEqual(resolved, [])
 
-    def test_duplicate_publish_targets_refuse_before_any_mutation(self) -> None:
-        attempts: list[dict] = []
-        original = externalize.gitlocal.publish_batch
-        externalize.gitlocal.publish_batch = lambda **kw: attempts.append(kw) or {}
-        try:
-            result = self.publish(thread_ids=["T1", "T1"])
-        finally:
-            externalize.gitlocal.publish_batch = original
-        self.assertEqual(result["classification"], "refused")
-        self.assertIn("duplicate target IDs", result["reason"])
-        self.assertEqual(attempts, [])
-
     def test_missing_frozen_snapshot_remains_fail_closed(self) -> None:
-        with self.assertRaises(externalize.FrozenEvidenceError):
-            self.publish(snapshot_path=self.fixture.path / "missing.json")
         with self.assertRaises(externalize.FrozenEvidenceError):
             self.ensure_issue(snapshot_path=self.fixture.path / "missing.json")
 
@@ -906,12 +762,12 @@ class TargetSelectionRefusalTests(ExternalizeTests):
         broken["complete"] = False
         self.fixture.write_frozen(broken)
         with self.assertRaises(externalize.FrozenEvidenceError):
-            self.publish()
+            self.resolve()
 
     def test_foreign_frozen_snapshot_remains_fail_closed(self) -> None:
         self.fixture.write_frozen(snapshot(repository="other/repo"))
         with self.assertRaises(externalize.FrozenEvidenceError):
-            self.publish()
+            self.resolve()
         with self.assertRaises(externalize.FrozenEvidenceError):
             self.ensure_issue()
 
@@ -920,14 +776,12 @@ class TargetSelectionRefusalTests(ExternalizeTests):
         del broken["root_comment_id"]
         self.fixture.write_frozen(snapshot(threads=[broken]))
         with self.assertRaises(externalize.FrozenEvidenceError):
-            self.publish()
+            self.resolve()
 
     def test_resolved_record_inside_batch_is_an_invariant_failure(self) -> None:
         # A repaired batch projection never contains a resolved record; finding
         # one is corrupt frozen evidence, not a caller typo.
         self.fixture.write_frozen(snapshot(threads=[thread(resolved=True)]))
-        with self.assertRaises(externalize.FrozenEvidenceError):
-            self.publish()
         with self.assertRaises(externalize.FrozenEvidenceError):
             self.resolve()
 
@@ -950,101 +804,38 @@ class TargetSelectionRefusalTests(ExternalizeTests):
 
 
 # ---------------------------------------------------------------------------
-# Documented CLI surface
+# No model-visible CLI remains on the internal mutation library
 
 
-class CliParserRepairTests(unittest.TestCase):
-    """Every subcommand inherits the common options (incident: argparse defect).
+class NoCliTests(unittest.TestCase):
+    """The legacy model-sequenced externalization CLI is removed.
 
-    The documented forms place the common options after the subcommand; a
-    missing parents=[common] inheritance rejected every documented command and
-    pushed a worker into bypassing the CLI via direct imports.
+    Incident context: an argparse defect once rejected every documented
+    externalization command and pushed a worker into bypassing the CLI via
+    direct imports. Phase 1 removed the model-visible CLI entirely: the
+    deterministic remediation finalizer is the single authoritative path and
+    calls these helpers as internal library boundaries.
     """
 
-    COMMON = ["--repo", "owner/repo", "--pr", "7", "--repository-path", "."]
-
-    def documented_argv(self, command: str, extra: list[str]) -> list[str]:
-        return (
-            [command]
-            + self.COMMON
-            + ["--owner-token", "tok", "--snapshot", "missing.json",
-               "--campaign-id", "crp-20260914T120000Z-abc123", "--rounds-used", "1"]
-            + extra
-        )
-
-    def test_every_subcommand_parses_its_documented_argv(self) -> None:
+    def test_externalize_defines_no_parser_or_publish_boundary(self) -> None:
         import externalize
 
-        cases = {
-            "publish-fix-now": [
-                "--thread-id", "T1", "--expected-head", "h1",
-                "--worktree", "wt", "--path", "src/a.py", "--message", "m",
-            ],
-            "ensure-issue": [
-                "--thread-id", "T1", "--expected-head", "h1",
-                "--title", "t", "--body-file", "body.md",
-            ],
-            "resolve-thread": [
-                "--thread-id", "T1", "--expected-head", "h1",
-                "--outcome", "no_fix_required",
-            ],
-        }
-        for command, extra in cases.items():
-            args = externalize.build_parser().parse_args(
-                self.documented_argv(command, extra)
-            )
-            self.assertEqual(args.command, command)
-            self.assertEqual(args.repo, "owner/repo")
-            self.assertEqual(args.pr, 7)
-            self.assertEqual(args.repository_path, ".")
-            self.assertEqual(args.owner_token, "tok")
-            self.assertEqual(args.campaign_id, "crp-20260914T120000Z-abc123")
-            self.assertEqual(args.rounds_used, 1)
+        self.assertFalse(hasattr(externalize, "build_parser"))
+        self.assertFalse(hasattr(externalize, "publish_fix_now"))
+        source = (
+            Path(externalize.__file__).read_text(encoding="utf-8")
+        )
+        self.assertNotIn("add_parser", source)
+        self.assertNotIn("def main(", source)
 
-    def test_subcommand_help_shows_the_common_options(self) -> None:
-        script = str(SCRIPTS / "externalize.py")
-        for command in ("publish-fix-now", "ensure-issue", "resolve-thread"):
-            process = subprocess.run(
-                [sys.executable, script, command, "--help"],
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(process.returncode, 0, command)
-            for option in (
-                "--repo", "--pr", "--repository-path", "--owner-token",
-                "--snapshot", "--campaign-id", "--rounds-used",
-            ):
-                self.assertIn(option, process.stdout, f"{command}: {option}")
-
-    def test_subprocess_documented_invocation_is_not_rejected(self) -> None:
-        # A full documented argv must reach the boundary itself (which then
-        # fails closed on the missing frozen evidence), never the argparse
-        # "unrecognized arguments" rejection.
-        body = SCRIPTS.parent / "references" / "worker.md"
-        cases = {
-            "publish-fix-now": [
-                "--thread-id", "T1", "--expected-head", "h1",
-                "--worktree", "wt", "--path", "src/a.py", "--message", "m",
-            ],
-            "ensure-issue": [
-                "--thread-id", "T1", "--expected-head", "h1",
-                "--title", "t", "--body-file", str(body),
-            ],
-            "resolve-thread": [
-                "--thread-id", "T1", "--expected-head", "h1",
-                "--outcome", "no_fix_required",
-            ],
-        }
-        script = str(SCRIPTS / "externalize.py")
-        for command, extra in cases.items():
-            process = subprocess.run(
-                [sys.executable, script, *self.documented_argv(command, extra)],
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(process.returncode, 1, command)
-            self.assertIn("Frozen evidence does not exist", process.stderr, command)
-            self.assertNotIn("unrecognized arguments", process.stderr, command)
+    def test_externalize_selftest_entrypoint_still_works(self) -> None:
+        process = subprocess.run(
+            [sys.executable, str(SCRIPTS / "externalize.py"), "--selftest"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(process.stdout.strip(), "externalize ok")
 
 
 # ---------------------------------------------------------------------------

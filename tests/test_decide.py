@@ -186,18 +186,17 @@ class DecisionTests(unittest.TestCase):
         )
         self.assertEqual(directive["action"], "request_review")
 
-    def test_thumbs_up_without_guard_cannot_prove_approval(self) -> None:
-        # GitHub no longer exposes a commit-level push timestamp, so a PR-level
-        # reaction cannot be attributed to the current head. It never proves
-        # approval and never authorizes a request; it is a non-counting wait.
+    def test_pr_thumbs_up_succeeds_without_a_request_guard(self) -> None:
         directive = m.decide(
             campaign(),
             snapshot(reactions=[reaction(m.THUMBS_UP, created_at=T_PLUS_15)]),
         )
-        self.assertEqual(directive["action"], "wait_lifecycle_attribution_unknown")
-        self.assertEqual(directive["reaction_ids"], ["r-THUMBS_UP"])
+        self.assertEqual(directive["action"], "terminal")
+        self.assertEqual(directive["status"], m.SUCCEEDED)
+        self.assertEqual(directive["proof"]["id"], "r-THUMBS_UP")
+        self.assertEqual(directive["basis"], "observation")
 
-    def test_old_thumbs_up_cannot_terminate_or_request_fresh_campaign(self) -> None:
+    def test_pr_thumbs_up_predating_campaign_still_approves(self) -> None:
         directive = m.decide(
             campaign(),
             snapshot(
@@ -206,7 +205,32 @@ class DecisionTests(unittest.TestCase):
                 ]
             ),
         )
-        self.assertEqual(directive["action"], "wait_lifecycle_attribution_unknown")
+        self.assertEqual(directive["status"], m.SUCCEEDED)
+
+    def test_pr_thumbs_up_survives_head_changes(self) -> None:
+        c = reserve_and_open(campaign(), head=H1)
+        directive = m.decide(
+            c, snapshot(head=H2, reactions=[reaction(m.THUMBS_UP, created_at=T0)])
+        )
+        self.assertEqual(directive["status"], m.SUCCEEDED)
+
+    def test_human_pr_thumbs_up_does_not_approve(self) -> None:
+        directive = m.decide(
+            campaign(), snapshot(reactions=[reaction(m.THUMBS_UP, login="a-human")])
+        )
+        self.assertEqual(directive["action"], "request_review")
+
+    def test_request_baseline_pr_thumbs_up_still_approves(self) -> None:
+        up = reaction(m.THUMBS_UP, created_at=T0)
+        c = reserve_and_open(campaign(), baseline={"reactions": [up]})
+        directive = m.decide(c, snapshot(reactions=[up]))
+        self.assertEqual(directive["status"], m.SUCCEEDED)
+
+    def test_pr_thumbs_up_does_not_require_a_timestamp(self) -> None:
+        up = reaction(m.THUMBS_UP)
+        del up["created_at"]
+        directive = m.decide(campaign(), snapshot(reactions=[up]))
+        self.assertEqual(directive["status"], m.SUCCEEDED)
 
     def test_eyes_without_guard_is_attribution_unknown_wait(self) -> None:
         directive = m.decide(
@@ -252,17 +276,13 @@ class DecisionTests(unittest.TestCase):
         directive = m.decide(campaign(rounds_used=6), snapshot())
         self.assertEqual(directive["status"], m.ROUNDS_EXHAUSTED)
 
-    def test_exhausted_unattributable_thumbs_up_terminates_exhausted(self) -> None:
-        # The repeated-wake incident: an active fully-consumed campaign with no
-        # request guard must not loop forever on the attribution-unknown wait.
-        # Exhaustion takes precedence; the unattributable reaction proves
-        # neither approval nor review progress.
+    def test_pr_thumbs_up_succeeds_even_after_budget_exhaustion(self) -> None:
         directive = m.decide(
             campaign(rounds_used=6),
             snapshot(reactions=[reaction(m.THUMBS_UP, created_at=T_PLUS_15)]),
         )
         self.assertEqual(directive["action"], "terminal")
-        self.assertEqual(directive["status"], m.ROUNDS_EXHAUSTED)
+        self.assertEqual(directive["status"], m.SUCCEEDED)
         self.assertEqual(directive["basis"], "observation")
         self.assertNotEqual(directive["action"], "wait_lifecycle_attribution_unknown")
 
@@ -276,11 +296,10 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(directive["basis"], "observation")
         self.assertNotEqual(directive["action"], "wait_lifecycle_attribution_unknown")
 
-    def test_exhausted_unattributable_reaction_never_claims_approval(self) -> None:
-        # Exhaustion precedence must not reinterpret the reaction as approval.
+    def test_exhausted_unattributable_eyes_never_claims_approval(self) -> None:
         directive = m.decide(
             campaign(rounds_used=6),
-            snapshot(reactions=[reaction(m.THUMBS_UP, created_at=T_PLUS_15)]),
+            snapshot(reactions=[reaction(m.EYES, created_at=T_PLUS_15)]),
         )
         self.assertNotEqual(directive["status"], m.SUCCEEDED)
         self.assertNotIn("proof", directive)
@@ -538,7 +557,7 @@ class DecisionTests(unittest.TestCase):
 
 
 class CreationBaselineTests(unittest.TestCase):
-    """Pre-existing creation-baseline reactions prove nothing and block nothing."""
+    """Creation baselines exclude lifecycle history, not PR-wide approval."""
 
     def baseline_campaign(self) -> dict:
         return m.new_campaign(
@@ -572,7 +591,7 @@ class CreationBaselineTests(unittest.TestCase):
         )
         self.assertEqual(directive["action"], "request_review")
 
-    def test_baseline_thumbs_up_does_not_approve(self) -> None:
+    def test_creation_baseline_pr_thumbs_up_still_approves(self) -> None:
         c = self.baseline_campaign()
         directive = m.decide(
             c,
@@ -582,7 +601,7 @@ class CreationBaselineTests(unittest.TestCase):
                 ]
             ),
         )
-        self.assertEqual(directive["action"], "request_review")
+        self.assertEqual(directive["status"], m.SUCCEEDED)
 
     def test_baseline_does_not_block_the_request_allowance(self) -> None:
         c = self.baseline_campaign()

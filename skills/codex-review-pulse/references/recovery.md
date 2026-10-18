@@ -184,7 +184,7 @@ A later delivery creates a fresh worktree and never resumes an abandoned one.
 
 | Status | Meaning | Lock after reaching it |
 | --- | --- | --- |
-| `succeeded` | Applicable current-head approval and zero applicable unresolved threads | released |
+| `succeeded` | Codex PR-level THUMBS_UP (no commit linkage required) or a current-head approved review, and zero applicable unresolved threads | released |
 | `review_completed_without_approval` | Eligible post-request completion, no approval or feedback | released |
 | `codex_review_service_unresponsive` | Response grace elapsed (at least the configured interval, never under 20 minutes), complete evidence shows no Codex response | released |
 | `rounds_exhausted` | No effective round remains and no asynchronous result is pending | released |
