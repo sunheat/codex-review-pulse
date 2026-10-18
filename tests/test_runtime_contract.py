@@ -1,4 +1,4 @@
-"""Network-free tests for the Phase 2 product-state rules and documentation.
+"""Network-free tests for the active runtime rules and documentation.
 
 These tests cover the scheduler-evidence policy, response grace, cleanup
 authority, the unknown-result contract, and the recovery-documentation

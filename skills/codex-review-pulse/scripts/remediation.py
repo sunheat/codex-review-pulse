@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""The deterministic remediation subprotocol (Phase 1 control-plane migration).
+"""The deterministic remediation transaction around speculative semantic work.
 
-Once the existing Phase-2-unmigrated campaign routing selects a remediation
-candidate, it hands off into this module and every remaining remediation
-decision is deterministic:
+Once the deterministic owned worker decision selects a remediation candidate,
+it hands off into this module. Transaction control is deterministic around
+semantic/model work:
 
 - ``prepare_remediation_owned`` runs while preparation ownership is still
   held: it freezes the exact prepared batch, captures the campaign-source

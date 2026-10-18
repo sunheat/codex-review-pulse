@@ -491,7 +491,7 @@ def raw_thread(
     root_comment: str | None = None,
     updated_at: str = T0,
 ) -> dict:
-    """A raw S1 thread record with the Phase 3 externalization fields."""
+    """A raw S1 thread record with the external mutation evidence fields."""
     return {
         "id": thread_id,
         "is_resolved": resolved,

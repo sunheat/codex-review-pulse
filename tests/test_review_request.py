@@ -102,7 +102,7 @@ class OwnedRequestRepository:
         )
 
     def commit_request(self) -> None:
-        """Durably commit the request round and per-head allowance (Phase 2)."""
+        """Durably commit the request round and per-head allowance."""
         path = storage.campaign_path("owner/repo", 7, repository_path=self.path)
         record = storage.load_json(path)
         record = m.reserve_request(record, head_oid=H, reserved_at=T0, snapshot=snap(time=T0))

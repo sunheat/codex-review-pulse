@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The deterministic owned product boundaries of Phase 2.
+"""Deterministic owned campaign creation, rollover, and worker decisions.
 
 These are the only product-facing entry points that may:
 
@@ -7,7 +7,7 @@ These are the only product-facing entry points that may:
 - prepare and apply the fixed C1-to-C2 rollover transition;
 - make the one deterministic owned worker decision per acquired delivery
   (``run_worker_decision``), including the deterministic remediation
-  preparation handoff into the Phase 1 remediation subprotocol
+  preparation handoff into the deterministic remediation subprotocol
   (``remediation.py``): preparation freezes the exact batch, worktree, and
   campaign-source witness, consumes no round, and releases ownership before
   returning the semantic-work action;
@@ -19,8 +19,8 @@ These are the only product-facing entry points that may:
 internal library boundary invoked by the deterministic remediation finalizer
 in the same invocation that committed the final remediation round.
 
-Every helper establishes matching Phase 1 ownership itself and persists only
-through the guarded Phase 1 primitives; the observation boundaries obtain
+Every helper establishes matching campaign ownership itself and persists only
+through the guarded campaign transition primitives; the observation boundaries obtain
 their own fresh authoritative GitHub evidence while the permanent lock remains
 held and the canonical sidecar guard stays released (the hard-failure handoff
 performs no observation at all). Callers cannot select snapshots, creation
@@ -160,11 +160,11 @@ def create_campaign_owned(
     This helper itself verifies the setup ownership condition, obtains one
     fresh complete authoritative snapshot while ownership remains held,
     validates the target, derives all creation evidence from that snapshot,
-    and persists through the Phase 1 guarded initialization primitive. The
+    and persists through the guarded campaign initialization primitive. The
     caller cannot select the snapshot, its created_at, or any target evidence.
 
     A handled deterministic failure before campaign persistence cancels the
-    clean setup (Phase 1 owner-authorized cancellation) and returns a
+    clean setup (owner-authorized cancellation) and returns a
     structured rejection. If cancellation itself cannot complete, the permanent
     setup lock stays in place fail closed for explicit recovery.
     """
@@ -272,7 +272,7 @@ def prepare_rollover_owned(
     Establishes exact matching terminal-C1 rollover ownership, obtains one
     fresh complete authoritative snapshot itself, validates the target,
     derives C2's creation time and lifecycle baseline from that snapshot,
-    allocates the exact C2 identity, and applies the Phase 1 fixed lock-first
+    allocates the exact C2 identity, and applies the fixed lock-first
     C1-to-C2 transition. The caller cannot select C2 creation evidence.
 
     A handled failure before the first identity replacement leaves C1
@@ -409,7 +409,7 @@ def run_worker_decision(
 ) -> dict[str, Any]:
     """One deterministic owned-worker decision boundary.
 
-    Invoked exactly once per acquired delivery after Phase 1 worker
+    Invoked exactly once per acquired delivery after worker
     acquisition. This helper owns the correctness-critical sequence: matching
     active ownership, campaign-wide durable-local preflight, one fresh owned
     S1, guarded sync-head, authoritative post-sync campaign, pure decision,
@@ -437,7 +437,7 @@ def run_worker_decision(
         except Exception:  # noqa: BLE001 - release must never be guessed
             return False
 
-    # 1. Establish matching active Phase 1 ownership.
+    # 1. Establish matching active campaign ownership.
     try:
         metadata = storage.ensure_active_campaign_owner(
             repository, pr_number, owner_token, repository_path=repository_path
@@ -538,7 +538,7 @@ def run_worker_decision(
         )
 
     if action == "remediation_batch":
-        # Phase 1 remediation handoff: deterministic preparation while the
+        # Remediation preparation handoff: deterministic preparation while the
         # permanent lock is still held, then release. No remediation round is
         # consumed here; the round is committed by the deterministic
         # finalizer after complete validation, before any external mutation.

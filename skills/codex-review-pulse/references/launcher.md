@@ -150,7 +150,7 @@ The helper itself: verifies the setup ownership condition, fetches one fresh
 complete authoritative GitHub snapshot while the lock stays held, validates the
 target (open PR, same-repository head, supported head ref, authoritative
 server time), derives `created_at` and the creation lifecycle-reaction baseline
-from that snapshot, and persists the campaign through the guarded Phase 1
+from that snapshot, and persists the campaign through the guarded campaign
 initialization. You cannot and must not pass snapshots, timestamps, or any
 target evidence.
 
@@ -239,7 +239,7 @@ automation is the only delivery mechanism.
 
 ## 7. Automatic rollover of an eligible terminal campaign
 
-Only the Phase 1 predicate authorizes this flow: valid terminal C1 in the
+Only the rollover eligibility predicate authorizes this flow: valid terminal C1 in the
 allowlisted statuses above, `rounds_used == max_rounds`, and no permanent lock.
 
 1. Acquire rollover ownership for the exact C1 identity:

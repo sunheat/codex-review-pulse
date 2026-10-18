@@ -764,7 +764,7 @@ def applicable_unresolved_threads(
 ) -> list[dict[str, Any]]:
     """Applicable unresolved threads with their frozen identity fields.
 
-    Emitted fields are the Python-owned frozen evidence the Phase 3 mutation
+    Emitted fields are the Python-owned frozen evidence the external mutation
     boundaries revalidate before every externalization: exact thread path,
     root review-comment ID, normalized root-author identity, exact root body,
     and root ``updatedAt``. Boundaries derive these fields from the snapshot

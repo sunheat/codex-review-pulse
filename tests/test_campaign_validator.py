@@ -1,4 +1,4 @@
-"""Phase 1 campaign validator, transition compatibility, and terminal invariant.
+"""Campaign validator, transition compatibility, and terminal invariant.
 
 Every supported durable state is built with the real pure transition helpers,
 proven to pass the validator, then corrupted state-specific data is proven to

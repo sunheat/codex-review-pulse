@@ -512,8 +512,8 @@ def acquire_rollover_lock(
 ) -> dict[str, Any]:
     """Rollover acquisition for an allowlisted fully-consumed terminal C1.
 
-    Local eligibility/acquisition only; native C2 Automation creation belongs
-    to a later phase.
+    Local eligibility/acquisition only; native C2 Automation creation is handled
+    by the host/model-mediated launcher.
     """
     return _acquire_lock_with_predicate(
         repository,
@@ -814,7 +814,7 @@ def apply_campaign_transition_if_current(
 ) -> dict[str, Any]:
     """Same-owner stale-write protection for transitions separated by work.
 
-    Internal primitive for later mutation-boundary phases: possession of one
+    Internal stale-write primitive for mutation boundaries: possession of one
     owner token (shared by several subprocesses) does not authorize writing
     state derived from an obsolete campaign document. Only operation-specific
     pure transitions are persisted; there is no generic document replacement.
