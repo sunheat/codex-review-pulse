@@ -382,6 +382,67 @@ class DecisionTests(unittest.TestCase):
         )
         self.assertEqual(directive["status"], m.REVIEW_COMPLETED_WITHOUT_APPROVAL)
 
+    def test_later_completion_supersedes_older_eyes(self) -> None:
+        for rounds_used in (0, 5):
+            for observed_at in (T_PLUS_30, T_PLUS_45):
+                with self.subTest(rounds_used=rounds_used, observed_at=observed_at):
+                    c = reserve_and_open(campaign(rounds_used=rounds_used))
+                    directive = m.decide(
+                        c,
+                        snapshot(
+                            reactions=[reaction(m.EYES, created_at=T_PLUS_15)],
+                            reviews=[review(submitted_at=T_PLUS_30)],
+                            server_time=observed_at,
+                        ),
+                    )
+                    self.assertEqual(directive["action"], "terminal")
+                    self.assertEqual(
+                        directive["status"], m.REVIEW_COMPLETED_WITHOUT_APPROVAL
+                    )
+                    self.assertEqual(directive["review_id"], "rv1")
+                    self.assertEqual(directive["basis"], "observation")
+                    self.assertEqual(c["rounds_used"], rounds_used + 1)
+
+    def test_completion_only_supersedes_strictly_older_eyes(self) -> None:
+        c = reserve_and_open(campaign())
+        for eyes_at in (T_PLUS_30, T_PLUS_45):
+            with self.subTest(eyes_at=eyes_at):
+                directive = m.decide(
+                    c,
+                    snapshot(
+                        reactions=[
+                            reaction(m.EYES, created_at=T_PLUS_15, rid="old-eyes"),
+                            reaction(m.EYES, created_at=eyes_at, rid="new-eyes"),
+                        ],
+                        reviews=[review(submitted_at=T_PLUS_30)],
+                        server_time=T_PLUS_45,
+                    ),
+                )
+                self.assertEqual(directive["action"], "wait_review_in_progress")
+                self.assertEqual(directive["reaction_ids"], ["new-eyes"])
+
+    def test_inapplicable_completion_cannot_supersede_eyes(self) -> None:
+        for completed in (
+            review(submitted_at=T_PLUS_30, commit=H2),
+            review(submitted_at=T_PLUS_30, login="a-human"),
+            review(submitted_at=T_PLUS_30, review_id="baseline-review"),
+            review(submitted_at=T0),
+        ):
+            with self.subTest(completed=completed):
+                c = reserve_and_open(
+                    campaign(),
+                    baseline={"reviews": [review(review_id="baseline-review")]},
+                )
+                directive = m.decide(
+                    c,
+                    snapshot(
+                        reactions=[reaction(m.EYES, created_at=T_PLUS_15)],
+                        reviews=[completed],
+                        server_time=T_PLUS_45,
+                    ),
+                )
+                self.assertEqual(directive["action"], "wait_review_in_progress")
+
     def test_equal_timestamp_completion_is_not_eligible(self) -> None:
         c = reserve_and_open(campaign(rounds_used=1))
         # Same-second review cannot be proven to follow the request: before the

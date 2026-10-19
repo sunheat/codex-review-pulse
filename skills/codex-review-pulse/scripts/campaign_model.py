@@ -987,6 +987,16 @@ def evaluate(
                 {"kind": "review", "id": review.get("id"), "submitted_at": submitted_at}
             )
 
+    # A proven later current-head completion supersedes an older progress
+    # signal. Equal timestamps do not prove ordering; newer EYES still wait.
+    eligible_eyes = [
+        eyes for eyes in eligible_eyes
+        if not any(
+            strictly_after(review["submitted_at"], eyes["created_at"])
+            for review in completed_reviews
+        )
+    ]
+
     # Codex conversation activity (never the viewer's own request comment) can
     # be a completion signal and always blocks a "no response" conclusion.
     codex_comments: list[dict[str, Any]] = []
