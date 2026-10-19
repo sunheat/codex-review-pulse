@@ -240,10 +240,14 @@ class AuthorityTests(unittest.TestCase):
             acquired_at=ACQUIRED_AT,
             repository_path=self.repo,
         )
+        witness = storage.inspect_lock(
+            "owner/repo", 7, repository_path=self.repo
+        )["recovery_witness"]
         storage.recover_lock(
             "owner/repo", 7,
             user_authorized_recovery=True,
             expected_campaign_id=CAMPAIGN_ID,
+            expected_lock_witness=witness,
             repository_path=self.repo,
         )
         with self.assertRaises(RuntimeError):
@@ -706,10 +710,14 @@ class AuthorityTests(unittest.TestCase):
                 repository_path=self.repo,
             )
         # Recovery expects the C2 lock identity; C1 remains unchanged.
+        witness = storage.inspect_lock(
+            "owner/repo", 7, repository_path=self.repo
+        )["recovery_witness"]
         recovered = storage.recover_lock(
             "owner/repo", 7,
             user_authorized_recovery=True,
             expected_campaign_id=C2_ID,
+            expected_lock_witness=witness,
             repository_path=self.repo,
         )
         self.assertTrue(recovered["recovered"])
@@ -992,10 +1000,14 @@ class AuthorityTests(unittest.TestCase):
 
     def test_after_recovery_lock_absent_retirement_works(self) -> None:
         self.setup_owned()
+        witness = storage.inspect_lock(
+            "owner/repo", 7, repository_path=self.repo
+        )["recovery_witness"]
         storage.recover_lock(
             "owner/repo", 7,
             user_authorized_recovery=True,
             expected_campaign_id=CAMPAIGN_ID,
+            expected_lock_witness=witness,
             repository_path=self.repo,
         )
         result = storage.retire_campaign_without_lock(

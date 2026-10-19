@@ -44,6 +44,10 @@ LOCK_STATE_SUBDIR = "v2"
 # owner tokens are secrets.token_hex(32): exactly 64 lowercase hex characters.
 OWNER_TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
 
+# Recovery witnesses bind manual recovery to the exact inspected lock
+# contents: ``sha256:<64 lowercase hex>`` over the raw lock-file bytes.
+LOCK_WITNESS_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
 
 def git_common_directory(repository_path: str | Path = ".") -> Path:
     process = subprocess.run(
@@ -212,6 +216,54 @@ def _guard(lock_file: Path) -> Iterator[None]:
         stream.close()
 
 
+def lock_content_witness(raw: bytes) -> str:
+    """Render the guarded recovery witness for exact raw lock bytes.
+
+    The witness is a compare-and-delete precondition over raw lock
+    contents (``sha256:<hex>``), not a persistent file-instance identity
+    and not ownership authority. Normally initialized acquisitions persist
+    a fresh random ``owner_token``, so successive valid owners produce
+    different raw contents and different witnesses; content-identical
+    damaged creations (for example two empty files) are outside that
+    guarantee. Hashing uses the exact stored bytes without parsing,
+    reserialization, whitespace normalization, or field selection.
+    """
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _campaign_identity_from_raw(raw: bytes) -> str | None:
+    """Return the raw ``campaign_id`` string when directly recoverable.
+
+    Returns ``None`` when the bytes cannot be UTF-8 decoded, are not JSON,
+    are not an object, or carry no string ``campaign_id``. The raw value
+    grants no authority; callers use it only as a conservative mismatch
+    guard.
+    """
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    candidate = payload.get("campaign_id")
+    if not isinstance(candidate, str) or not candidate:
+        return None
+    return candidate
+
+
+def _parse_lock_payload_from_raw(raw: bytes) -> dict[str, Any]:
+    """Parse raw lock bytes as a JSON object; invalid content raises."""
+    text = raw.decode("utf-8")
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        raise ValueError("JSON root must be an object")
+    return payload
+
+
 def _validate_lock_shape(
     payload: dict[str, Any], *, repository: str, pr_number: int
 ) -> dict[str, Any]:
@@ -249,6 +301,65 @@ def _validate_lock_shape(
     return payload
 
 
+def _read_lock_raw_unlocked(target: Path) -> bytes | None:
+    """Read exact raw lock bytes. Caller holds the canonical guard.
+
+    Returns ``None`` when the lock is absent. Any other ``OSError``
+    (permissions, transient I/O) is propagated so the caller fails closed
+    instead of deleting contents it cannot currently re-observe.
+    """
+    try:
+        return target.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _classify_lock_raw(
+    raw: bytes, *, repository: str, pr_number: int
+) -> dict[str, Any]:
+    """Classify already-read raw lock bytes and derive its witness.
+
+    Empty bytes, invalid UTF-8, malformed JSON, non-object JSON, and
+    semantically invalid lock objects are all ``invalid`` but still carry
+    a raw-content witness. The witness is never ownership authority and
+    the owner token is never exposed.
+    """
+    witness = lock_content_witness(raw)
+    try:
+        payload = _parse_lock_payload_from_raw(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        if len(raw) == 0:
+            detail = "lock file is empty"
+        else:
+            detail = str(error) or error.__class__.__name__
+        return {
+            "status": "invalid",
+            "exists": True,
+            "error": detail,
+            "recovery_witness": witness,
+        }
+    try:
+        metadata = _validate_lock_shape(
+            payload, repository=repository, pr_number=pr_number
+        )
+    except ValueError as error:
+        return {
+            "status": "invalid",
+            "exists": True,
+            "error": str(error),
+            "recovery_witness": witness,
+        }
+    return {
+        "status": "active",
+        "exists": True,
+        "campaign_id": metadata["campaign_id"],
+        "acquired_at": metadata.get("acquired_at"),
+        "host": metadata.get("host"),
+        "pid": metadata.get("pid"),
+        "recovery_witness": witness,
+    }
+
+
 def _inspect_lock_unlocked(
     repository: str, pr_number: int, *, repository_path: str | Path = "."
 ) -> dict[str, Any]:
@@ -259,28 +370,13 @@ def _inspect_lock_unlocked(
     acquisition and misclassify it as corruption.
     """
     target = lock_path(repository, pr_number, repository_path=repository_path)
-    if not target.exists():
+    try:
+        raw = _read_lock_raw_unlocked(target)
+    except OSError as error:
+        return {"status": "invalid", "exists": True, "error": str(error)}
+    if raw is None:
         return {"status": "absent", "exists": False}
-    try:
-        payload = load_json(target)
-    except (OSError, ValueError, json.JSONDecodeError) as error:
-        return {"status": "invalid", "exists": True, "error": str(error)}
-    if payload is None:
-        return {"status": "invalid", "exists": True, "error": "lock file is empty"}
-    try:
-        metadata = _validate_lock_shape(
-            payload, repository=repository, pr_number=pr_number
-        )
-    except ValueError as error:
-        return {"status": "invalid", "exists": True, "error": str(error)}
-    return {
-        "status": "active",
-        "exists": True,
-        "campaign_id": metadata["campaign_id"],
-        "acquired_at": metadata.get("acquired_at"),
-        "host": metadata.get("host"),
-        "pid": metadata.get("pid"),
-    }
+    return _classify_lock_raw(raw, repository=repository, pr_number=pr_number)
 
 
 def inspect_lock(
@@ -288,7 +384,10 @@ def inspect_lock(
 ) -> dict[str, Any]:
     """Stable public lock inspection: read status under the canonical guard.
 
-    Token is never returned. Outcomes: absent / active / invalid.
+    Token is never returned. Outcomes: absent / active / invalid. An
+    existing lock whose raw bytes are readable also carries
+    ``recovery_witness`` (``sha256:<hex>`` over the exact stored bytes);
+    actual raw I/O failure carries no witness.
     """
     with _guard(lock_path(repository, pr_number, repository_path=repository_path)):
         return _inspect_lock_unlocked(
@@ -631,22 +730,45 @@ def recover_lock(
     *,
     user_authorized_recovery: bool,
     expected_campaign_id: str | None = None,
+    expected_lock_witness: str | None = None,
     repository_path: str | Path = ".",
 ) -> dict[str, Any]:
     """Explicit human recovery boundary. Never call this automatically.
 
-    Raw reading, classification, expected-identity checking, and unlink all
-    happen inside one canonical-guard critical section.
+    Raw reading, witness comparison, classification, expected-identity
+    checking, and unlink all happen inside one canonical-guard critical
+    section. The witness is a compare-and-delete precondition over the exact
+    raw lock bytes (``sha256:<hex>``): it proves the current contents still
+    match the lock the operator inspected, while human quiescence
+    determination separately proves removing abandoned ownership is safe.
+    Neither substitutes for the other.
 
-    - Lock absent: harmless no-op; no expected identity is required.
-    - Structurally valid lock: expected campaign id is mandatory and must match
-      the stored campaign identity exactly.
-    - Invalid lock with a readable raw campaign id: the raw identity grants no
-      authority and need not satisfy campaign-id syntax; it is used only as a
-      conservative mismatch guard, so expected identity is still mandatory.
-    - Invalid lock with no recoverable identity: a supplied expected id can
-      never be verified and refuses recovery; only an operator who established
-      that the prior owner cannot continue may recover without one.
+    - Lock absent: harmless no-op. Absent-lock recovery must not create or
+      modify campaign state, create a permanent ownership lock, or trigger
+      work. Creation or opening of the existing canonical guard sidecar is
+      permitted. Once it observes absence under the guard, that invocation
+      must return without scheduling any later deletion or affecting a
+      subsequently acquired lock.
+    - Structurally valid lock: expected campaign id and expected lock
+      witness are both mandatory and must match exactly.
+    - Invalid readable lock with a readable raw campaign id: the raw
+      identity grants no authority and need not satisfy campaign-id syntax;
+      it is used only as a conservative mismatch guard, so expected
+      campaign id and expected lock witness are still both mandatory.
+    - Readable raw contents with no recoverable campaign identity: the
+      matching lock witness is mandatory; a supplied expected campaign id
+      can never be verified and refuses recovery, while recovery without
+      one remains possible only through the existing explicit
+      human-authorized recovery semantics after quiescence.
+    - Raw bytes that cannot actually be read (permissions or other
+      ``OSError``): refuse, preserve the lock, and never unlink, even when
+      a previously captured witness is supplied.
+
+    For normally initialized acquisitions each owner persists a fresh
+    random ``owner_token``, so a successor owner produces different raw
+    contents and a different witness. Content-identical damaged lock
+    creations (for example two empty files) remain outside that guarantee;
+    their recovery stays an explicit human operation requiring quiescence.
     """
     if not user_authorized_recovery:
         raise RuntimeError(
@@ -655,11 +777,38 @@ def recover_lock(
         )
     target = lock_path(repository, pr_number, repository_path=repository_path)
     with _guard(target):
-        if not target.exists():
-            return {"recovered": False, "status": "absent"}
         try:
-            payload = load_json(target)
-        except (OSError, ValueError, json.JSONDecodeError):
+            raw = _read_lock_raw_unlocked(target)
+        except OSError as error:
+            raise RuntimeError(
+                "Refusing recovery: the current lock bytes cannot be read, "
+                f"so the expected witness cannot be verified ({error})"
+            ) from error
+        if raw is None:
+            # Harmless absent no-op: no state is created or modified, no lock
+            # is created, and no work is triggered. Opening the canonical
+            # guard sidecar already happened above and is permitted. Return
+            # now without scheduling any later deletion.
+            return {"recovered": False, "status": "absent"}
+        current_witness = lock_content_witness(raw)
+        if expected_lock_witness is None:
+            raise RuntimeError(
+                "Refusing recovery: the lock exists, so the expected lock "
+                "witness is required"
+            )
+        if not LOCK_WITNESS_RE.fullmatch(expected_lock_witness):
+            raise RuntimeError(
+                "Refusing recovery: the expected lock witness must have the "
+                "form sha256:<64 lowercase hex characters>"
+            )
+        if expected_lock_witness != current_witness:
+            raise RuntimeError(
+                "Refusing recovery: the current lock contents do not match "
+                "the inspected lock"
+            )
+        try:
+            payload = _parse_lock_payload_from_raw(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             payload = None
         metadata: dict[str, Any] | None = None
         if payload is not None:
@@ -669,12 +818,7 @@ def recover_lock(
                 )
             except ValueError:
                 metadata = None
-        raw_campaign_id = payload.get("campaign_id") if payload is not None else None
-        raw_identity = (
-            raw_campaign_id
-            if isinstance(raw_campaign_id, str) and raw_campaign_id
-            else None
-        )
+        raw_identity = _campaign_identity_from_raw(raw)
         stored_identity = (
             metadata["campaign_id"] if metadata is not None else raw_identity
         )

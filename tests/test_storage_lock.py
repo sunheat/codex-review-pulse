@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 import subprocess
 import sys
@@ -649,12 +650,21 @@ class StorageTests(unittest.TestCase):
     # ------------------------------------------------------------------
     # Recovery
 
+    def _witness(self, pr: int = 7, repository_path: Path | None = None) -> str:
+        path = repository_path if repository_path is not None else self.repo.main
+        inspected = storage.inspect_lock("owner/repo", pr, repository_path=path)
+        self.assertIn("recovery_witness", inspected)
+        return inspected["recovery_witness"]
+
     def test_recovery_requires_explicit_authorization_and_matches_campaign(self) -> None:
         self.acquire_setup()
+        witness = self._witness()
         with self.assertRaises(RuntimeError):
             storage.recover_lock(
                 "owner/repo", 7,
                 user_authorized_recovery=False,
+                expected_campaign_id=CAMPAIGN_ID,
+                expected_lock_witness=witness,
                 repository_path=self.repo.main,
             )
         with self.assertRaises(RuntimeError):
@@ -662,22 +672,39 @@ class StorageTests(unittest.TestCase):
                 "owner/repo", 7,
                 user_authorized_recovery=True,
                 expected_campaign_id=OTHER_CAMPAIGN_ID,
+                expected_lock_witness=witness,
                 repository_path=self.repo.linked,
             )
         result = storage.recover_lock(
             "owner/repo", 7,
             user_authorized_recovery=True,
             expected_campaign_id=CAMPAIGN_ID,
+            expected_lock_witness=witness,
             repository_path=self.repo.main,
         )
         self.assertTrue(result["recovered"])
 
     def test_recovery_of_valid_lock_requires_expected_identity(self) -> None:
         self.acquire_setup()
+        witness = self._witness()
         with self.assertRaises(RuntimeError):
             storage.recover_lock(
                 "owner/repo", 7,
                 user_authorized_recovery=True,
+                repository_path=self.repo.main,
+            )
+        with self.assertRaises(RuntimeError):
+            storage.recover_lock(
+                "owner/repo", 7,
+                user_authorized_recovery=True,
+                expected_campaign_id=CAMPAIGN_ID,
+                repository_path=self.repo.main,
+            )
+        with self.assertRaises(RuntimeError):
+            storage.recover_lock(
+                "owner/repo", 7,
+                user_authorized_recovery=True,
+                expected_lock_witness=witness,
                 repository_path=self.repo.main,
             )
         self.assertEqual(
@@ -694,11 +721,26 @@ class StorageTests(unittest.TestCase):
             storage.lock_path("owner/repo", 7, repository_path=self.repo.main)
         )["campaign_id"]
         self.assertEqual(raw_id, CAMPAIGN_ID)
+        witness = self._witness()
         # Omitted expected identity must not clear a raw-readable lock.
         with self.assertRaises(RuntimeError):
             storage.recover_lock(
                 "owner/repo", 7,
                 user_authorized_recovery=True,
+                repository_path=self.repo.main,
+            )
+        with self.assertRaises(RuntimeError):
+            storage.recover_lock(
+                "owner/repo", 7,
+                user_authorized_recovery=True,
+                expected_campaign_id=CAMPAIGN_ID,
+                repository_path=self.repo.main,
+            )
+        with self.assertRaises(RuntimeError):
+            storage.recover_lock(
+                "owner/repo", 7,
+                user_authorized_recovery=True,
+                expected_lock_witness=witness,
                 repository_path=self.repo.main,
             )
         # Raw identity is opaque mismatch material only: a different campaign
@@ -708,12 +750,22 @@ class StorageTests(unittest.TestCase):
                 "owner/repo", 7,
                 user_authorized_recovery=True,
                 expected_campaign_id=OTHER_CAMPAIGN_ID,
+                expected_lock_witness=witness,
+                repository_path=self.repo.main,
+            )
+        with self.assertRaises(RuntimeError):
+            storage.recover_lock(
+                "owner/repo", 7,
+                user_authorized_recovery=True,
+                expected_campaign_id=CAMPAIGN_ID,
+                expected_lock_witness="sha256:" + "0" * 64,
                 repository_path=self.repo.main,
             )
         result = storage.recover_lock(
             "owner/repo", 7,
             user_authorized_recovery=True,
             expected_campaign_id=CAMPAIGN_ID,
+            expected_lock_witness=witness,
             repository_path=self.repo.main,
         )
         self.assertEqual(result["previous_status"], "invalid")
@@ -728,6 +780,15 @@ class StorageTests(unittest.TestCase):
         target = storage.lock_path("owner/repo", 7, repository_path=self.repo.main)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("{not json", encoding="utf-8")
+        witness = self._witness()
+        with self.assertRaises(RuntimeError):
+            storage.recover_lock(
+                "owner/repo", 7,
+                user_authorized_recovery=True,
+                expected_campaign_id=CAMPAIGN_ID,
+                expected_lock_witness=witness,
+                repository_path=self.repo.main,
+            )
         with self.assertRaises(RuntimeError):
             storage.recover_lock(
                 "owner/repo", 7,
@@ -738,6 +799,7 @@ class StorageTests(unittest.TestCase):
         result = storage.recover_lock(
             "owner/repo", 7,
             user_authorized_recovery=True,
+            expected_lock_witness=witness,
             repository_path=self.repo.main,
         )
         self.assertTrue(result["recovered"])
@@ -751,18 +813,311 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(result, {"recovered": False, "status": "absent"})
 
     def test_recovery_preserves_campaign_record(self) -> None:
-        acquired = self.acquire_setup()
+        self.acquire_setup()
         campaign_file = self.save_campaign(make_campaign())
-        storage.release_lock(
-            "owner/repo", 7, acquired["owner_token"], repository_path=self.repo.main
-        )
+        before = campaign_file.read_bytes()
+        witness = self._witness()
         storage.recover_lock(
             "owner/repo", 7,
             user_authorized_recovery=True,
             expected_campaign_id=CAMPAIGN_ID,
+            expected_lock_witness=witness,
             repository_path=self.repo.linked,
         )
         self.assertTrue(campaign_file.exists())
+        self.assertEqual(campaign_file.read_bytes(), before)
+        self.assertEqual(
+            storage.inspect_lock("owner/repo", 7, repository_path=self.repo.main)[
+                "status"
+            ],
+            "absent",
+        )
+
+    def test_inspect_reports_recovery_witness_without_owner_token(self) -> None:
+        acquired = self.acquire_setup()
+        inspected = storage.inspect_lock(
+            "owner/repo", 7, repository_path=self.repo.main
+        )
+        self.assertEqual(inspected["status"], "active")
+        witness = inspected.get("recovery_witness")
+        self.assertIsInstance(witness, str)
+        self.assertRegex(witness, r"^sha256:[0-9a-f]{64}$")
+        self.assertNotIn("owner_token", inspected)
+        raw = storage.lock_path(
+            "owner/repo", 7, repository_path=self.repo.main
+        ).read_bytes()
+        self.assertEqual(witness, storage.lock_content_witness(raw))
+        self.assertNotIn(acquired["owner_token"], witness)
+
+    def test_normal_successor_owner_aba_recovery_refuses_stale_witness(self) -> None:
+        first = self.acquire_setup()
+        witness_a = self._witness()
+        result = storage.recover_lock(
+            "owner/repo", 7,
+            user_authorized_recovery=True,
+            expected_campaign_id=CAMPAIGN_ID,
+            expected_lock_witness=witness_a,
+            repository_path=self.repo.main,
+        )
+        self.assertTrue(result["recovered"])
+        campaign_file = self.save_campaign(make_campaign())
+        campaign_before = campaign_file.read_bytes()
+        second = storage.acquire_worker_lock(
+            "owner/repo", 7,
+            campaign_id=CAMPAIGN_ID,
+            acquired_at=ACQUIRED_AT,
+            repository_path=self.repo.main,
+        )
+        self.assertTrue(second["acquired"])
+        witness_b = self._witness()
+        self.assertNotEqual(witness_b, witness_a)
+        self.assertNotEqual(second["owner_token"], first["owner_token"])
+        with self.assertRaises(RuntimeError):
+            storage.recover_lock(
+                "owner/repo", 7,
+                user_authorized_recovery=True,
+                expected_campaign_id=CAMPAIGN_ID,
+                expected_lock_witness=witness_a,
+                repository_path=self.repo.main,
+            )
+        current = storage.inspect_lock(
+            "owner/repo", 7, repository_path=self.repo.main
+        )
+        self.assertEqual(current["status"], "active")
+        self.assertEqual(current["recovery_witness"], witness_b)
+        proven = storage.verify_owner(
+            "owner/repo", 7, second["owner_token"],
+            repository_path=self.repo.main,
+        )
+        self.assertEqual(proven["campaign_id"], CAMPAIGN_ID)
+        self.assertTrue(campaign_file.exists())
+        self.assertEqual(campaign_file.read_bytes(), campaign_before)
+        recovered = storage.recover_lock(
+            "owner/repo", 7,
+            user_authorized_recovery=True,
+            expected_campaign_id=CAMPAIGN_ID,
+            expected_lock_witness=witness_b,
+            repository_path=self.repo.main,
+        )
+        self.assertTrue(recovered["recovered"])
+
+    def test_stale_witness_refuses_for_valid_lock(self) -> None:
+        self.acquire_setup()
+        witness = self._witness()
+        with self.assertRaises(RuntimeError):
+            storage.recover_lock(
+                "owner/repo", 7,
+                user_authorized_recovery=True,
+                expected_campaign_id=CAMPAIGN_ID,
+                expected_lock_witness="sha256:" + "f" * 64,
+                repository_path=self.repo.main,
+            )
+        self.assertEqual(
+            storage.inspect_lock("owner/repo", 7, repository_path=self.repo.main)[
+                "status"
+            ],
+            "active",
+        )
+        result = storage.recover_lock(
+            "owner/repo", 7,
+            user_authorized_recovery=True,
+            expected_campaign_id=CAMPAIGN_ID,
+            expected_lock_witness=witness,
+            repository_path=self.repo.main,
+        )
+        self.assertTrue(result["recovered"])
+
+    def test_readable_contents_without_campaign_identity(self) -> None:
+        cases = [
+            b"",
+            b"{not json",
+            b"\xff\xfe invalid utf-8",
+            b"[1, 2]",
+            json.dumps({"schema_version": 1}).encode("utf-8"),
+        ]
+        for raw in cases:
+            with self.subTest(raw=raw):
+                target = storage.lock_path(
+                    "owner/repo", 7, repository_path=self.repo.main
+                )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(raw)
+                inspected = storage.inspect_lock(
+                    "owner/repo", 7, repository_path=self.repo.main
+                )
+                self.assertEqual(inspected["status"], "invalid")
+                self.assertEqual(
+                    inspected["recovery_witness"], storage.lock_content_witness(raw)
+                )
+                expected = storage.lock_content_witness(raw)
+                with self.assertRaises(RuntimeError):
+                    storage.recover_lock(
+                        "owner/repo", 7,
+                        user_authorized_recovery=True,
+                        expected_campaign_id=CAMPAIGN_ID,
+                        expected_lock_witness=expected,
+                        repository_path=self.repo.main,
+                    )
+                with self.assertRaises(RuntimeError):
+                    storage.recover_lock(
+                        "owner/repo", 7,
+                        user_authorized_recovery=True,
+                        repository_path=self.repo.main,
+                    )
+                self.assertEqual(
+                    storage.inspect_lock(
+                        "owner/repo", 7, repository_path=self.repo.main
+                    )["status"],
+                    "invalid",
+                )
+                result = storage.recover_lock(
+                    "owner/repo", 7,
+                    user_authorized_recovery=True,
+                    expected_lock_witness=expected,
+                    repository_path=self.repo.main,
+                )
+                self.assertTrue(result["recovered"])
+
+    def test_raw_read_failure_refuses_even_with_prior_witness(self) -> None:
+        self.acquire_setup()
+        witness = self._witness()
+        target = storage.lock_path("owner/repo", 7, repository_path=self.repo.main)
+        original = Path.read_bytes
+        campaign_file = storage.campaign_path(
+            "owner/repo", 7, repository_path=self.repo.main
+        )
+
+        def boom(self_path: Path, *args: object, **kwargs: object) -> bytes:
+            if self_path == target:
+                raise PermissionError("denied")
+            return original(self_path, *args, **kwargs)
+
+        Path.read_bytes = boom  # type: ignore[method-assign]
+        try:
+            with self.assertRaises(RuntimeError):
+                storage.recover_lock(
+                    "owner/repo", 7,
+                    user_authorized_recovery=True,
+                    expected_campaign_id=CAMPAIGN_ID,
+                    expected_lock_witness=witness,
+                    repository_path=self.repo.main,
+                )
+        finally:
+            Path.read_bytes = original  # type: ignore[method-assign]
+        self.assertEqual(
+            storage.inspect_lock("owner/repo", 7, repository_path=self.repo.main)[
+                "status"
+            ],
+            "active",
+        )
+        self.assertFalse(campaign_file.exists())
+
+    def test_guard_wait_stale_recovery_compares_after_entering_guard(self) -> None:
+        # The witness comparison must happen after a recovery enters the
+        # canonical guard. Prove this ordering by tracing the real recovery
+        # boundary: a stale recovery captures witness A, then an
+        # authoritative guarded A -> B replacement completes, and the same
+        # stale witness refuses once it re-enters the guard against B.
+        self.acquire_setup()
+        witness_a = self._witness()
+        target = storage.lock_path("owner/repo", 7, repository_path=self.repo.main)
+        raw_reads: list[bytes | None] = []
+        original_read = storage._read_lock_raw_unlocked
+
+        def observed_read(path: Path) -> bytes | None:
+            raw = original_read(path)
+            if path == target:
+                raw_reads.append(raw)
+            return raw
+
+        storage._read_lock_raw_unlocked = observed_read  # type: ignore[assignment]
+        try:
+            # Authoritative guarded replacement: remove A with its own
+            # witness, then acquire B through the normal worker path.
+            recovered = storage.recover_lock(
+                "owner/repo", 7,
+                user_authorized_recovery=True,
+                expected_campaign_id=CAMPAIGN_ID,
+                expected_lock_witness=witness_a,
+                repository_path=self.repo.main,
+            )
+            self.assertTrue(recovered["recovered"])
+            self.save_campaign(make_campaign())
+            second = storage.acquire_worker_lock(
+                "owner/repo", 7,
+                campaign_id=CAMPAIGN_ID,
+                acquired_at=ACQUIRED_AT,
+                repository_path=self.repo.main,
+            )
+            self.assertTrue(second["acquired"])
+            witness_b = self._witness()
+            self.assertNotEqual(witness_b, witness_a)
+            before = len(raw_reads)
+        # The stale recovery now re-enters the canonical guard with
+            # witness A. Because recovery reads the current raw bytes only
+            # after entering the same guard, it observes B (not a pre-wait
+            # snapshot), compares, refuses, and leaves B untouched.
+            with self.assertRaises(RuntimeError):
+                storage.recover_lock(
+                    "owner/repo", 7,
+                    user_authorized_recovery=True,
+                    expected_campaign_id=CAMPAIGN_ID,
+                    expected_lock_witness=witness_a,
+                    repository_path=self.repo.main,
+                )
+            self.assertGreater(len(raw_reads), before)
+            self.assertEqual(
+                storage.lock_content_witness(raw_reads[-1] or b""),
+                witness_b,
+            )
+        finally:
+            storage._read_lock_raw_unlocked = original_read  # type: ignore[assignment]
+        current = storage.inspect_lock(
+            "owner/repo", 7, repository_path=self.repo.main
+        )
+        self.assertEqual(current["status"], "active")
+        self.assertEqual(current["recovery_witness"], witness_b)
+
+    def test_absent_recovery_creates_no_state_and_ignores_later_lock(self) -> None:
+        campaign_file = storage.campaign_path(
+            "owner/repo", 7, repository_path=self.repo.main
+        )
+        lock_file = storage.lock_path(
+            "owner/repo", 7, repository_path=self.repo.main
+        )
+        self.assertFalse(campaign_file.exists())
+        self.assertFalse(lock_file.exists())
+        result = storage.recover_lock(
+            "owner/repo", 7,
+            user_authorized_recovery=True,
+            repository_path=self.repo.main,
+        )
+        self.assertEqual(result, {"recovered": False, "status": "absent"})
+        self.assertFalse(campaign_file.exists())
+        self.assertFalse(lock_file.exists())
+        # A subsequently acquired lock is unaffected by the earlier absent call.
+        self.save_campaign(make_campaign())
+        acquired = storage.acquire_worker_lock(
+            "owner/repo", 7,
+            campaign_id=CAMPAIGN_ID,
+            acquired_at=ACQUIRED_AT,
+            repository_path=self.repo.main,
+        )
+        self.assertTrue(acquired["acquired"])
+        witness = self._witness()
+        proven = storage.verify_owner(
+            "owner/repo", 7, acquired["owner_token"],
+            repository_path=self.repo.main,
+        )
+        self.assertEqual(proven["campaign_id"], CAMPAIGN_ID)
+        recovered = storage.recover_lock(
+            "owner/repo", 7,
+            user_authorized_recovery=True,
+            expected_campaign_id=CAMPAIGN_ID,
+            expected_lock_witness=witness,
+            repository_path=self.repo.main,
+        )
+        self.assertTrue(recovered["recovered"])
 
     # ------------------------------------------------------------------
     # CLI glue
@@ -805,6 +1160,62 @@ class StorageTests(unittest.TestCase):
                 "status"
             ],
             "active",
+        )
+
+    def test_cli_recovery_requires_witness_for_existing_lock(self) -> None:
+        self.acquire_setup()
+        witness = self._witness()
+        # Missing witness refuses via CLI for an existing valid lock.
+        missing = self._cli(
+            "recover", "--repo", "owner/repo", "--pr", "7",
+            "--user-authorized-recovery",
+            "--expected-campaign-id", CAMPAIGN_ID,
+        )
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertEqual(
+            storage.inspect_lock("owner/repo", 7, repository_path=self.repo.main)[
+                "status"
+            ],
+            "active",
+        )
+        # Stale witness refuses and preserves the lock.
+        stale = self._cli(
+            "recover", "--repo", "owner/repo", "--pr", "7",
+            "--user-authorized-recovery",
+            "--expected-campaign-id", CAMPAIGN_ID,
+            "--expected-lock-witness", "sha256:" + "0" * 64,
+        )
+        self.assertNotEqual(stale.returncode, 0)
+        self.assertEqual(
+            storage.inspect_lock("owner/repo", 7, repository_path=self.repo.main)[
+                "status"
+            ],
+            "active",
+        )
+        # Matching witness succeeds.
+        recovered = self._cli(
+            "recover", "--repo", "owner/repo", "--pr", "7",
+            "--user-authorized-recovery",
+            "--expected-campaign-id", CAMPAIGN_ID,
+            "--expected-lock-witness", witness,
+        )
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertTrue(json.loads(recovered.stdout)["recovered"])
+        self.assertEqual(
+            storage.inspect_lock("owner/repo", 7, repository_path=self.repo.main)[
+                "status"
+            ],
+            "absent",
+        )
+
+    def test_cli_absent_recovery_is_a_no_op_without_witness(self) -> None:
+        process = self._cli(
+            "recover", "--repo", "owner/repo", "--pr", "7",
+            "--user-authorized-recovery",
+        )
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(
+            json.loads(process.stdout), {"recovered": False, "status": "absent"}
         )
 
 

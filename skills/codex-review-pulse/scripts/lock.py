@@ -63,6 +63,13 @@ def main() -> None:
         "--expected-campaign-id",
         help="Required for any lock with a readable campaign identity",
     )
+    recover.add_argument(
+        "--expected-lock-witness",
+        help=(
+            "sha256:<hex> over the exact lock bytes from inspect; required "
+            "whenever a lock exists"
+        ),
+    )
 
     args = parser.parse_args()
     if args.command == "acquire":
@@ -127,6 +134,7 @@ def main() -> None:
                     args.pr,
                     user_authorized_recovery=args.user_authorized_recovery,
                     expected_campaign_id=args.expected_campaign_id,
+                    expected_lock_witness=args.expected_lock_witness,
                     repository_path=args.repository_path,
                 ),
                 indent=2,

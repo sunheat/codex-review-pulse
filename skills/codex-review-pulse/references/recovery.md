@@ -11,9 +11,19 @@ python scripts/lock.py inspect --repo OWNER/REPO --pr NUMBER
 ```
 
 - `absent` — no owner;
-- `active` — a live lock exists (the inspect output never shows the token);
+- `active` — a live lock exists (the inspect output never shows the token)
+  and carries `recovery_witness` (`sha256:<hex>` over the exact raw lock
+  bytes);
 - `invalid` — a corrupt or incomplete lock exists. It still blocks every
-  worker and is recovered through the same human process.
+  worker and is recovered through the same human process. When its raw
+  bytes are readable it also carries `recovery_witness`, even for empty
+  bytes, malformed JSON, invalid UTF-8, non-object JSON, or semantically
+  invalid lock JSON. Actual raw I/O failure carries no witness.
+
+The witness is a compare-and-delete precondition over raw lock contents,
+not a persistent file-instance identity and not ownership authority. It
+does not prove the previous owner is dead and never substitutes for human
+quiescence determination.
 
 ## When recovery is safe
 
@@ -49,27 +59,63 @@ establish quiescence by the existing rules.
 ## Recover
 
 ```text
-python scripts/lock.py recover --repo OWNER/REPO --pr NUMBER --user-authorized-recovery --expected-campaign-id CRPCAMPAIGNID
+python scripts/lock.py inspect --repo OWNER/REPO --pr NUMBER
+python scripts/lock.py recover --repo OWNER/REPO --pr NUMBER --user-authorized-recovery --expected-campaign-id CRPCAMPAIGNID --expected-lock-witness sha256:HEX
 ```
 
-The expected-campaign guard is mandatory for any lock with a readable
-campaign identity — valid or corrupt-but-parseable — and prevents
-accidentally clearing a replacement owner's lock. Recovery deletes only the
-lock; it never modifies the campaign record. There is no non-interactive
-shortcut and this command must never be called automatically by a worker.
+Manual recovery only removes the authorized abandoned lock. It never
+resumes work or creates a successor worker. Any continuation occurs through
+a later ordinary scheduled delivery.
+
+The expected-campaign guard and the raw lock-content witness protect
+different things: the campaign id proves the operator is acting on the
+intended campaign, while the witness proves the current lock contents
+still match the lock the operator inspected. The witness is computed from
+the exact raw bytes as stored (`sha256:<64 lowercase hex>`), without
+parsing, reserialization, whitespace normalization, field selection, or
+exposing `owner_token`.
+
+For normally initialized acquisitions each owner persists a fresh random
+`owner_token`, so a normally initialized successor owner produces different
+raw contents and a different witness. A stale recovery carrying the old
+witness therefore refuses against the successor. Content-identical damaged
+lock creations (for example two empty files) are outside that guarantee;
+their recovery remains an explicit human operation requiring quiescence.
+
+Recovery deletes only the lock; it never modifies the campaign record.
+There is no non-interactive shortcut and this command must never be called
+automatically by a worker.
 
 Exact rules:
 
-- Lock absent: a harmless no-op; no expected identity is needed.
-- Valid lock: `--expected-campaign-id` is required and must match exactly.
+- Lock absent: Absent-lock recovery must not create or modify campaign
+  state, create a permanent ownership lock, or trigger work. Creation or
+  opening of the existing canonical guard sidecar is permitted. Once it
+  observes absence under the guard, that invocation must return without
+  scheduling any later deletion or affecting a subsequently acquired lock.
+- Valid lock: `--expected-campaign-id` and `--expected-lock-witness` are
+  both required and must match exactly.
 - Corrupt but parseable lock with a readable campaign id: the raw id grants
   no authority and need not satisfy campaign-id syntax; it is used only as a
   conservative mismatch guard, so `--expected-campaign-id` is still required
-  and must equal the raw id exactly.
-- Unreadable lock (not JSON, not an object, or no usable campaign id): a
+  and must equal the raw id exactly, and the matching `--expected-lock-witness`
+  is also required.
+- Readable raw contents with no usable campaign id (empty file, malformed
+  JSON, invalid UTF-8, non-object JSON, or missing/empty campaign id): a
   supplied `--expected-campaign-id` can never be verified, so recovery
-  refuses. Omitting it removes the lock only after you established that the
-  previous owner can no longer mutate.
+  refuses. The matching `--expected-lock-witness` is required; omitting it
+  removes nothing. Omitting the campaign id removes the lock only after you
+  established that the previous owner can no longer mutate.
+- Raw bytes that cannot actually be read (for example permission or other
+  `OSError` failures): recovery refuses, preserves the lock, and never
+  unlinks, even when a previously captured witness is supplied. A previously
+  observed witness cannot authorize deleting contents that recovery cannot
+  currently re-observe and compare. Here “unreadable” means actual raw I/O
+  failure, not merely invalid JSON content.
+
+Never auto-fill `--expected-lock-witness` from the lock observed at
+recovery time. That would silently convert authorization for an old lock
+into authorization to delete whatever lock exists now.
 
 Partial rollover state (`lock = C2`, `campaign = terminal C1`) recovers with
 `--expected-campaign-id C2`, because the expected identity refers to the lock
