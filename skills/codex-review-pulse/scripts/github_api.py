@@ -28,12 +28,20 @@ from campaign_model import canonical_repository, normalize_login
 
 
 class GithubRejectionError(RuntimeError):
-    """Server-authoritative rejection of one mutation attempt.
+    """Server-authoritative proof that one mutation attempt did not execute.
 
-    Raised only when GitHub itself returned an error payload for the mutation,
-    which proves the mutation was rejected and cannot later complete from that
-    attempt. Transport-level failures (timeouts, nonzero CLI exits) raise plain
-    RuntimeErrors instead: those are never definitive on their own.
+    Raised only when the GraphQL mutation response itself proves, via the
+    conservative pre-execution request-error predicate, that the target
+    mutation did not execute and cannot later complete from this attempt.
+
+    ``GithubRejectionError`` means: there is authoritative evidence that this
+    specific target mutation did not execute and cannot later complete from
+    this attempt. It never means merely "GitHub returned a GraphQL error".
+
+    Every other mutation outcome -- transport failures, malformed output,
+    execution errors carrying ``data`` and/or ``path``, unproven error
+    shapes, or a nonzero CLI exit with success-looking JSON -- raises an
+    ordinary ``RuntimeError`` (ambiguous, fail closed) instead.
     """
 
 
@@ -61,6 +69,58 @@ def run_json(command: list[str], stdin: str | None = None) -> Any:
         raise RuntimeError(f"Command did not return JSON: {' '.join(command)}") from error
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate object key: {key!r}")
+        result[key] = value
+    return result
+
+
+def _reject_nonstandard_constant(value: str) -> Any:
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def _parse_mutation_json_document(stdout: str) -> Any:
+    # loads accepts surrounding JSON whitespace but rejects a second document.
+    return json.loads(
+        stdout,
+        object_pairs_hook=_reject_duplicate_keys,
+        parse_constant=_reject_nonstandard_constant,
+    )
+
+
+def _proven_rejection_detail(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    if set(payload) != {"errors"}:
+        return None
+    errors = payload["errors"]
+    if not isinstance(errors, list) or not errors:
+        return None
+    for entry in errors:
+        if not isinstance(entry, dict):
+            return None
+        if "message" not in entry or not isinstance(entry["message"], str):
+            return None
+        # Only understood request-error metadata may authorize non-execution.
+        # Paths, extensions, GitHub-specific types and unknown keys stay ambiguous.
+        if set(entry) - {"message", "locations"}:
+            return None
+        if "locations" in entry:
+            locations = entry["locations"]
+            if not isinstance(locations, list) or not locations:
+                return None
+            for location in locations:
+                if not isinstance(location, dict) or set(location) != {"line", "column"}:
+                    return None
+                if any(type(value) is not int or value < 1 for value in location.values()):
+                    return None
+    detail = json.dumps(errors)[:2000]
+    return f"GitHub rejected the mutation before execution: {detail}"
+
+
 def _graphql_arguments(variables: dict[str, object]) -> list[str]:
     """Build gh arguments whose forms match the GraphQL variable types.
 
@@ -82,12 +142,110 @@ def _graphql_arguments(variables: dict[str, object]) -> list[str]:
     return arguments
 
 
+def _run_graphql_mutation(command: list[str], stdin: str | None = None) -> dict[str, Any]:
+    """Run one GraphQL mutation and classify the raw subprocess response.
+
+    Preserves API evidence from both zero and nonzero exits and applies one
+    shared rejection predicate to both. Generic run()/run_json() semantics
+    are unchanged; this narrow helper is the only path that interprets
+    nonzero-exit stdout as protocol evidence. Stderr is diagnostic only.
+    """
+    try:
+        process = subprocess.run(
+            command,
+            input=stdin,
+            capture_output=True,
+            encoding="utf-8",
+            errors="strict",
+        )
+    except Exception as error:
+        raise RuntimeError(
+            f"GitHub GraphQL mutation transport failed: {storage.error_text(error)}"
+        ) from error
+    stdout = process.stdout if process.stdout is not None else ""
+    stderr = (process.stderr or "").strip()
+    returncode = process.returncode
+    try:
+        payload = _parse_mutation_json_document(stdout)
+    except ValueError as error:
+        diagnostic = f"exit {returncode}"
+        if stderr:
+            diagnostic += f"; stderr: {stderr[:500]}"
+        raise RuntimeError(
+            f"GitHub GraphQL mutation returned unparseable output "
+            f"({diagnostic}): {error}"
+        ) from error
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            "GitHub GraphQL mutation returned an unexpected JSON root "
+            f"(exit {returncode}): {type(payload).__name__}"
+        )
+    detail = _proven_rejection_detail(payload)
+    if detail is not None:
+        raise GithubRejectionError(detail)
+    if returncode != 0:
+        seen = json.dumps(payload)[:2000]
+        diagnostic = f"exit {returncode}; response: {seen}"
+        if stderr:
+            diagnostic += f"; stderr: {stderr[:500]}"
+        raise RuntimeError(f"GitHub GraphQL mutation failed ({diagnostic})")
+    if "errors" in payload:
+        seen = json.dumps(payload["errors"])[:2000]
+        raise RuntimeError(
+            "GitHub GraphQL mutation returned errors without proving "
+            f"non-execution: {seen}"
+        )
+    if set(payload) != {"data"} or not isinstance(payload["data"], dict):
+        raise RuntimeError(
+            "GitHub GraphQL mutation returned an unexpected success payload"
+        )
+    return payload
+
+
+def graphql_mutation(
+    query: str, variables: dict[str, object] | None = None
+) -> dict[str, Any]:
+    """Execute one GraphQL *mutation* through the safe transport boundary.
+
+    Only the GraphQL-spec pre-execution request-error shape proves
+    non-execution (see _proven_rejection_detail): an exactly-one-document,
+    strictly parsed object response whose keys are exactly {"errors"} (so
+    "data" is absent, not null), with a non-empty list of message-bearing
+    error objects, optionally with valid positive line/column locations, and
+    no execution "path" marker or other metadata. That predicate comes from
+    the GraphQL October 2021 spec: request errors prevent execution from
+    beginning and return no "data" entry, while execution errors return an
+    execution result containing "data" (possibly partial/null) and normally
+    carry "path". Because mutations may side-effect during execution,
+    errors/data-null/null-fields/paths/types/messages/stderr alone never
+    prove non-execution.
+
+    https://spec.graphql.org/October2021/#sec-Errors
+
+    No stable durable GitHub contract was found proving that a
+    GitHub-specific execution-result shape (for example FORBIDDEN with
+    "data": {"addComment": null} and a path-bearing error) guarantees no
+    side effect, so such shapes stay ambiguous (ordinary RuntimeError,
+    fail closed). Only the spec-guaranteed pre-execution subset raises
+    GithubRejectionError, identically on zero and nonzero exits.
+    """
+    command = ["gh", "api", "graphql", "-F", "query=@-"]
+    command.extend(_graphql_arguments(variables or {}))
+    return _run_graphql_mutation(command, query)
+
+
 def graphql(query: str, variables: dict[str, object] | None = None) -> dict[str, Any]:
+    """Read-only GraphQL observation path (queries, never mutations).
+
+    Observation errors are transport-level RuntimeErrors, never
+    GithubRejectionError: rejection proof applies only to the mutation
+    boundary (graphql_mutation).
+    """
     command = ["gh", "api", "graphql", "-F", "query=@-"]
     command.extend(_graphql_arguments(variables or {}))
     payload = run_json(command, query)
     if isinstance(payload, dict) and payload.get("errors"):
-        raise GithubRejectionError(
+        raise RuntimeError(
             f"GitHub GraphQL errors: {json.dumps(payload['errors'])}"
         )
     return payload
@@ -451,21 +609,38 @@ mutation($threadId: ID!) {
 """
 
 
-def add_comment(subject_id: str, body: str, *, graphql_call: Callable[..., dict[str, Any]] = graphql) -> dict[str, Any]:
+def add_comment(subject_id: str, body: str, *, graphql_call: Callable[..., dict[str, Any]] = graphql_mutation) -> dict[str, Any]:
     payload = graphql_call(ADD_COMMENT_MUTATION, {"subjectId": subject_id, "body": body})
-    node = payload["data"]["addComment"]["commentEdge"]["node"]
-    return {
-        "node_id": node["id"],
-        "created_at": node["createdAt"],
-        "url": node.get("url"),
-        "body": node.get("body"),
-    }
+    try:
+        node = payload["data"]["addComment"]["commentEdge"]["node"]
+        result = {
+            "node_id": node["id"],
+            "created_at": node["createdAt"],
+            "url": node.get("url"),
+            "body": node.get("body"),
+        }
+    except (KeyError, TypeError, AttributeError) as error:
+        raise RuntimeError(
+            "GitHub did not return the expected addComment payload"
+        ) from error
+    if not isinstance(result["node_id"], str) or not result["node_id"]:
+        raise RuntimeError("GitHub did not return the expected addComment payload")
+    return result
 
 
-def resolve_thread(thread_id: str, *, graphql_call: Callable[..., dict[str, Any]] = graphql) -> dict[str, Any]:
+def resolve_thread(thread_id: str, *, graphql_call: Callable[..., dict[str, Any]] = graphql_mutation) -> dict[str, Any]:
     """Internal transport for one review-thread resolution mutation."""
     payload = graphql_call(RESOLVE_MUTATION, {"threadId": thread_id})
-    thread = payload["data"]["resolveReviewThread"]["thread"]
+    try:
+        thread = payload["data"]["resolveReviewThread"]["thread"]
+    except (KeyError, TypeError) as error:
+        raise RuntimeError(
+            "GitHub did not return the expected resolveReviewThread payload"
+        ) from error
+    if not isinstance(thread, dict):
+        raise RuntimeError(
+            "GitHub did not return the expected resolveReviewThread payload"
+        )
     if thread.get("id") != thread_id or thread.get("isResolved") is not True:
         raise RuntimeError("GitHub did not confirm the thread resolution")
     return {"id": thread_id, "isResolved": True}

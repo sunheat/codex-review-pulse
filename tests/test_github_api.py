@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -230,32 +231,65 @@ def T_PLUS(minutes: int) -> str:
 
 
 class RejectionClassificationTests(unittest.TestCase):
-    def test_graphql_error_payload_is_a_server_authoritative_rejection(self) -> None:
-        original = github_api.run_json
-        github_api.run_json = lambda *a, **k: {"errors": [{"message": "bad"}]}
+    def test_request_error_payload_is_a_server_authoritative_rejection(self) -> None:
+        stdout = '{"errors": [{"message": "bad"}]}'
+        calls: list = []
+        real_run = github_api.subprocess.run
+
+        def fake_run(*args, **kwargs):
+            calls.append(args)
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+        github_api.subprocess.run = fake_run
         try:
             with self.assertRaises(github_api.GithubRejectionError):
-                github_api.graphql("mutation { noop }")
+                github_api.graphql_mutation("mutation { noop }")
         finally:
-            github_api.run_json = original
+            github_api.subprocess.run = real_run
+        self.assertTrue(calls)
+
+    def test_execution_error_payload_is_ambiguous_not_rejection(self) -> None:
+        stdout = (
+            '{"data": {"addComment": null}, '
+            '"errors": [{"message": "bad", "path": ["addComment"]}]}'
+        )
+        real_run = github_api.subprocess.run
+        github_api.subprocess.run = lambda *a, **k: SimpleNamespace(
+            returncode=0, stdout=stdout, stderr=""
+        )
+        try:
+            with self.assertRaises(RuntimeError) as caught:
+                github_api.graphql_mutation("mutation { noop }")
+            self.assertNotIsInstance(
+                caught.exception, github_api.GithubRejectionError
+            )
+        finally:
+            github_api.subprocess.run = real_run
 
     def test_rejection_is_distinct_from_transport_failures(self) -> None:
         self.assertTrue(issubclass(github_api.GithubRejectionError, RuntimeError))
         # Transport-level failures stay plain RuntimeErrors so classification
-        # can distinguish "GitHub rejected the mutation" from "the call may
+        # can distinguish "GitHub proved non-execution" from "the call may
         # still complete".
         self.assertNotIsInstance(RuntimeError("timeout"), github_api.GithubRejectionError)
 
     def test_resolve_thread_transport_confirms_resolution(self) -> None:
-        original = github_api.run_json
+        stdout = (
+            '{"data": {"resolveReviewThread": '
+            '{"thread": {"id": "T1", "isResolved": true}}}}'
+        )
         seen: list = []
-        github_api.run_json = lambda *a, **k: seen.append(a) or {
-            "data": {"resolveReviewThread": {"thread": {"id": "T1", "isResolved": True}}}
-        }
+        real_run = github_api.subprocess.run
+
+        def fake_run(*args, **kwargs):
+            seen.append(args)
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+        github_api.subprocess.run = fake_run
         try:
             result = github_api.resolve_thread("T1")
         finally:
-            github_api.run_json = original
+            github_api.subprocess.run = real_run
         self.assertEqual(result, {"id": "T1", "isResolved": True})
         self.assertTrue(seen)
 
