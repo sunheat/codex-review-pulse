@@ -309,6 +309,32 @@ def deferred_issue_body(
     )
 
 
+def _list_open_issues(repository: str) -> list[dict[str, Any]]:
+    """Read every open issue before using absence to authorize creation."""
+    pages = github_api.run_json(
+        [
+            "gh", "api", "--paginate", "--slurp",
+            f"repos/{repository}/issues?state=open&per_page=100&sort=created&direction=asc",
+        ]
+    )
+    if not isinstance(pages, list) or not pages or any(
+        not isinstance(page, list) for page in pages
+    ):
+        raise RuntimeError("Open issue lookup did not return complete issue pages")
+    issues: list[dict[str, Any]] = []
+    for page in pages:
+        for issue in page:
+            if not isinstance(issue, dict):
+                raise RuntimeError("Open issue lookup returned an invalid issue")
+            # The REST issues endpoint also returns pull requests.
+            if "pull_request" not in issue:
+                issues.append({
+                    "number": issue["number"], "url": issue["html_url"],
+                    "body": issue["body"], "author": issue["user"],
+                })
+    return issues
+
+
 def _find_matching_issue(
     list_issues: Callable[[], list[dict[str, Any]]],
     *,
@@ -360,14 +386,7 @@ def ensure_deferred_issue(
     if fetch_snapshot is None:
         fetch_snapshot = lambda: github_api.fetch_snapshot(canonical, pr_number)  # noqa: E731
     if list_issues is None:
-        def list_issues() -> list[dict[str, Any]]:
-            return github_api.run_json(
-                [
-                    "gh", "issue", "list", "--repo", canonical,
-                    "--state", "open", "--limit", "1000",
-                    "--json", "number,url,body,author",
-                ]
-            )
+        list_issues = lambda: _list_open_issues(canonical)  # noqa: E731
     if create_issue is None:
         def create_issue(issue_title: str, issue_body: str) -> str:
             return github_api.run(
@@ -554,14 +573,7 @@ def resolve_review_thread(
     if resolve_call is None:
         resolve_call = lambda thread: github_api.resolve_thread(thread)  # noqa: E731
     if list_issues is None:
-        def list_issues() -> list[dict[str, Any]]:
-            return github_api.run_json(
-                [
-                    "gh", "issue", "list", "--repo", canonical,
-                    "--state", "open", "--limit", "1000",
-                    "--json", "number,url,body,author",
-                ]
-            )
+        list_issues = lambda: _list_open_issues(canonical)  # noqa: E731
     if viewer_call is None:
         viewer_call = lambda: github_api.run(  # noqa: E731
             ["gh", "api", "user", "--jq", ".login"]

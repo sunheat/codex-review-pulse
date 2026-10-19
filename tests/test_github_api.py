@@ -114,6 +114,22 @@ class FakeGraphQL:
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_mixed_case_repository_names_are_canonicalized(self) -> None:
+        class MixedCase(FakeGraphQL):
+            def __call__(self, query: str, variables: dict) -> dict:
+                result = super().__call__(query, variables)
+                repo = result.get("data", {}).get("repository", {})
+                if "nameWithOwner" in repo:
+                    repo["nameWithOwner"] = "Owner/Repo"
+                    repo["pullRequest"]["headRepository"]["nameWithOwner"] = "Owner/Repo"
+                return result
+
+        result = github_api.fetch_snapshot(
+            "Owner/Repo", 7, graphql_call=MixedCase(), viewer_call=lambda: "op"
+        )
+        self.assertEqual(result["repository"], "owner/repo")
+        self.assertEqual(result["head_repository"], "owner/repo")
+
     def test_snapshot_includes_both_thumbs_up_and_eyes(self) -> None:
         fake = FakeGraphQL(
             reactions={

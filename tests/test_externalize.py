@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -224,6 +225,60 @@ class ExternalizeTests(unittest.TestCase):
         )
         kwargs.update(overrides)
         return externalize.resolve_review_thread(**kwargs), resolved
+
+
+class PaginatedIssueLookupTests(ExternalizeTests):
+    def test_failed_paginated_lookup_neither_creates_nor_resolves(self) -> None:
+        with patch.object(
+            externalize.github_api, "run_json", side_effect=RuntimeError("page failed")
+        ):
+            result, created = self.ensure_issue(list_issues=None)
+            self.assertEqual(result["classification"], "refused")
+            self.assertEqual(created, [])
+            result, resolved = self.resolve(
+                outcome="fix_later", issue_number=1001, list_issues=None,
+            )
+            self.assertEqual(result["classification"], "refused")
+            self.assertEqual(resolved, [])
+
+    def test_paginated_lookup_excludes_pull_requests_and_rejects_invalid_pages(self) -> None:
+        with patch.object(externalize.github_api, "run_json", return_value=[[
+            {"pull_request": {}, "number": 7},
+        ]]):
+            self.assertEqual(externalize._list_open_issues("owner/repo"), [])
+        with patch.object(externalize.github_api, "run_json", return_value=[{}]):
+            with self.assertRaises(RuntimeError):
+                externalize._list_open_issues("owner/repo")
+
+    def test_default_lookup_reuses_issue_beyond_first_thousand_and_resolves(self) -> None:
+        issue = {
+            "number": 1001, "html_url": "https://example.test/issues/1001",
+            "body": externalize.deferred_issue_body(
+                repository="owner/repo", pr_number=7, triage_head=H1,
+                target=externalize._frozen_thread(self.frozen, "T1"), body="Deferred",
+            ),
+            "user": {"login": VIEWER},
+        }
+
+        def paginated(command, stdin=None):
+            self.assertEqual(command[:3], ["gh", "api", "--paginate"])
+            self.assertIn("--slurp", command)
+            self.assertIn("state=open", command[-1])
+            return [[{
+                "number": i, "body": "unrelated", "html_url": f"https://example.test/issues/{i}",
+                "user": {"login": VIEWER},
+            } for i in range(1, 1001)], [issue]]
+
+        with patch.object(externalize.github_api, "run_json", side_effect=paginated):
+            result, created = self.ensure_issue(list_issues=None)
+            self.assertEqual(result["action"], "reused")
+            self.assertEqual(result["issue_number"], 1001)
+            self.assertEqual(created, [])
+            result, resolved = self.resolve(
+                outcome="fix_later", issue_number=1001, list_issues=None,
+            )
+            self.assertEqual(result["classification"], "confirmed_success")
+            self.assertEqual(resolved, ["T1"])
 
 
 # ---------------------------------------------------------------------------

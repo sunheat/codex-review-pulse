@@ -107,7 +107,7 @@ def error_text(error: BaseException) -> str:
     characters a locale console cannot encode; re-encode as printable ASCII so
     reporting never raises on top of the original failure.
     """
-    return str(error).encode("utf-8", "backslashreplace").decode("ascii")
+    return str(error).encode("ascii", "backslashreplace").decode("ascii")
 
 
 def load_json(path: str | Path) -> dict[str, Any] | None:

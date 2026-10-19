@@ -24,7 +24,7 @@ import sys
 from typing import Any, Callable
 
 import storage
-from campaign_model import normalize_login
+from campaign_model import canonical_repository, normalize_login
 
 
 class GithubRejectionError(RuntimeError):
@@ -367,12 +367,16 @@ def normalize_snapshot(
     return {
         "complete": True,
         "server_time": server_time,
-        "repository": repository,
+        "repository": canonical_repository(repository),
         "pr_number": pull_request.get("number"),
         "pr_state": pull_request.get("state"),
         "head_oid": pull_request.get("headRefOid"),
         "head_ref_name": pull_request.get("headRefName"),
-        "head_repository": (pull_request.get("headRepository") or {}).get("nameWithOwner"),
+        "head_repository": (
+            canonical_repository(pull_request["headRepository"]["nameWithOwner"])
+            if (pull_request.get("headRepository") or {}).get("nameWithOwner")
+            else None
+        ),
         "node_id": pull_request.get("id"),
         "viewer": viewer,
         "threads": normalized_threads,

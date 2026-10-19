@@ -513,6 +513,18 @@ class MalformedProposalTests(RemediationFixture):
 
 
 class StaleProposalTests(RemediationFixture):
+    def test_unicode_snapshot_failure_releases_without_consuming_a_round(self) -> None:
+        self.prepare()
+
+        def unavailable():
+            raise RuntimeError("\u7f51\u7edc\u9519\u8bef")
+
+        result = self.finalize(fetch=unavailable)
+        self.assertEqual(result["outcome"], "remediation_refused")
+        self.assertFalse(result["round_committed"])
+        self.assertEqual(self.on_disk()["rounds_used"], 0)
+        self.assertEqual(self.lock_status(), "absent")
+
     def stale(self, result: dict) -> None:
         self.assertEqual(
             result["outcome"], "remediation_stale", json.dumps(result, indent=2)

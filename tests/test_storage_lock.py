@@ -16,6 +16,14 @@ import campaign_model as model  # noqa: E402
 import storage  # noqa: E402
 
 
+class DiagnosticTests(unittest.TestCase):
+    def test_error_text_escapes_unicode_and_surrogates(self) -> None:
+        self.assertEqual(
+            storage.error_text(RuntimeError("\u7f51\u7edc\u9519\u8bef \udcff")),
+            r"\u7f51\u7edc\u9519\u8bef \udcff",
+        )
+
+
 def git(cwd: Path, *args: str) -> str:
     process = subprocess.run(
         ["git", *args], cwd=str(cwd), capture_output=True, text=True
