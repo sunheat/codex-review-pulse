@@ -23,11 +23,11 @@ judgment and actual code repair remain the model's responsibility.
 Core campaign/worker routing, reaction/review lifecycle evaluation, and terminal
 decisions (including S2 confirmation of observation-derived outcomes) are
 deterministic. Review-request decision/reservation and committed request
-execution are also deterministic. The handoff between them remains
-model-mediated: the owned worker returns `request_committed`, then you follow
-step 6 to invoke `review_request.py`. Request Handoff Closure is a candidate
-future reliability slice, not implemented here; existing request semantics and
-the procedure below remain in effect.
+execution are composed deterministically inside one `owned.py worker-decision`
+invocation. After durable reservation it immediately enters the existing
+committed-request executor and returns its final classified/disposed result.
+The durable RESERVED guard remains the authority boundary; the executor's
+transaction semantics are unchanged. No second request CLI invocation is needed.
 
 Native Codex Automations already deliver workers. Parts of creation/configuration
 verification, terminal cleanup, and retained-lock quarantine/pause remain
@@ -196,8 +196,9 @@ python S/owned.py worker-decision --repo OWNER/REPO --pr NUMBER --owner-token OW
 
 This one deterministic boundary performs everything decision-related itself:
 campaign-wide durable-local preflight, one fresh owned S1 observation, guarded
-head synchronization, the pure decision, request commitment, deterministic
-remediation preparation with ownership release, bounded S2 terminal
+head synchronization, the pure decision, request commitment immediately followed
+by committed-request execution, deterministic remediation preparation with
+ownership release, bounded S2 terminal
 confirmation, and the safe local ownership disposition. Do not sync heads, run
 decisions, consume rounds, reserve requests, or persist terminal states by any
 other means. Do not invoke the boundary a second time in the same delivery.
@@ -221,18 +222,28 @@ Follow only a valid structured outcome:
 - `remediation_preparation_refused`: deterministic preparation failed before
   any external effect. No round was consumed and ownership is already
   released. Stop; a later delivery prepares fresh from current state.
-- `request_committed`: the request round and per-head allowance are already
-  durably reserved (a RESERVED guard). Perform step 6. Never reserve again.
+- Final request outcomes (`window_open`, `invalidated`, `creation_failed`,
+  `unbracketed`, `ambiguous`): follow step 6, routing by returned `ownership`
+  and `scheduler_cleanup_authorized`. Never reserve or execute a request again.
 - `local_fail_closed`: local authority is in doubt. Perform the retained-lock
   quarantine checks (section 9), then stop for [recovery](recovery.md); perform
   no compensating action.
 - Unknown or unparseable boundary result: stop the delivery. The boundary may
-  already have completed local transitions, so do not retry it, do not start
+  already have attempted an external request POST or completed local transitions,
+  so do not retry it, do not start
   remediation, do not execute a request, do not clean up the scheduler, and
   do not reacquire ownership. Perform the retained-lock quarantine checks
   (section 9) only when a read-only local check proves this delivery's exact
   token still owns the lock, then stop for [recovery](recovery.md). A later
   delivery starts through the ordinary path.
+
+`worker-decision` may cross the external request mutation boundary. A nonzero
+exit, missing/incomplete stdout, unparseable JSON, timeout, lost output, or
+`local_fail_closed` does not prove that no POST occurred. None authorizes a
+hard-fail handoff, compensating release, another reservation/POST, or a second
+worker-decision invocation in this delivery. Preserve the distinction between
+a proven pre-mutation host denial and possibly post-mutation ambiguity; use
+only the exact-token read-only retained-lock quarantine rules where applicable.
 
 ## 5. Semantic remediation work (after `remediation_prepared`)
 
@@ -367,33 +378,39 @@ consuming another round. Do not request another review or wait for commit
 attribution. Applicable unresolved feedback still takes precedence; EYES and
 non-approval completion retain their existing lifecycle eligibility rules.
 
-## 6. Review request (after `request_committed`)
+## 6. Final request outcomes
 
-The durable RESERVED guard created by the boundary is the handoff. Run the
-request boundary; it starts from that exact guard, revalidates, performs the
+The owned worker has already entered the committed-request executor in the
+same invocation. It starts from the durable RESERVED guard, revalidates, performs the
 final ownership check immediately before the POST, posts at most once,
 classifies the result, persists through guarded stale-write protection, and
-completes the ownership disposition itself:
-
-```text
-python S/review_request.py --repo OWNER/REPO --pr NUMBER --owner-token OWNER_TOKEN
-```
+completes the ownership disposition itself. Do not invoke `review_request.py`
+as a follow-up. Its standalone CLI remains available for focused testing.
 
 Do not release the lock separately afterward; the reported `ownership` field
 is the actual completed disposition.
 
-- `window_open`: the round was consumed at commitment; later deliveries observe
+- `window_open`: normally released, without scheduler cleanup. The round was
+  consumed at commitment; later deliveries observe
   the response window. The matching pre/post head OIDs are a bounded safety
   approximation, not proof of an atomic binding between the comment and the
   head; do not claim stronger attribution to the user or in reports.
 - `invalidated`: conditions changed before the POST; no post happened. The
-  round and guard are retained by design.
+  committed round and per-head allowance are not refunded, and the guard records
+  invalidation. Ownership normally releases; trust the returned disposition.
 - `creation_failed` (terminal) and `unbracketed` (terminal manual
-  intervention): perform the Automation cleanup (section 8).
+  intervention): perform the Automation cleanup (section 8) only when
+  `ownership: released` and `scheduler_cleanup_authorized: true` are returned.
 - `ambiguous`, `local_fail_closed`, or `ownership: retained` /
   `release_unconfirmed`: **keep the lock**; perform the retained-lock
   quarantine checks (section 9), then stop for manual recovery. No retry, no
   second POST.
+
+Every structured request result after successful reservation includes historical
+`campaign_id`, `guard_head`, and `round_committed: true`. These never override
+the executor's final state; unavailable final summaries remain unavailable.
+A terminal campaign with `release_unconfirmed` remains terminal but does not
+authorize scheduler cleanup. Route by disposition before outcome or terminality.
 
 ## 7. Ownership disposition
 
@@ -547,8 +564,8 @@ campaign stays unchanged, and explicit human recovery is still required (see
 - composing remediation mutations from raw primitives (`git push`, raw comment
   or issue commands, standalone revalidation plus a separate mutation) or from
   model-sequenced externalization commands: the remediation path is the
-  single `remediation.py finalize` invocation, and request execution is
-  `review_request.py`;
+  single `remediation.py finalize` invocation, and request execution is composed
+  inside the single `owned.py worker-decision` invocation;
 - reacquiring the lock or invoking the owned-worker boundary again after
   `remediation_prepared`, or invoking the finalizer a second time in one
   delivery;

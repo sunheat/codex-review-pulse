@@ -25,7 +25,9 @@ their own fresh authoritative GitHub evidence while the permanent lock remains
 held and the canonical sidecar guard stays released (the hard-failure handoff
 performs no observation at all). Callers cannot select snapshots, creation
 evidence, terminal statuses, proof bases, round commitment, or ownership
-dispositions. No remediation editing, review-request POST, Git push, issue
+dispositions. After durable request commitment the owned worker synchronously
+enters the existing committed-request executor, which owns the request POST
+transaction and final disposition. No remediation editing, Git push, issue
 creation, thread resolution, or native scheduler mutation happens here.
 """
 
@@ -41,6 +43,7 @@ from typing import Any, Callable
 import campaign_model as model
 import github_api
 import remediation
+import review_request
 import storage
 
 
@@ -413,14 +416,17 @@ def run_worker_decision(
     acquisition. This helper owns the correctness-critical sequence: matching
     active ownership, campaign-wide durable-local preflight, one fresh owned
     S1, guarded sync-head, authoritative post-sync campaign, pure decision,
-    request commitment or bounded S2 terminal confirmation, and the safe
+    request commitment and committed-request execution or bounded S2 terminal
+    confirmation, and the safe
     local ownership disposition. When the decision selects remediation, it
     hands off into the deterministic remediation subprotocol
     (``remediation.prepare_remediation_owned``): preparation freezes the
     exact batch and worktree while ownership is held, consumes no round, and
     releases ownership before the semantic-work action is returned. It
-    performs no remediation editing, no review-request POST, no Git push, no
-    issue creation, and no thread resolution.
+    synchronously enters the existing deterministic committed-request executor
+    after durable request commitment and returns its final classified/disposed
+    result. It performs no remediation editing, Git push, issue creation, or
+    thread resolution.
 
     The returned outcome is a closed structured result with unambiguous local
     postconditions. Unknown directives or inconsistent combinations fail
@@ -599,16 +605,19 @@ def run_worker_decision(
             return _fail_closed(
                 "request commitment refused: " + storage.error_text(error)
             )
-        guard = model.guard_for_head(committed, s1["head_oid"])
+        result = review_request.run_committed_request(
+            repository=canonical,
+            pr_number=pr_number,
+            owner_token=owner_token,
+            repository_path=repository_path,
+            observer=fetch_snapshot,
+        )
+        # Historical commitment facts never supply unavailable final state.
         return {
-            "outcome": "request_committed",
             "campaign_id": committed["campaign_id"],
-            "guard_head": guard["head_oid"] if guard else None,
-            "guard_state": guard.get("state") if guard else None,
+            "guard_head": s1["head_oid"],
             "round_committed": True,
-            "rounds_used": committed["rounds_used"],
-            "ownership": "retained",
-            "scheduler_cleanup_authorized": False,
+            **result,
         }
 
     if action == "terminal":
