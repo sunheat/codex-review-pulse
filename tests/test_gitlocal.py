@@ -157,6 +157,27 @@ class PublishTests(unittest.TestCase):
             gitlocal.write_tree(self.worktree),
         )
 
+    def test_worktree_creation_does_not_run_tracked_post_checkout_hook(self) -> None:
+        hooks = self.env.clone / ".githooks"
+        hooks.mkdir()
+        hook = hooks / "post-checkout"
+        hook.write_text("#!/bin/sh\ntouch HOOK_RAN\n", encoding="utf-8")
+        hook.chmod(0o755)
+        require(self.env.clone, "add", ".githooks/post-checkout")
+        require(self.env.clone, "commit", "-m", "add configured hook")
+        require(self.env.clone, "config", "core.hooksPath", ".githooks")
+        head = require(self.env.clone, "rev-parse", "HEAD")
+        added = gitlocal.add_worktree(
+            self.repo, self.pr, head,
+            owner_token=self.token,
+            repository_path=self.env.clone, name="hook-check",
+        )
+        target = Path(added["path"])
+        try:
+            self.assertFalse((target / "HOOK_RAN").exists())
+        finally:
+            require(self.env.clone, "worktree", "remove", "--force", str(target))
+
     def test_push_publication_commit_pushes_once_and_confirms(self) -> None:
         (self.worktree / "file.txt").write_text("v2\n", encoding="utf-8")
         local = self.stage_tree_and_commit()

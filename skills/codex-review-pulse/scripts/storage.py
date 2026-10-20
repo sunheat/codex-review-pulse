@@ -60,7 +60,8 @@ def git_common_directory(repository_path: str | Path = ".") -> Path:
             "--git-common-dir",
         ],
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="surrogateescape",
     )
     if process.returncode != 0:
         raise RuntimeError(

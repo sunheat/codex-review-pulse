@@ -4,9 +4,9 @@
 The user's primary worktree is never modified. Remediation runs in detached
 temporary worktrees under the repository-associated v2 state directory. A batch
 creates at most one commit and one push, never an empty commit, never a
-force-push, and a remote head advancement aborts publication. Authoritative
-commit creation never executes Git hooks (``core.hooksPath`` is pointed at an
-empty directory for the one commit invocation).
+force-push, and a remote head advancement aborts publication. Worktree creation
+and authoritative commit creation never execute Git hooks (``core.hooksPath``
+is pointed at an empty directory for each invocation).
 
 The publication primitives (``stage_complete_delta``, ``write_tree``,
 ``head_tree_oid``, ``commit_index_hook_free``, ``push_publication_commit``)
@@ -136,9 +136,15 @@ def add_worktree(
     target = root / suffix
     if target.exists():
         raise RuntimeError(f"Temporary worktree path already exists: {target}")
-    process = git(
-        "worktree", "add", "--detach", str(target), commit, cwd=repository_path
-    )
+    hooks_dir = tempfile.mkdtemp(prefix="crp-no-hooks-")
+    try:
+        process = git(
+            "-c", f"core.hooksPath={hooks_dir}",
+            "worktree", "add", "--detach", str(target), commit,
+            cwd=repository_path,
+        )
+    finally:
+        shutil.rmtree(hooks_dir, ignore_errors=True)
     if process.returncode != 0:
         raise RuntimeError(process.stderr.strip())
     return {"path": str(target), "commit": commit}

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "codex-review-pulse" / "scripts"
@@ -124,6 +125,30 @@ class StorageTests(unittest.TestCase):
         # tracked worktree content.
         relative_to_main = via_main.resolve().relative_to(self.repo.main.resolve())
         self.assertEqual(relative_to_main.parts[0], ".git")
+
+    def test_common_directory_uses_utf8_under_non_utf8_locale(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "项目"
+            root.mkdir()
+            repo = TemporaryRepository(root)
+            original_run = subprocess.run
+
+            def non_utf8_locale(*args, **kwargs):  # type: ignore[no-untyped-def]
+                if "--git-common-dir" in args[0] and "encoding" not in kwargs:
+                    kwargs["encoding"] = "cp936"
+                return original_run(*args, **kwargs)
+
+            with mock.patch.object(storage.subprocess, "run", side_effect=non_utf8_locale):
+                common = storage.git_common_directory(repo.linked)
+                main_lock = storage.lock_path(
+                    "owner/repo", 7, repository_path=repo.main
+                )
+                linked_lock = storage.lock_path(
+                    "owner/repo", 7, repository_path=repo.linked
+                )
+
+            self.assertEqual(common, (repo.main / ".git").resolve())
+            self.assertEqual(main_lock, linked_lock)
 
     def test_distinct_prs_get_distinct_locks(self) -> None:
         a = storage.lock_path("owner/repo", 1, repository_path=self.repo.main)
