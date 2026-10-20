@@ -276,6 +276,18 @@ class ExecutionTests(unittest.TestCase):
         with self.assertRaisesRegex(gitexec.GitPolicyRefused, "destination"):
             gitexec._destination(observed, "origin", push=False)
 
+    def test_relative_local_destination_cannot_select_same_named_remote(self) -> None:
+        configured = self.repo / "backup"
+        substituted = self.root / "substituted.git"
+        for remote in (configured, substituted):
+            require(self.repo, "init", "--bare", str(remote))
+        require(self.repo, "remote", "add", "origin", "backup")
+        require(self.repo, "remote", "add", "backup", str(substituted))
+        result = gitexec.run_controller_git("push", "--no-verify", "origin", "HEAD:refs/heads/main", cwd=self.repo)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(require(configured, "rev-parse", "main"), require(self.repo, "rev-parse", "HEAD"))
+        self.assertEqual(require(substituted, "for-each-ref"), "")
+
     def test_automatic_maintenance_sentinel_and_protected_commit(self) -> None:
         import hashlib
         import zlib

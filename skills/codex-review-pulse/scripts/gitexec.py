@@ -86,7 +86,7 @@ def _transport(records: list[tuple[str, str, str]]) -> None:
 
 
 def _destination(call: Callable[..., subprocess.CompletedProcess[str]], remote: str,
-                 *, push: bool) -> str:
+                 *, push: bool, cwd: str | Path | None = None) -> str:
     args = ["remote", "get-url"] + (["--push"] if push else []) + ["--all", remote]
     output = _require(call(args))
     urls = output.removesuffix("\n").split("\n")
@@ -98,8 +98,12 @@ def _destination(call: Callable[..., subprocess.CompletedProcess[str]], remote: 
     if "::" in url or (re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url)
                           and not url.startswith(("https://", "ssh://", "file://"))):
         raise GitPolicyRefused("Unsupported Git transport URL")
+    # Git can interpret a bare relative path as another configured remote.
+    # Make local paths unambiguous before handing the destination back to Git.
+    if "://" not in url and not Path(url).is_absolute() and not re.match(r"^[^/\\]+:", url):
+        url = str((Path(cwd or os.getcwd()) / url).resolve())
     if push:
-        fetch_url = _destination(call, remote, push=False)
+        fetch_url = _destination(call, remote, push=False, cwd=cwd)
         if url != fetch_url:
             raise GitPolicyRefused("Distinct fetch/push destinations are unsupported")
     return url
@@ -275,7 +279,7 @@ def run_controller_git(*args: str, cwd: str | Path | None = None,
                     r"HEAD:refs/heads/.+", command[3]):
                 raise GitPolicyRefused("Unsupported controller push shape")
             _lfs_tree(call, "HEAD")
-            url = _destination(call, command[2], push=True)
+            url = _destination(call, command[2], push=True, cwd=cwd)
             config.extend(("push.followTags=false", "push.pushOption=",
                            "push.recurseSubmodules=no", "push.gpgSign=false"))
             command = ["push", "--no-verify", "--no-mirror", "--no-follow-tags", "--no-signed",
@@ -284,7 +288,7 @@ def run_controller_git(*args: str, cwd: str | Path | None = None,
             _transport(records)
             if len(command) < 2:
                 raise GitPolicyRefused("Missing controller remote")
-            url = _destination(call, command[1], push=False)
+            url = _destination(call, command[1], push=False, cwd=cwd)
             if op == "ls-remote":
                 command[1] = url
             else:
@@ -309,7 +313,7 @@ def preflight_publication(worktree: str | Path, tree: str,
     records = _configuration(call)
     _signing(records, "push.gpgsign")
     _transport(records)
-    _destination(call, "origin", push=True)
+    _destination(call, "origin", push=True, cwd=worktree)
     _lfs_tree(call, tree)
 
 
