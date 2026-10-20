@@ -289,7 +289,8 @@ class ExecutionTests(unittest.TestCase):
         commands = []
         def recorder(command, **kwargs):
             result = subprocess.run(command, **kwargs)
-            commands.append(result.stderr)
+            commands.append(result.stderr.decode("utf-8", "surrogateescape")
+                            if isinstance(result.stderr, bytes) else result.stderr)
             return result
         with patch.dict("os.environ", {"GIT_TRACE": "1"}):
             gitlocal.commit_index_hook_free(self.repo, message="no automatic maintenance", runner=recorder)
@@ -438,6 +439,43 @@ class ExecutionTests(unittest.TestCase):
         result = gitexec.run_controller_git("push", "--no-verify", "origin", "HEAD:refs/heads/main", cwd=self.repo)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_cr_path_identity_cannot_bypass_filter_preflight(self) -> None:
+        import os
+        if os.name == "nt":
+            self.skipTest("Windows filesystem prohibits literal CR in filenames; POSIX CI exercises this")
+        hook = self.script("cat")
+        self.config("filter.sentinel.clean", str(hook))
+        self.config("filter.sentinel.smudge", str(hook))
+        filename = "file\r.txt"
+        (self.repo / filename).write_text("filtered")
+        (self.repo / ".gitattributes").write_text('"file\\r.txt" filter=sentinel\n')
+        require(self.repo, "add", "-A")
+        self.reset_marker()
+        with self.assertRaisesRegex(gitexec.GitPolicyRefused, "content filter"):
+            gitlocal.stage_complete_delta(self.repo)
+        self.assertFalse(self.marker.exists())
+        require(self.repo, "commit", "-m", "CR path target")
+        target = self.root / "checkout"
+        require(self.repo, "worktree", "add", "--detach", str(target), "HEAD")
+        self.reset_marker()
+        require(self.repo, "worktree", "remove", "--force", str(target))
+        with self.assertRaisesRegex(gitexec.GitPolicyRefused, "content filter"):
+            gitexec.run_controller_git("worktree", "add", "--detach", str(target), "HEAD", cwd=self.repo)
+        self.assertFalse(self.marker.exists())
+        self.assertFalse(target.exists())
+
+    def test_nul_output_retains_literal_cr_and_surrogate_bytes(self) -> None:
+        commands = []
+        def executor(command, **kwargs):
+            commands.append((command, kwargs))
+            if "config" in command:
+                return subprocess.CompletedProcess(command, 0, b"", b"")
+            return subprocess.CompletedProcess(command, 0, b"file\r\xff.txt\0", b"diagnostic\r\n")
+        result = gitexec.run_controller_git("ls-files", "-z", cwd=self.repo, executor=executor)
+        self.assertEqual(result.stdout.encode("utf-8", "surrogateescape"), b"file\r\xff.txt\0")
+        self.assertEqual(result.stderr, "diagnostic\r\n")
+        self.assertTrue(all("encoding" not in kwargs for _, kwargs in commands))
+
     def test_process_injection_is_below_common_policy_and_preserves_results(self) -> None:
         commands = []
         def executor(command, **kwargs):
@@ -452,7 +490,8 @@ class ExecutionTests(unittest.TestCase):
             self.assertIn("maintenance.auto=false", command)
             self.assertTrue(any(item.startswith("core.hooksPath=") for item in command))
             self.assertNotIn("GIT_INDEX_FILE", kwargs["env"])
-            self.assertEqual(kwargs["errors"], "surrogateescape")
+            if "--null" not in command:
+                self.assertEqual(kwargs["errors"], "surrogateescape")
 
     def test_no_direct_git_process_bypass_in_active_controller(self) -> None:
         # AST call-site inventory, not brittle source substring matching.

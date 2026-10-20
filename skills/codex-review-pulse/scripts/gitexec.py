@@ -182,11 +182,12 @@ def run_controller_git(*args: str, cwd: str | Path | None = None,
         for setting in config:
             cmd.extend(("-c", setting))
         cmd.extend(command)
-        if command == ["cat-file", "--batch"]:
-            # Text-mode universal-newline translation corrupts byte-counted
-            # batch framing for blobs containing CRLF. Decode only afterwards.
+        if command == ["cat-file", "--batch"] or "-z" in command or "--null" in command:
+            # Universal-newline translation corrupts byte-counted blobs and
+            # NUL-delimited names/config values containing literal CR bytes.
+            # Binary input/output preserves path identity on POSIX and Windows.
             result = executor(cmd, cwd=str(cwd) if cwd is not None else None,
-                              env=env, input=stdin.encode("utf-8") if stdin else None,
+                              env=env, input=stdin.encode("utf-8", "surrogateescape") if stdin else None,
                               capture_output=True)
             return subprocess.CompletedProcess(
                 result.args, result.returncode,
