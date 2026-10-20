@@ -78,7 +78,7 @@ def _transport(records: list[tuple[str, str, str]]) -> None:
             raise GitPolicyRefused(f"Unsupported URL rewriting: {key}")
         if scope not in ("local", "worktree"):
             continue
-        if (key == "core.sshcommand"
+        if (key in ("core.sshcommand", "core.askpass")
                 or (key.startswith("credential.") and key.endswith("helper"))
                 or re.fullmatch(r"remote\..*\.(uploadpack|receivepack|proxy|vcs)", key)
                 or key in ("core.gitproxy", "ssh.variant", "core.alternaterefscommand")):
@@ -111,7 +111,7 @@ def _paths(call: Callable[..., subprocess.CompletedProcess[str]]) -> list[str]:
 
 
 def _filters(call: Callable[..., subprocess.CompletedProcess[str]], paths: list[str],
-             *, cached: bool) -> None:
+             *, cached: bool, ambiguous_drivers: set[str]) -> None:
     if not paths:
         return
     args = ["check-attr", "-z"] + (["--cached"] if cached else []) + ["--stdin", "filter"]
@@ -120,7 +120,7 @@ def _filters(call: Callable[..., subprocess.CompletedProcess[str]], paths: list[
     if items[-1] != "" or (len(items) - 1) % 3:
         raise GitPolicyRefused("Unable to parse effective filter attributes")
     for i in range(0, len(items) - 1, 3):
-        if items[i + 2] not in ("unspecified", "unset"):
+        if items[i + 2] not in ("unspecified", "unset") or items[i + 2] in ambiguous_drivers:
             raise GitPolicyRefused(f"Unsupported content filter on {items[i]}: {items[i + 2]}")
 
 
@@ -200,6 +200,10 @@ def run_controller_git(*args: str, cwd: str | Path | None = None,
 
     try:
         records = _configuration(call)
+        ambiguous_drivers = {name for name in ("unset", "unspecified")
+                             if any(key.startswith(f"filter.{name}.") and
+                                    key.rsplit(".", 1)[-1] in ("clean", "smudge", "process")
+                                    for _, key, _ in records)}
         # Git <=2.53 has no config-defined hooks. >=2.54 honors per-name
         # enabled=false. Enumerate effective names, including includes and
         # repeated events: hooksPath alone does not cover this mechanism.
@@ -253,13 +257,13 @@ def run_controller_git(*args: str, cwd: str | Path | None = None,
                 env["GIT_INDEX_FILE"] = str(Path(tmp) / "index")
                 try:
                     _require(call(["read-tree", command[-1]]))
-                    _filters(call, _paths(call), cached=True)
+                    _filters(call, _paths(call), cached=True, ambiguous_drivers=ambiguous_drivers)
                 finally:
                     env.pop("GIT_INDEX_FILE", None)
         elif op == "add":
             paths = _paths(call)
-            _filters(call, paths, cached=False)
-            _filters(call, paths, cached=True)
+            _filters(call, paths, cached=False, ambiguous_drivers=ambiguous_drivers)
+            _filters(call, paths, cached=True, ambiguous_drivers=ambiguous_drivers)
         elif op == "commit":
             _signing(records, "commit.gpgsign")
         elif op == "push":

@@ -167,6 +167,27 @@ class ExecutionTests(unittest.TestCase):
             gitlocal.stage_complete_delta(self.repo)
         self.assertEqual(require(self.repo, "show", "HEAD:f"), "initial")
 
+    def test_literal_attribute_state_names_cannot_hide_filters(self) -> None:
+        for name in ("unset", "unspecified"):
+            with self.subTest(name=name):
+                hook = self.script("cat")
+                self.config(f"filter.{name}.clean", hook.as_posix())
+                self.config(f"filter.{name}.smudge", hook.as_posix())
+                (self.repo / ".gitattributes").write_text(f"f filter={name}\n")
+                (self.repo / "f").write_text(f"filtered by {name}\n")
+                with self.assertRaisesRegex(gitexec.GitPolicyRefused, "content filter"):
+                    gitlocal.stage_complete_delta(self.repo)
+                self.assertFalse(self.marker.exists())
+                require(self.repo, "add", "-A")
+                self.reset_marker()
+                require(self.repo, "commit", "-m", f"literal {name} filter")
+                self.marker.unlink(missing_ok=True)
+                target = self.root / f"checkout-{name}"
+                with self.assertRaisesRegex(gitexec.GitPolicyRefused, "content filter"):
+                    gitexec.run_controller_git("worktree", "add", "--detach", str(target), "HEAD", cwd=self.repo)
+                self.assertFalse(self.marker.exists())
+                self.assertFalse(target.exists())
+
     def test_unsupported_features_do_not_block_storage_observation_or_release(self) -> None:
         self.configure_filter("info")
         self.config("commit.gpgsign", "true")
@@ -341,6 +362,14 @@ class ExecutionTests(unittest.TestCase):
         with self.assertRaisesRegex(gitexec.GitPolicyRefused, "Partial-clone"):
             gitexec.run_controller_git("ls-tree", "HEAD", cwd=self.repo)
         self.assertEqual(storage.git_common_directory(self.repo), (self.repo / ".git").resolve())
+
+    def test_repository_askpass_refused_before_transport(self) -> None:
+        hook = self.script("exit 1")
+        require(self.repo, "remote", "add", "origin", "https://example.invalid/repo")
+        self.config("core.askPass", hook.as_posix())
+        with self.assertRaisesRegex(gitexec.GitPolicyRefused, "transport helper"):
+            gitexec.run_controller_git("ls-remote", "origin", cwd=self.repo)
+        self.assertFalse(self.marker.exists())
 
     def test_included_configuration_hook_is_suppressed(self) -> None:
         version = require(self.repo, "--version")
