@@ -686,9 +686,11 @@ class TreeBindingTests(RemediationFixture):
     def test_arbitrary_git_hooks_never_run_during_authoritative_commit(self) -> None:
         hooks = self.clone / "configured-hooks"
         hooks.mkdir()
-        (hooks / "pre-commit").write_text(
+        hook = hooks / "pre-commit"
+        hook.write_text(
             "#!/bin/sh\ntouch HOOK-RAN\nexit 1\n", encoding="utf-8"
         )
+        hook.chmod(0o755)
         git(self.clone, "config", "core.hooksPath", str(hooks))
         self.prepare()
         (self.worktree / "f.txt").write_text("v2\n", encoding="utf-8")
@@ -700,6 +702,44 @@ class TreeBindingTests(RemediationFixture):
         self.assertEqual(result["outcome"], "remediation_completed")
         self.assertFalse((self.clone / "HOOK-RAN").exists())
         self.assertFalse((self.worktree / "HOOK-RAN").exists())
+
+    def test_filter_added_by_semantic_work_refuses_without_round_or_publication(self) -> None:
+        self.prepare()
+        (self.worktree / ".gitattributes").write_text("*.txt filter=unsupported\n")
+        (self.worktree / "f.txt").write_text("v2\n")
+        result = self.finalize(proposal_text=proposal_json(
+            disposition("T1", "fix_now", mode=externalize.FIX_NOW_PROSPECTIVE)
+        ))
+        self.assertEqual(result["outcome"], "remediation_refused")
+        self.assertFalse(result["round_committed"])
+        self.assertEqual(result["ownership"], "released")
+        self.assertEqual(self.remote_head(), self.h1)
+
+    def test_lfs_pointer_refuses_before_commitment_even_without_attributes(self) -> None:
+        self.prepare()
+        (self.worktree / "pointer").write_text(
+            "version https://git-lfs.github.com/spec/v1\noid sha256:" + "a" * 64 + "\nsize 1\n"
+        )
+        result = self.finalize(proposal_text=proposal_json(
+            disposition("T1", "fix_now", mode=externalize.FIX_NOW_PROSPECTIVE)
+        ))
+        self.assertEqual(result["outcome"], "remediation_refused")
+        self.assertIn("LFS publication", result["reason"])
+        self.assertFalse(result["round_committed"])
+        self.assertEqual(result["ownership"], "released")
+        self.assertEqual(self.remote_head(), self.h1)
+
+    def test_signing_requirement_refuses_before_commitment(self) -> None:
+        self.prepare()
+        git(self.clone, "config", "push.gpgsign", "true")
+        (self.worktree / "f.txt").write_text("v2\n")
+        result = self.finalize(proposal_text=proposal_json(
+            disposition("T1", "fix_now", mode=externalize.FIX_NOW_PROSPECTIVE)
+        ))
+        self.assertEqual(result["outcome"], "remediation_refused")
+        self.assertIn("required signing", result["reason"])
+        self.assertFalse(result["round_committed"])
+        self.assertEqual(self.remote_head(), self.h1)
 
     def test_conflict_state_refuses_publication(self) -> None:
         self.prepare()

@@ -4,9 +4,8 @@
 The user's primary worktree is never modified. Remediation runs in detached
 temporary worktrees under the repository-associated v2 state directory. A batch
 creates at most one commit and one push, never an empty commit, never a
-force-push, and a remote head advancement aborts publication. Worktree creation
-and authoritative commit creation never execute Git hooks (``core.hooksPath``
-is pointed at an empty directory for each invocation).
+force-push, and a remote head advancement aborts publication. Every Git call
+uses the shared gitexec execution policy; business ownership stays here.
 
 The publication primitives (``stage_complete_delta``, ``write_tree``,
 ``head_tree_oid``, ``commit_index_hook_free``, ``push_publication_commit``)
@@ -19,30 +18,17 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
-import tempfile
 from typing import Any, Callable
 
 import storage
 from storage import worktree_root
 
 
-def git(
-    *args: str, cwd: str | Path | None = None, stdin: str | None = None
-) -> subprocess.CompletedProcess[str]:
-    command = ["git"] + list(args)
-    # Git emits UTF-8 for commit messages, paths, and porcelain output.
-    # Locale-dependent decoding corrupted non-ASCII evidence on e.g. cp936
-    # hosts, and strict decoding would crash on bytes Git legitimately emits.
-    # surrogateescape round-trips unknown bytes through os.path operations.
-    process = subprocess.run(
-        command, cwd=str(cwd) if cwd is not None else None,
-        input=stdin, capture_output=True,
-        encoding="utf-8", errors="surrogateescape",
-    )
-    return process
+# Compatibility name for callers, not an alternate execution policy.
+from gitexec import run_controller_git as git
+import gitexec
 
 
 def git_text(*args: str, cwd: str | Path | None = None) -> str:
@@ -66,14 +52,7 @@ def fetch(
     storage.ensure_active_campaign_owner(
         repository, pr_number, owner_token, repository_path=repository_path
     )
-    hooks_dir = tempfile.mkdtemp(prefix="crp-no-hooks-")
-    try:
-        output = git(
-            "-c", f"core.hooksPath={hooks_dir}", "fetch", remote,
-            cwd=repository_path,
-        )
-    finally:
-        shutil.rmtree(hooks_dir, ignore_errors=True)
+    output = git("fetch", remote, cwd=repository_path)
     if output.returncode != 0:
         raise RuntimeError(output.stderr.strip())
 
@@ -143,15 +122,9 @@ def add_worktree(
     target = root / suffix
     if target.exists():
         raise RuntimeError(f"Temporary worktree path already exists: {target}")
-    hooks_dir = tempfile.mkdtemp(prefix="crp-no-hooks-")
-    try:
-        process = git(
-            "-c", f"core.hooksPath={hooks_dir}",
-            "worktree", "add", "--detach", str(target), commit,
-            cwd=repository_path,
-        )
-    finally:
-        shutil.rmtree(hooks_dir, ignore_errors=True)
+    process = git(
+        "worktree", "add", "--detach", str(target), commit, cwd=repository_path
+    )
     if process.returncode != 0:
         raise RuntimeError(process.stderr.strip())
     return {"path": str(target), "commit": commit}
@@ -199,7 +172,7 @@ def worktree_is_registered(repository_path: str | Path, path: str | Path) -> boo
 
 
 def stage_complete_delta(
-    worktree: str | Path, *, runner: Callable[..., subprocess.CompletedProcess[str]] = git
+    worktree: str | Path, *, runner: Callable[..., subprocess.CompletedProcess[str]] | None = None
 ) -> None:
     """Stage the complete non-ignored worktree delta (complete `git add -A`).
 
@@ -207,40 +180,26 @@ def stage_complete_delta(
     are staged; ignored files are excluded by Git's deterministic ignore
     rules. Unmerged index entries fail here and refuse publication.
     """
-    hooks_dir = tempfile.mkdtemp(prefix="crp-no-hooks-")
-    try:
-        staged = runner(
-            "-c", f"core.hooksPath={hooks_dir}",
-            "add", "-A", "--", ".", cwd=str(worktree),
-        )
-    finally:
-        shutil.rmtree(hooks_dir, ignore_errors=True)
+    staged = git("add", "-A", "--", ".", cwd=worktree, executor=runner)
     if staged.returncode != 0:
         raise RuntimeError(staged.stderr.strip())
 
 
 def write_tree(
-    worktree: str | Path, *, runner: Callable[..., subprocess.CompletedProcess[str]] = git
+    worktree: str | Path, *, runner: Callable[..., subprocess.CompletedProcess[str]] | None = None
 ) -> str:
     """Return the exact Git tree OID of the current worktree index."""
-    hooks_dir = tempfile.mkdtemp(prefix="crp-no-hooks-")
-    try:
-        written = runner(
-            "-c", f"core.hooksPath={hooks_dir}", "write-tree",
-            cwd=str(worktree),
-        )
-    finally:
-        shutil.rmtree(hooks_dir, ignore_errors=True)
+    written = git("write-tree", cwd=worktree, executor=runner)
     if written.returncode != 0:
         raise RuntimeError(written.stderr.strip())
     return written.stdout.strip()
 
 
 def head_tree_oid(
-    worktree: str | Path, *, runner: Callable[..., subprocess.CompletedProcess[str]] = git
+    worktree: str | Path, *, runner: Callable[..., subprocess.CompletedProcess[str]] | None = None
 ) -> str:
     """Return the tree OID of the worktree's HEAD commit."""
-    resolved = runner("rev-parse", "HEAD^{tree}", cwd=str(worktree))
+    resolved = git("rev-parse", "HEAD^{tree}", cwd=worktree, executor=runner)
     if resolved.returncode != 0:
         raise RuntimeError(resolved.stderr.strip())
     return resolved.stdout.strip()
@@ -250,28 +209,16 @@ def commit_index_hook_free(
     worktree: str | Path,
     *,
     message: str,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = git,
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> str:
-    """Create one commit from the current index without executing Git hooks.
-
-    ``core.hooksPath`` is pointed at a fresh empty directory for this one
-    invocation, so no repository- or user-configured hook can run. The caller
-    verifies the resulting commit's tree against the bound tree.
-    """
-    hooks_dir = tempfile.mkdtemp(prefix="crp-no-hooks-")
-    try:
-        committed = runner(
-            "-c", f"core.hooksPath={hooks_dir}", "commit", "-m", message,
-            cwd=str(worktree),
-        )
-        if committed.returncode != 0:
-            raise RuntimeError(committed.stderr.strip())
-        resolved = runner("rev-parse", "HEAD", cwd=str(worktree))
-        if resolved.returncode != 0:
-            raise RuntimeError(resolved.stderr.strip())
-        return resolved.stdout.strip()
-    finally:
-        shutil.rmtree(hooks_dir, ignore_errors=True)
+    """Create one policy-controlled commit from the current index."""
+    committed = git("commit", "-m", message, cwd=worktree, executor=runner)
+    if committed.returncode != 0:
+        raise RuntimeError(committed.stderr.strip())
+    resolved = git("rev-parse", "HEAD", cwd=worktree, executor=runner)
+    if resolved.returncode != 0:
+        raise RuntimeError(resolved.stderr.strip())
+    return resolved.stdout.strip()
 
 
 def push_publication_commit(
@@ -285,7 +232,7 @@ def push_publication_commit(
     owner_token: str,
     repository_path: str | Path = ".",
     remote: str = "origin",
-    runner: Callable[..., subprocess.CompletedProcess[str]] = git,
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     before_push: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Internal one-push publication tail, never force. Ambiguity fails closed.
@@ -311,17 +258,10 @@ def push_publication_commit(
             "local_commit": local_commit,
         }
 
-    hooks_dir = tempfile.mkdtemp(prefix="crp-no-hooks-")
-    try:
-        if before_push is not None:
-            before_push()
-        push = runner(
-            "-c", f"core.hooksPath={hooks_dir}",
-            "push", "--no-verify", remote, f"HEAD:refs/heads/{branch}",
-            cwd=str(worktree)
-        )
-    finally:
-        shutil.rmtree(hooks_dir, ignore_errors=True)
+    push = git(
+        "push", "--no-verify", remote, f"HEAD:refs/heads/{branch}",
+        cwd=worktree, executor=runner, before_execute=before_push,
+    )
     if push.returncode != 0:
         # Re-observe to classify a potentially-accepted push instead of guessing.
         observed = remote_head(repository_path, branch, remote=remote)

@@ -525,8 +525,6 @@ def finalize_remediation(
         fetch_snapshot = lambda: github_api.fetch_snapshot(canonical, pr_number)  # noqa: E731
     if remote_head_call is None:
         remote_head_call = lambda ref: gitlocal.remote_head(repository_path, ref)  # noqa: E731
-    if runner is None:
-        runner = gitlocal.git
 
     # Pre-acquisition validation: no ownership exists yet, so a refusal here
     # is reported as not_acquired and mutates nothing.
@@ -679,6 +677,7 @@ def finalize_remediation(
         # 5. Hook-free local commit and final remote-head validation.
         local_commit: str | None = None
         if publication_required:
+            gitlocal.gitexec.preflight_publication(worktree, prospective_tree, executor=runner)
             local_commit = gitlocal.commit_index_hook_free(
                 worktree, message=COMMIT_MESSAGE, runner=runner
             )
