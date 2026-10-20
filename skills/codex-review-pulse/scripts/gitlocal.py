@@ -290,12 +290,17 @@ def push_publication_commit(
             "local_commit": local_commit,
         }
 
-    if before_push is not None:
-        before_push()
-    push = runner(
-        "push", "--no-verify", remote, f"HEAD:refs/heads/{branch}",
-        cwd=str(worktree)
-    )
+    hooks_dir = tempfile.mkdtemp(prefix="crp-no-hooks-")
+    try:
+        if before_push is not None:
+            before_push()
+        push = runner(
+            "-c", f"core.hooksPath={hooks_dir}",
+            "push", "--no-verify", remote, f"HEAD:refs/heads/{branch}",
+            cwd=str(worktree)
+        )
+    finally:
+        shutil.rmtree(hooks_dir, ignore_errors=True)
     if push.returncode != 0:
         # Re-observe to classify a potentially-accepted push instead of guessing.
         observed = remote_head(repository_path, branch, remote=remote)

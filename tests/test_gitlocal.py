@@ -226,6 +226,33 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(gitlocal.remote_head(self.env.clone, "main"), local)
         self.assertFalse((self.worktree / "PRE_PUSH_HOOK_RAN").exists())
 
+    def test_publication_does_not_execute_reference_transaction_hook(self) -> None:
+        (self.worktree / "file.txt").write_text("v2\n", encoding="utf-8")
+        local = self.stage_tree_and_commit()
+        hooks = self.env.clone / "configured-hooks"
+        hooks.mkdir()
+        hook = hooks / "reference-transaction"
+        hook.write_text(
+            "#!/bin/sh\ntouch REFERENCE_TRANSACTION_HOOK_RAN\n",
+            encoding="utf-8",
+        )
+        hook.chmod(0o755)
+        require(self.env.clone, "config", "core.hooksPath", str(hooks))
+        result = gitlocal.push_publication_commit(
+            worktree=self.worktree,
+            branch="main",
+            expected_head=self.head1,
+            local_commit=local,
+            repository=self.repo,
+            pr_number=self.pr,
+            owner_token=self.token,
+            repository_path=self.env.clone,
+        )
+
+        self.assertTrue(result["published"])
+        self.assertEqual(gitlocal.remote_head(self.env.clone, "main"), local)
+        self.assertFalse((self.worktree / "REFERENCE_TRANSACTION_HOOK_RAN").exists())
+
     def test_push_command_never_uses_force(self) -> None:
         recorded: list[list[str]] = []
         real_git = gitlocal.git
@@ -248,7 +275,7 @@ class PublishTests(unittest.TestCase):
             runner=recorder,
         )
         self.assertTrue(result["published"])
-        push_args = next(args for args in recorded if args and args[0] == "push")
+        push_args = next(args for args in recorded if "push" in args)
         self.assertNotIn("--force", push_args)
         self.assertNotIn("--force-with-lease", push_args)
         self.assertIn("HEAD:refs/heads/main", push_args)
