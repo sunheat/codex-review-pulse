@@ -313,7 +313,12 @@ class ExecutionTests(unittest.TestCase):
         # Remove conversion attributes without replacing the already tracked
         # pointer: its LFS object is still required at any new destination.
         (self.repo / ".gitattributes").unlink()
+        # Keep an actual tracked pointer after removing attributes. A full add
+        # may otherwise stage the smudged payload as an ordinary blob on hosts
+        # where LFS's timestamp/size cache behaves differently.
+        (self.repo / "payload.bin").write_bytes(pointer.encode("utf-8"))
         require(self.repo, "add", "-A")
+        self.assertEqual(raw(self.repo, "show", ":payload.bin").stdout, pointer)
         require(self.repo, "commit", "-m", "remove filter attributes")
         origin = self.root / "lfs-origin.git"
         require(self.repo, "init", "--bare", str(origin))
