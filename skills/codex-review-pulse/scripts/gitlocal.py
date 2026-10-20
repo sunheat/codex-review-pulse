@@ -66,7 +66,14 @@ def fetch(
     storage.ensure_active_campaign_owner(
         repository, pr_number, owner_token, repository_path=repository_path
     )
-    output = git("fetch", remote, cwd=repository_path)
+    hooks_dir = tempfile.mkdtemp(prefix="crp-no-hooks-")
+    try:
+        output = git(
+            "-c", f"core.hooksPath={hooks_dir}", "fetch", remote,
+            cwd=repository_path,
+        )
+    finally:
+        shutil.rmtree(hooks_dir, ignore_errors=True)
     if output.returncode != 0:
         raise RuntimeError(output.stderr.strip())
 
@@ -200,7 +207,14 @@ def stage_complete_delta(
     are staged; ignored files are excluded by Git's deterministic ignore
     rules. Unmerged index entries fail here and refuse publication.
     """
-    staged = runner("add", "-A", "--", ".", cwd=str(worktree))
+    hooks_dir = tempfile.mkdtemp(prefix="crp-no-hooks-")
+    try:
+        staged = runner(
+            "-c", f"core.hooksPath={hooks_dir}",
+            "add", "-A", "--", ".", cwd=str(worktree),
+        )
+    finally:
+        shutil.rmtree(hooks_dir, ignore_errors=True)
     if staged.returncode != 0:
         raise RuntimeError(staged.stderr.strip())
 

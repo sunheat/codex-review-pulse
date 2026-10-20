@@ -123,6 +123,55 @@ class PublishTests(unittest.TestCase):
         ).split()
         self.assertIn("added.txt", names)
 
+    def test_staging_does_not_execute_post_index_change_hook(self) -> None:
+        hooks = self.env.clone / "configured-hooks"
+        hooks.mkdir()
+        hook = hooks / "post-index-change"
+        hook.write_text(
+            "#!/bin/sh\ntouch POST_INDEX_CHANGE_HOOK_RAN\n", encoding="utf-8"
+        )
+        hook.chmod(0o755)
+        require(self.env.clone, "config", "core.hooksPath", str(hooks))
+
+        (self.worktree / "file.txt").write_text("v2\n", encoding="utf-8")
+        gitlocal.stage_complete_delta(self.worktree)
+
+        self.assertFalse((self.worktree / "POST_INDEX_CHANGE_HOOK_RAN").exists())
+        self.assertEqual(
+            require(self.worktree, "show", ":file.txt"), "v2"
+        )
+
+    def test_fetch_does_not_execute_reference_transaction_hook(self) -> None:
+        other = Path(self._tmp.name) / "other"
+        require(self.env.clone, "clone", str(self.env.origin), str(other))
+        require(other, "config", "user.email", "test@example.test")
+        require(other, "config", "user.name", "Test User")
+        (other / "file.txt").write_text("v2\n", encoding="utf-8")
+        require(other, "add", "file.txt")
+        require(other, "commit", "-m", "advance remote")
+        require(other, "push", "origin", "main")
+        advanced = require(other, "rev-parse", "HEAD")
+
+        hooks = self.env.clone / "configured-hooks"
+        hooks.mkdir()
+        hook = hooks / "reference-transaction"
+        hook.write_text(
+            "#!/bin/sh\ntouch REFERENCE_TRANSACTION_HOOK_RAN\n",
+            encoding="utf-8",
+        )
+        hook.chmod(0o755)
+        require(self.env.clone, "config", "core.hooksPath", str(hooks))
+
+        gitlocal.fetch(
+            self.env.clone,
+            repository=self.repo,
+            pr_number=self.pr,
+            owner_token=self.token,
+        )
+
+        self.assertEqual(require(self.env.clone, "rev-parse", "origin/main"), advanced)
+        self.assertFalse((self.env.clone / "REFERENCE_TRANSACTION_HOOK_RAN").exists())
+
     def test_ignored_files_are_excluded_from_the_delta(self) -> None:
         (self.worktree / "skip.log").write_text("noise\n", encoding="utf-8")
         (self.worktree / ".gitignore").write_text("skip.log\n", encoding="utf-8")
