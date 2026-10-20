@@ -1010,6 +1010,17 @@ def evaluate(
                 {"id": comment.get("id"), "created_at": comment.get("created_at")}
             )
 
+    if guard is not None and guard.get("state") == GUARD_ACTIVE and _response_grace_elapsed(
+        campaign, guard, snapshot
+    ):
+        eligible_eyes = [
+            eyes for eyes in eligible_eyes
+            if not any(
+                strictly_after(comment["created_at"], eyes["created_at"])
+                for comment in codex_comments
+            )
+        ]
+
     for reaction in snapshot.get("reactions", []):
         if (
             isinstance(reaction, dict)

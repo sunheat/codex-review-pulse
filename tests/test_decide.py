@@ -403,6 +403,86 @@ class DecisionTests(unittest.TestCase):
                     self.assertEqual(directive["basis"], "observation")
                     self.assertEqual(c["rounds_used"], rounds_used + 1)
 
+    def test_later_comment_supersedes_older_eyes_after_response_grace(self) -> None:
+        for rounds_used in (0, 5):
+            with self.subTest(rounds_used=rounds_used):
+                c = reserve_and_open(campaign(rounds_used=rounds_used))
+                directive = m.decide(
+                    c,
+                    snapshot(
+                        reactions=[reaction(m.EYES, created_at=T_PLUS_15)],
+                        comments=[
+                            {"id": "codex-comment", "login": CODEX,
+                             "created_at": T_PLUS_30, "body": "Review complete"},
+                        ],
+                        server_time=T_PLUS_45,
+                    ),
+                )
+                self.assertEqual(directive["action"], "terminal")
+                self.assertEqual(
+                    directive["status"], m.REVIEW_COMPLETED_WITHOUT_APPROVAL
+                )
+                self.assertEqual(directive["comment_id"], "codex-comment")
+                self.assertEqual(directive["basis"], "observation")
+
+    def test_later_comment_waits_for_response_grace_before_superseding_eyes(self) -> None:
+        c = reserve_and_open(campaign(interval=45))
+        directive = m.decide(
+            c,
+            snapshot(
+                reactions=[reaction(m.EYES, created_at=T_PLUS_15)],
+                comments=[
+                    {"id": "codex-comment", "login": CODEX,
+                     "created_at": T_PLUS_30, "body": "Review complete"},
+                ],
+                server_time=T_PLUS_30,
+            ),
+        )
+        self.assertEqual(directive["action"], "wait_review_in_progress")
+
+    def test_comment_only_supersedes_strictly_older_eyes(self) -> None:
+        c = reserve_and_open(campaign())
+        for eyes_at in (T_PLUS_30, T_PLUS_45):
+            with self.subTest(eyes_at=eyes_at):
+                directive = m.decide(
+                    c,
+                    snapshot(
+                        reactions=[reaction(m.EYES, created_at=eyes_at)],
+                        comments=[
+                            {"id": "codex-comment", "login": CODEX,
+                             "created_at": T_PLUS_30, "body": "Review complete"},
+                        ],
+                        server_time=T_PLUS_45,
+                    ),
+                )
+                self.assertEqual(directive["action"], "wait_review_in_progress")
+
+    def test_inapplicable_comments_cannot_supersede_eyes(self) -> None:
+        baseline_comment = {
+            "id": "baseline-comment", "login": CODEX,
+            "created_at": T_PLUS_30, "body": "Old activity",
+        }
+        c = reserve_and_open(campaign(), baseline={"comments": [baseline_comment]})
+        for comment in (
+            baseline_comment,
+            {"id": "human-comment", "login": "a-human",
+             "created_at": T_PLUS_30, "body": "Review complete"},
+            {"id": "old-comment", "login": CODEX,
+             "created_at": T0, "body": "Review complete"},
+            {"id": "equal-comment", "login": CODEX,
+             "created_at": T_PLUS_15, "body": "Review complete"},
+        ):
+            with self.subTest(comment=comment["id"]):
+                directive = m.decide(
+                    c,
+                    snapshot(
+                        reactions=[reaction(m.EYES, created_at=T_PLUS_15)],
+                        comments=[comment],
+                        server_time=T_PLUS_45,
+                    ),
+                )
+                self.assertEqual(directive["action"], "wait_review_in_progress")
+
     def test_completion_only_supersedes_strictly_older_eyes(self) -> None:
         c = reserve_and_open(campaign())
         for eyes_at in (T_PLUS_30, T_PLUS_45):

@@ -223,7 +223,14 @@ def write_tree(
     worktree: str | Path, *, runner: Callable[..., subprocess.CompletedProcess[str]] = git
 ) -> str:
     """Return the exact Git tree OID of the current worktree index."""
-    written = runner("write-tree", cwd=str(worktree))
+    hooks_dir = tempfile.mkdtemp(prefix="crp-no-hooks-")
+    try:
+        written = runner(
+            "-c", f"core.hooksPath={hooks_dir}", "write-tree",
+            cwd=str(worktree),
+        )
+    finally:
+        shutil.rmtree(hooks_dir, ignore_errors=True)
     if written.returncode != 0:
         raise RuntimeError(written.stderr.strip())
     return written.stdout.strip()

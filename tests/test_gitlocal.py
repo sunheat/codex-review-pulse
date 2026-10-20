@@ -141,6 +141,23 @@ class PublishTests(unittest.TestCase):
             require(self.worktree, "show", ":file.txt"), "v2"
         )
 
+    def test_write_tree_does_not_execute_post_index_change_hook(self) -> None:
+        (self.worktree / "file.txt").write_text("v2\n", encoding="utf-8")
+        gitlocal.stage_complete_delta(self.worktree)
+        hooks = self.env.clone / "configured-hooks"
+        hooks.mkdir()
+        hook = hooks / "post-index-change"
+        hook.write_text(
+            "#!/bin/sh\ntouch POST_INDEX_CHANGE_HOOK_RAN\n", encoding="utf-8"
+        )
+        hook.chmod(0o755)
+        require(self.env.clone, "config", "core.hooksPath", str(hooks))
+
+        tree = gitlocal.write_tree(self.worktree)
+
+        self.assertEqual(require(self.worktree, "show", f"{tree}:file.txt"), "v2")
+        self.assertFalse((self.worktree / "POST_INDEX_CHANGE_HOOK_RAN").exists())
+
     def test_fetch_does_not_execute_reference_transaction_hook(self) -> None:
         other = Path(self._tmp.name) / "other"
         require(self.env.clone, "clone", str(self.env.origin), str(other))
