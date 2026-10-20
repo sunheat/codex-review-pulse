@@ -178,6 +178,33 @@ class PublishTests(unittest.TestCase):
         log = require(self.env.clone, "log", "--format=%s", "-1", local)
         self.assertEqual(log, "remediation: fix")
 
+    def test_publication_does_not_execute_pre_push_hook(self) -> None:
+        hooks = self.env.clone / "configured-hooks"
+        hooks.mkdir()
+        hook = hooks / "pre-push"
+        hook.write_text(
+            "#!/bin/sh\ntouch PRE_PUSH_HOOK_RAN\nexit 1\n", encoding="utf-8"
+        )
+        hook.chmod(0o755)
+        require(self.env.clone, "config", "core.hooksPath", str(hooks))
+
+        (self.worktree / "file.txt").write_text("v2\n", encoding="utf-8")
+        local = self.stage_tree_and_commit()
+        result = gitlocal.push_publication_commit(
+            worktree=self.worktree,
+            branch="main",
+            expected_head=self.head1,
+            local_commit=local,
+            repository=self.repo,
+            pr_number=self.pr,
+            owner_token=self.token,
+            repository_path=self.env.clone,
+        )
+
+        self.assertTrue(result["published"])
+        self.assertEqual(gitlocal.remote_head(self.env.clone, "main"), local)
+        self.assertFalse((self.worktree / "PRE_PUSH_HOOK_RAN").exists())
+
     def test_push_command_never_uses_force(self) -> None:
         recorded: list[list[str]] = []
         real_git = gitlocal.git

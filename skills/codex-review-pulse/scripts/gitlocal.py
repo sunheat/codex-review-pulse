@@ -287,7 +287,8 @@ def push_publication_commit(
     if before_push is not None:
         before_push()
     push = runner(
-        "push", remote, f"HEAD:refs/heads/{branch}", cwd=str(worktree)
+        "push", "--no-verify", remote, f"HEAD:refs/heads/{branch}",
+        cwd=str(worktree)
     )
     if push.returncode != 0:
         # Re-observe to classify a potentially-accepted push instead of guessing.
