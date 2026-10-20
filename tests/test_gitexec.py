@@ -256,6 +256,26 @@ class ExecutionTests(unittest.TestCase):
         for remote in remotes:
             self.assertEqual(require(remote, "for-each-ref"), "")
 
+    def test_remote_destination_with_cr_cannot_redirect_push(self) -> None:
+        import os
+        if os.name == "nt":
+            self.skipTest("Windows filesystem prohibits literal CR in filenames; POSIX CI exercises this")
+        configured = self.root / "origin.git\r"
+        sibling = self.root / "origin.git"
+        for remote in (configured, sibling):
+            require(self.repo, "init", "--bare", str(remote))
+        require(self.repo, "remote", "add", "origin", str(configured))
+        with self.assertRaisesRegex(gitexec.GitPolicyRefused, "destination"):
+            gitexec.run_controller_git("push", "--no-verify", "origin", "HEAD:refs/heads/main", cwd=self.repo)
+        for remote in (configured, sibling):
+            self.assertEqual(require(remote, "for-each-ref"), "")
+
+    def test_destination_parser_rejects_trailing_cr(self) -> None:
+        def observed(command, **kwargs):
+            return subprocess.CompletedProcess(command, 0, "/tmp/origin.git\r\n", "")
+        with self.assertRaisesRegex(gitexec.GitPolicyRefused, "destination"):
+            gitexec._destination(observed, "origin", push=False)
+
     def test_automatic_maintenance_sentinel_and_protected_commit(self) -> None:
         import hashlib
         import zlib

@@ -88,8 +88,9 @@ def _transport(records: list[tuple[str, str, str]]) -> None:
 def _destination(call: Callable[..., subprocess.CompletedProcess[str]], remote: str,
                  *, push: bool) -> str:
     args = ["remote", "get-url"] + (["--push"] if push else []) + ["--all", remote]
-    urls = _require(call(args)).splitlines()
-    if len(urls) != 1 or not urls[0] or urls[0].startswith("-"):
+    output = _require(call(args))
+    urls = output.removesuffix("\n").split("\n")
+    if len(urls) != 1 or not urls[0] or urls[0].startswith("-") or "\r" in urls[0]:
         raise GitPolicyRefused("Controller requires exactly one remote destination")
     url = urls[0]
     # Native SSH/HTTPS and local bare remotes only, never arbitrary remote
@@ -182,10 +183,11 @@ def run_controller_git(*args: str, cwd: str | Path | None = None,
         for setting in config:
             cmd.extend(("-c", setting))
         cmd.extend(command)
-        if command == ["cat-file", "--batch"] or "-z" in command or "--null" in command:
+        if (command == ["cat-file", "--batch"] or command[:2] == ["remote", "get-url"]
+                or "-z" in command or "--null" in command):
             # Universal-newline translation corrupts byte-counted blobs and
-            # NUL-delimited names/config values containing literal CR bytes.
-            # Binary input/output preserves path identity on POSIX and Windows.
+            # NUL-delimited names/config values and remote destinations with
+            # literal CR bytes. Binary I/O preserves their identity.
             result = executor(cmd, cwd=str(cwd) if cwd is not None else None,
                               env=env, input=stdin.encode("utf-8", "surrogateescape") if stdin else None,
                               capture_output=True)
