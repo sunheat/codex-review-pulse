@@ -1013,70 +1013,55 @@ class StorageTests(unittest.TestCase):
         self.assertFalse(campaign_file.exists())
 
     def test_guard_wait_stale_recovery_compares_after_entering_guard(self) -> None:
-        # The witness comparison must happen after a recovery enters the
-        # canonical guard. Prove this ordering by tracing the real recovery
-        # boundary: a stale recovery captures witness A, then an
-        # authoritative guarded A -> B replacement completes, and the same
-        # stale witness refuses once it re-enters the guard against B.
-        self.acquire_setup()
+        first = self.acquire_setup()
         witness_a = self._witness()
+        campaign_file = self.save_campaign(make_campaign())
+        campaign_before = campaign_file.read_bytes()
         target = storage.lock_path("owner/repo", 7, repository_path=self.repo.main)
-        raw_reads: list[bytes | None] = []
-        original_read = storage._read_lock_raw_unlocked
-
-        def observed_read(path: Path) -> bytes | None:
-            raw = original_read(path)
-            if path == target:
-                raw_reads.append(raw)
-            return raw
-
-        storage._read_lock_raw_unlocked = observed_read  # type: ignore[assignment]
-        try:
-            # Authoritative guarded replacement: remove A with its own
-            # witness, then acquire B through the normal worker path.
-            recovered = storage.recover_lock(
-                "owner/repo", 7,
-                user_authorized_recovery=True,
-                expected_campaign_id=CAMPAIGN_ID,
-                expected_lock_witness=witness_a,
-                repository_path=self.repo.main,
-            )
-            self.assertTrue(recovered["recovered"])
-            self.save_campaign(make_campaign())
-            second = storage.acquire_worker_lock(
-                "owner/repo", 7,
-                campaign_id=CAMPAIGN_ID,
-                acquired_at=ACQUIRED_AT,
-                repository_path=self.repo.main,
-            )
-            self.assertTrue(second["acquired"])
-            witness_b = self._witness()
-            self.assertNotEqual(witness_b, witness_a)
-            before = len(raw_reads)
-        # The stale recovery now re-enters the canonical guard with
-            # witness A. Because recovery reads the current raw bytes only
-            # after entering the same guard, it observes B (not a pre-wait
-            # snapshot), compares, refuses, and leaves B untouched.
-            with self.assertRaises(RuntimeError):
-                storage.recover_lock(
+        with storage._guard(target):
+            thread, outcome = run_blocked(
+                lambda: storage.recover_lock(
                     "owner/repo", 7,
                     user_authorized_recovery=True,
                     expected_campaign_id=CAMPAIGN_ID,
                     expected_lock_witness=witness_a,
-                    repository_path=self.repo.main,
+                    repository_path=self.repo.linked,
                 )
-            self.assertGreater(len(raw_reads), before)
-            self.assertEqual(
-                storage.lock_content_witness(raw_reads[-1] or b""),
-                witness_b,
             )
-        finally:
-            storage._read_lock_raw_unlocked = original_read  # type: ignore[assignment]
+            self.assertTrue(thread.is_alive())
+            self.assertEqual(outcome, [])
+            # Replace A with a normally initialized B while recovery waits.
+            # Use the unlocked creation helper under the already-held guard
+            # rather than nesting a public acquisition's guard.
+            target.unlink()
+            second = storage._create_lock_unlocked(
+                target,
+                repository="owner/repo",
+                pr_number=7,
+                campaign_id=CAMPAIGN_ID,
+                acquired_at=ACQUIRED_AT,
+            )
+            raw_b = target.read_bytes()
+            witness_b = storage.lock_content_witness(raw_b)
+            self.assertNotEqual(second["owner_token"], first["owner_token"])
+            self.assertNotEqual(witness_b, witness_a)
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(outcome[0][0], "error")
+        self.assertIsInstance(outcome[0][1], RuntimeError)
+        self.assertIn("do not match the inspected lock", str(outcome[0][1]))
+        self.assertEqual(target.read_bytes(), raw_b)
         current = storage.inspect_lock(
             "owner/repo", 7, repository_path=self.repo.main
         )
         self.assertEqual(current["status"], "active")
         self.assertEqual(current["recovery_witness"], witness_b)
+        proven = storage.verify_owner(
+            "owner/repo", 7, second["owner_token"],
+            repository_path=self.repo.linked,
+        )
+        self.assertEqual(proven["campaign_id"], CAMPAIGN_ID)
+        self.assertEqual(campaign_file.read_bytes(), campaign_before)
 
     def test_absent_recovery_creates_no_state_and_ignores_later_lock(self) -> None:
         campaign_file = storage.campaign_path(
