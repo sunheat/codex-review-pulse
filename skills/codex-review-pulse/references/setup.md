@@ -26,6 +26,26 @@ one when native Automations are unavailable.
   the PR head branch, resolve review threads, create issues, and post comments.
 - This skill installed into the Codex app's Agent Skills location.
 
+## Controller Git support
+
+Controller-owned Git uses one shared execution policy. Hooks (including Git
+2.54 configuration-defined hooks), fsmonitor, and implicit maintenance are
+suppressed without rewriting persistent configuration. The trusted native Git
+installation, host credential facilities, SSH configuration, and remote
+services remain outside a hard sandbox guarantee.
+
+Content operations refuse effective clean/smudge/process filter attributes;
+required commit/push signing is unsupported rather than silently disabled.
+New publication refuses LFS pointers, including already tracked pointers,
+because disabling pre-push cannot establish LFS object upload completeness.
+Partial clones, conditional includes for content/transport operations, relative
+attributesFile during checkout, repository-selected transport executables,
+URL rewriting, multiple destinations and distinct fetch/push URLs are refused.
+Use one native HTTPS/SSH (or local bare) origin for the authorized PR head.
+Safe local metadata observations for storage/ownership/release remain available
+under the same common controls; they do not require content/signing/publication
+support. These are enforced support limits, not a sandbox or automatic recovery.
+
 ## Runtime artifacts
 
 All campaign state is stored under the repository's Git common directory and is

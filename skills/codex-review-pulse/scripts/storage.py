@@ -30,11 +30,11 @@ from pathlib import Path
 import platform
 import re
 import secrets
-import subprocess
 import tempfile
 from typing import Any, Callable, Iterator
 
 import campaign_model as model
+from gitexec import run_controller_git
 
 
 LOCK_SCHEMA_VERSION = 1
@@ -50,18 +50,8 @@ LOCK_WITNESS_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def git_common_directory(repository_path: str | Path = ".") -> Path:
-    process = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repository_path),
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-common-dir",
-        ],
-        capture_output=True,
-        encoding="utf-8",
-        errors="surrogateescape",
+    process = run_controller_git(
+        "rev-parse", "--path-format=absolute", "--git-common-dir", cwd=repository_path
     )
     if process.returncode != 0:
         raise RuntimeError(

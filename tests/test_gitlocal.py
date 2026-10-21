@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -209,11 +210,18 @@ class PublishTests(unittest.TestCase):
     def test_hook_free_commit_ignores_configured_hooks(self) -> None:
         hooks = self.env.clone / "configured-hooks"
         hooks.mkdir()
-        (hooks / "pre-commit").write_text(
+        hook = hooks / "pre-commit"
+        hook.write_text(
             "#!/bin/sh\ntouch HOOK-RAN\nexit 1\n", encoding="utf-8"
         )
+        hook.chmod(0o755)
         require(self.env.clone, "config", "core.hooksPath", str(hooks))
         (self.worktree / "file.txt").write_text("v2\n", encoding="utf-8")
+        control = git(self.worktree, "commit", "-am", "positive control")
+        self.assertNotEqual(control.returncode, 0)
+        marker = self.worktree / "HOOK-RAN"
+        self.assertTrue(marker.exists())
+        marker.unlink()
         commit = self.stage_tree_and_commit()
         self.assertNotEqual(commit, self.head1)
         self.assertFalse((self.env.clone / "HOOK-RAN").exists())
@@ -321,11 +329,10 @@ class PublishTests(unittest.TestCase):
 
     def test_push_command_never_uses_force(self) -> None:
         recorded: list[list[str]] = []
-        real_git = gitlocal.git
 
-        def recorder(*args, cwd=None):  # type: ignore[no-untyped-def]
-            recorded.append(list(args))
-            return real_git(*args, cwd=cwd)
+        def recorder(command, **kwargs):
+            recorded.append(command)
+            return subprocess.run(command, **kwargs)
 
         (self.worktree / "file.txt").write_text("v2\n", encoding="utf-8")
         local = self.stage_tree_and_commit()
@@ -345,6 +352,62 @@ class PublishTests(unittest.TestCase):
         self.assertNotIn("--force", push_args)
         self.assertNotIn("--force-with-lease", push_args)
         self.assertIn("HEAD:refs/heads/main", push_args)
+
+    def test_injected_clean_push_failure_is_single_attempt(self) -> None:
+        (self.worktree / "file.txt").write_text("v2", encoding="utf-8")
+        local = self.stage_tree_and_commit()
+        attempts = []
+        def executor(command, **kwargs):
+            if "push" in command:
+                attempts.append(command)
+                return subprocess.CompletedProcess(command, 1, "", "definite refusal")
+            return subprocess.run(command, **kwargs)
+        result = gitlocal.push_publication_commit(
+            worktree=self.worktree, branch="main", expected_head=self.head1,
+            local_commit=local, repository=self.repo, pr_number=self.pr,
+            owner_token=self.token, repository_path=self.env.clone, runner=executor,
+        )
+        self.assertEqual(result["status"], "push_failed_clean")
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(gitlocal.remote_head(self.env.clone, "main"), self.head1)
+
+    def test_nonzero_push_after_acceptance_is_confirmed_without_retry(self) -> None:
+        (self.worktree / "file.txt").write_text("v2", encoding="utf-8")
+        local = self.stage_tree_and_commit()
+        attempts = []
+        def executor(command, **kwargs):
+            result = subprocess.run(command, **kwargs)
+            if "push" in command:
+                attempts.append(command)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return subprocess.CompletedProcess(command, 1, "", "lost response")
+            return result
+        result = gitlocal.push_publication_commit(
+            worktree=self.worktree, branch="main", expected_head=self.head1,
+            local_commit=local, repository=self.repo, pr_number=self.pr,
+            owner_token=self.token, repository_path=self.env.clone, runner=executor,
+        )
+        self.assertTrue(result["published"])
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(gitlocal.remote_head(self.env.clone, "main"), local)
+
+    def test_unknown_remote_after_failed_push_stays_ambiguous(self) -> None:
+        (self.worktree / "file.txt").write_text("v2", encoding="utf-8")
+        local = self.stage_tree_and_commit()
+        attempts = []
+        def executor(command, **kwargs):
+            if "push" in command:
+                attempts.append(command)
+                return subprocess.CompletedProcess(command, 1, "", "unknown response")
+            return subprocess.run(command, **kwargs)
+        with patch.object(gitlocal, "remote_head", side_effect=[self.head1, "f" * 40]):
+            result = gitlocal.push_publication_commit(
+                worktree=self.worktree, branch="main", expected_head=self.head1,
+                local_commit=local, repository=self.repo, pr_number=self.pr,
+                owner_token=self.token, repository_path=self.env.clone, runner=executor,
+            )
+        self.assertEqual(result["status"], "ambiguous_publication")
+        self.assertEqual(len(attempts), 1)
 
     def test_remote_advancement_aborts_the_push(self) -> None:
         # Someone else lands a commit on the PR branch.

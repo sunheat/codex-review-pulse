@@ -15,6 +15,7 @@ SCRIPTS = ROOT / "skills" / "codex-review-pulse" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import campaign_model as model  # noqa: E402
+import gitexec
 import storage  # noqa: E402
 
 
@@ -138,7 +139,7 @@ class StorageTests(unittest.TestCase):
                     kwargs["encoding"] = "cp936"
                 return original_run(*args, **kwargs)
 
-            with mock.patch.object(storage.subprocess, "run", side_effect=non_utf8_locale):
+            with mock.patch.object(gitexec.subprocess, "run", side_effect=non_utf8_locale):
                 common = storage.git_common_directory(repo.linked)
                 main_lock = storage.lock_path(
                     "owner/repo", 7, repository_path=repo.main

@@ -77,7 +77,8 @@ local repository project. Full procedures:
 ## Requirements
 
 - the Codex app / Codex desktop with native Codex Automations and Agent Skills;
-- Git, with a local clone of the target repository (same-repository PRs only);
+- Git 2.36+, with a local clone of the target repository (same-repository PRs only);
+  see [enforced Git support limits](skills/codex-review-pulse/references/setup.md#controller-git-support);
 - authenticated [GitHub CLI](https://cli.github.com/);
 - Python 3.11 or newer.
 
