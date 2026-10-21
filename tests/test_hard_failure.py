@@ -200,6 +200,14 @@ class HandoffFixture(unittest.TestCase):
             "owner/repo", 7, repository_path=self.repo
         )["status"]
 
+    def acquire(self) -> str:
+        result = storage.acquire_worker_lock(
+            "owner/repo", 7, campaign_id=CAMPAIGN_ID,
+            acquired_at=T0, repository_path=self.repo,
+        )
+        self.assertTrue(result["acquired"])
+        return result["owner_token"]
+
     def handoff(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
             [
@@ -250,6 +258,70 @@ class HardFailureHandoffTests(HandoffFixture):
             record, repository="owner/repo", pull_request_number=7
         )
         self.assertEqual(self.lock_status(), "absent")
+
+    def test_already_owned_denial_terminalizes_without_reacquisition(self) -> None:
+        token = self.acquire()
+        result = self.handoff(
+            "--campaign-id", CAMPAIGN_ID, "--owner-token", token,
+            "--reason", "host_authorization_denied",
+            "--detail", "host refused to start worker-decision",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["recorded"])
+        self.assertEqual(payload["ownership"], "released")
+        self.assertTrue(payload["scheduler_cleanup_authorized"])
+        self.assertEqual(self.campaign()["status"], model.HARD_FAILED)
+        self.assertEqual(self.campaign()["rounds_used"], 3)
+        self.assertEqual(self.lock_status(), "absent")
+        duplicate = self.handoff(
+            "--campaign-id", CAMPAIGN_ID, "--owner-token", token,
+            "--reason", "host_authorization_denied", "--detail", "duplicate",
+        )
+        self.assertFalse(json.loads(duplicate.stdout)["recorded"])
+        self.assertEqual(self.lock_status(), "absent")
+
+    def test_wrong_token_or_stale_delivery_preserves_current_owner(self) -> None:
+        token = self.acquire()
+        for campaign_id, supplied in (
+            (CAMPAIGN_ID, "wrong-token"),
+            ("crp-20260914T120000Z-ffffff", token),
+        ):
+            with self.subTest(campaign_id=campaign_id, token=supplied):
+                before = self.campaign_path().read_bytes()
+                result = self.handoff(
+                    "--campaign-id", campaign_id, "--owner-token", supplied,
+                    "--reason", "host_authorization_denied", "--detail", "d",
+                )
+                payload = json.loads(result.stdout)
+                self.assertFalse(payload["recorded"])
+                self.assertEqual(payload["outcome"], "local_fail_closed")
+                self.assertFalse(payload["scheduler_cleanup_authorized"])
+                self.assertEqual(self.campaign_path().read_bytes(), before)
+                storage.verify_owner("owner/repo", 7, token, repository_path=self.repo)
+
+    def test_already_owned_malformed_or_replaced_campaign_is_preserved(self) -> None:
+        token = self.acquire()
+        for record in (
+            {"schema_version": 999, "campaign_id": CAMPAIGN_ID},
+            model.new_campaign(
+                campaign_id="crp-20260914T120000Z-ffffff", repository="owner/repo",
+                pull_request_number=7, created_at=T0, max_rounds=3,
+                model="m", reasoning_level="low", interval_minutes=30,
+                reviewer_logins=["chatgpt-codex-connector"],
+                approval_logins=["chatgpt-codex-connector"],
+            ),
+        ):
+            with self.subTest(record=record):
+                storage.save_json(self.campaign_path(), record)
+                before = self.campaign_path().read_bytes()
+                result = self.handoff(
+                    "--campaign-id", CAMPAIGN_ID, "--owner-token", token,
+                    "--reason", "host_authorization_denied", "--detail", "d",
+                )
+                self.assertFalse(json.loads(result.stdout)["recorded"])
+                self.assertEqual(self.campaign_path().read_bytes(), before)
+                storage.verify_owner("owner/repo", 7, token, repository_path=self.repo)
 
     def test_repeated_handoff_delivery_is_a_non_counting_idle_exit(self) -> None:
         first = self.handoff(
@@ -407,6 +479,72 @@ class HandoffFailureReportingTests(HandoffFixture):
         record = self.campaign()
         self.assertEqual(record["status"], model.HARD_FAILED)
         self.assertEqual(record["rounds_used"], 3)
+        self.assertEqual(self.lock_status(), "active")
+
+    def test_already_owned_path_never_attempts_acquisition(self) -> None:
+        token = self.acquire()
+        with mock.patch.object(storage, "acquire_worker_lock") as acquire:
+            result = self.call(owner_token=token)
+        acquire.assert_not_called()
+        self.assertTrue(result["recorded"])
+        self.assertEqual(result["ownership"], "released")
+
+    def test_already_owned_persistence_failure_retains_exact_lock(self) -> None:
+        token = self.acquire()
+        with mock.patch.object(
+            storage, "transition_active_campaign", side_effect=OSError("write blocked")
+        ):
+            result = self.call(owner_token=token)
+        self.assertEqual(result["outcome"], "persistence_unconfirmed")
+        self.assertEqual(result["ownership"], "retained")
+        self.assertEqual(self.campaign()["rounds_used"], 0)
+        storage.verify_owner("owner/repo", 7, token, repository_path=self.repo)
+
+    def test_already_owned_reserved_ambiguity_is_not_masked(self) -> None:
+        token = self.acquire()
+        record = model.reserve_request(
+            self.campaign(), head_oid="h1", reserved_at=T0,
+            snapshot={"complete": True, "head_oid": "h1", "reactions": [],
+                      "reviews": [], "threads": [], "comments": []},
+        )
+        storage.save_json(self.campaign_path(), record)
+        before = self.campaign_path().read_bytes()
+        result = self.call(owner_token=token, reason="host_authorization_denied")
+        self.assertFalse(result["recorded"])
+        self.assertEqual(result["ownership"], "retained")
+        self.assertFalse(result["scheduler_cleanup_authorized"])
+        self.assertEqual(self.campaign_path().read_bytes(), before)
+        storage.verify_owner("owner/repo", 7, token, repository_path=self.repo)
+
+    def test_already_owned_release_failure_retains_durable_failure(self) -> None:
+        token = self.acquire()
+        with mock.patch.object(storage, "release_lock", side_effect=OSError("release blocked")):
+            result = self.call(owner_token=token)
+        self.assertTrue(result["recorded"])
+        self.assertEqual(result["ownership"], "retained")
+        self.assertFalse(result["scheduler_cleanup_authorized"])
+        self.assertEqual(self.campaign()["status"], model.HARD_FAILED)
+        storage.verify_owner("owner/repo", 7, token, repository_path=self.repo)
+
+    def test_campaign_identity_is_rechecked_inside_guarded_transition(self) -> None:
+        token = self.acquire()
+        transition = storage.transition_active_campaign
+
+        def replace_then_transition(*args, **kwargs):
+            replacement = "crp-20260914T120000Z-ffffff"
+            self.save_campaign(replacement)
+            path = storage.lock_path("owner/repo", 7, repository_path=self.repo)
+            lock = storage.load_json(path)
+            lock["campaign_id"] = replacement
+            storage.save_json(path, lock)
+            return transition(*args, **kwargs)
+
+        with mock.patch.object(storage, "transition_active_campaign", side_effect=replace_then_transition):
+            result = self.call(owner_token=token)
+        self.assertFalse(result["recorded"])
+        self.assertEqual(result["ownership"], "retained")
+        self.assertEqual(self.campaign()["status"], model.ACTIVE)
+        self.assertEqual(self.campaign()["rounds_used"], 0)
         self.assertEqual(self.lock_status(), "active")
 
     def test_boundary_refuses_unknown_reason_before_acquiring(self) -> None:

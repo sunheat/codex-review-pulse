@@ -102,13 +102,21 @@ before anything else, then end the delivery per its result:
 python S/owned.py hard-fail --repo OWNER/REPO --pr NUMBER --campaign-id CRPCAMPAIGNID --reason REASON_CODE --detail "CONCISE HOST DIAGNOSTIC"
 ```
 
+If this delivery already acquired ownership in step 3 and the host definitively
+refused to start step 4 before any external mutation, add
+`--owner-token OWNER_TOKEN` using the exact token returned to this delivery.
+The handoff verifies that token and matching active campaign rather than
+reacquiring its own lock. Never obtain a token by inspecting another delivery's
+lock. Omit the option before ownership acquisition. Never use it for an unknown
+worker-decision result or while any mutation-capable operation may still run.
+
 - `{"recorded": true, "ownership": "released", "scheduler_cleanup_authorized": true}`:
   the campaign durably terminalized as `hard_failed` and the entire remaining
   round budget is forfeited. Perform the Automation cleanup (section 8) once,
   then stop.
 - `{"recorded": true, "ownership": "retained", ...}`: the failure state is
   durable but the release could not be confirmed. Perform the retained-lock
-  quarantine checks (section 9) only if this handoff acquired the lock, then
+  quarantine checks (section 9) only if this delivery acquired the lock, then
   stop for [recovery](recovery.md). No cleanup.
 - `{"recorded": false, ...}` (busy, invalid, terminal, absent, or mismatched
   acquisition): a non-counting idle exit. Stop. Never claim the campaign was

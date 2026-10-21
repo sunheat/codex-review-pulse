@@ -912,6 +912,7 @@ def record_hard_failure(
     campaign_id: str,
     reason: str,
     detail: str,
+    owner_token: str | None = None,
     repository_path: str | Path = ".",
     now: Callable[[], str] | None = None,
 ) -> dict[str, Any]:
@@ -925,8 +926,9 @@ def record_hard_failure(
     or after an operation is confirmed not to have occurred. It performs local
     durable work only, no GitHub observation or mutation:
 
-    1. acquires the same worker ownership predicate as any scheduled delivery
-       (busy, invalid, terminal, absent, or mismatched campaigns exit idle);
+    1. verifies the supplied exact current owner token, or acquires the same
+       worker ownership predicate as any scheduled delivery when no token is
+       supplied (busy, invalid, terminal, absent, or mismatched campaigns exit idle);
     2. applies one guarded transition that forfeits the entire remaining round
        budget and terminalizes the campaign as ``hard_failed`` with the reason
        code and concise diagnostic;
@@ -943,14 +945,22 @@ def record_hard_failure(
         raise ValueError("Hard-failure detail must be a non-empty string")
     at = (now or _utc_now)()
 
+    token = owner_token
     try:
-        acquisition = storage.acquire_worker_lock(
-            canonical,
-            pr_number,
-            campaign_id=campaign_id,
-            acquired_at=at,
-            repository_path=repository_path,
-        )
+        if token is not None:
+            metadata = storage.ensure_active_campaign_owner(
+                canonical, pr_number, token, repository_path=repository_path
+            )
+            if metadata["campaign_id"] != campaign_id:
+                raise RuntimeError("Hard-failure delivery belongs to a different campaign")
+        else:
+            acquisition = storage.acquire_worker_lock(
+                canonical,
+                pr_number,
+                campaign_id=campaign_id,
+                acquired_at=at,
+                repository_path=repository_path,
+            )
     except Exception as error:  # noqa: BLE001 - fail closed
         return {
             "recorded": False,
@@ -959,24 +969,28 @@ def record_hard_failure(
             "ownership": "not_acquired",
             "scheduler_cleanup_authorized": False,
         }
-    if not acquisition.get("acquired"):
-        return {
-            "recorded": False,
-            "outcome": "idle_exit",
-            "acquisition_status": acquisition.get("status"),
-            "ownership": "not_acquired",
-            "scheduler_cleanup_authorized": False,
-        }
-    token = acquisition["owner_token"]
+    if token is None:
+        if not acquisition.get("acquired"):
+            return {
+                "recorded": False,
+                "outcome": "idle_exit",
+                "acquisition_status": acquisition.get("status"),
+                "ownership": "not_acquired",
+                "scheduler_cleanup_authorized": False,
+            }
+        token = acquisition["owner_token"]
+
+    def transition(record: dict[str, Any]) -> dict[str, Any]:
+        if record["campaign_id"] != campaign_id:
+            raise RuntimeError("Hard-failure delivery belongs to a different campaign")
+        return model.hard_fail(record, at=at, reason=reason, detail=detail)
 
     try:
         terminal = storage.transition_active_campaign(
             canonical,
             pr_number,
             owner_token=token,
-            transition=lambda record: model.hard_fail(
-                record, at=at, reason=reason, detail=detail
-            ),
+            transition=transition,
             repository_path=repository_path,
         )
     except Exception as error:  # noqa: BLE001 - persistence unconfirmed
@@ -1060,6 +1074,7 @@ def main() -> None:
     hard_fail.add_argument("--pr", required=True, type=int)
     hard_fail.add_argument("--repository-path", default=".")
     hard_fail.add_argument("--campaign-id", required=True)
+    hard_fail.add_argument("--owner-token", help="Exact token already held by this delivery")
     hard_fail.add_argument("--reason", required=True, choices=sorted(model.HARD_FAILURE_REASONS))
     hard_fail.add_argument("--detail", required=True)
 
@@ -1103,6 +1118,7 @@ def main() -> None:
             campaign_id=args.campaign_id,
             reason=args.reason,
             detail=args.detail,
+            owner_token=args.owner_token,
             repository_path=args.repository_path,
         )
     else:
