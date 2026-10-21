@@ -111,14 +111,29 @@ live under [`skills/codex-review-pulse/scripts/`](skills/codex-review-pulse/scri
 
 ## Development and verification
 
-```text
+Use focused local tests while developing a bounded change, then cover the
+relevant final state. This command is one example of focused discovery, not a
+test mapping for every change:
+
+```powershell
+python -m unittest discover -s tests -p test_runtime_contract.py -v
+```
+
+The complete regression suite and other repository checks are available when
+the change or applicable acceptance requirements call for them:
+
+```powershell
 python -m unittest discover -s tests -v
 python -m compileall -q skills/codex-review-pulse/scripts scripts tests
 python scripts/validate_repository.py
 ```
 
-CI runs these network-free checks on Windows and Ubuntu with Python 3.11 and
-3.12. They do not authenticate to GitHub or exercise native Codex Automations.
+CI runs these network-free checks on Ubuntu, macOS, and Windows with Python
+3.11 and 3.12, plus a separate Windows configuration-hook regression job; see
+[the workflow](.github/workflows/ci.yml). They do not authenticate to GitHub
+or exercise native Codex Automations. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for detailed test-selection guidance and the distinction between local checks
+and complete final-head CI acceptance.
 
 Contributions are welcome within the documented scope; see
 [CONTRIBUTING.md](CONTRIBUTING.md). Report security-sensitive findings through

@@ -106,6 +106,16 @@ is development work.
 
 is product or canary work.
 
+### Development test execution
+
+When developing Codex Review Pulse itself, choose tests by changed behavior
+and risk, then consolidate relevant validation for a batch against its final
+proposed state. Editing, fixing another review finding, committing, or pushing
+does not itself require the complete suite. Expand coverage for safety-sensitive
+changes and run the full suite when the affected scope cannot reasonably be
+bounded or an applicable requirement demands it. Follow the detailed policy in
+`CONTRIBUTING.md`.
+
 ### Product or canary mode
 
 Enter product mode only when the user explicitly requests a live run, canary, pilot, trial, or equivalent action.
