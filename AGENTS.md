@@ -34,6 +34,28 @@ That is an accepted design tradeoff, not a defect that must be hidden behind aut
 If a proposed change appears to require durable recovery phases, transaction journals, TTL leases, heartbeat protocols, successor scheduling, persisted batches, or similar machinery, first identify the concrete safety invariant that cannot be preserved by the simpler design.
 Availability, convenience, or more transparent automatic recovery alone is not sufficient justification.
 
+## Supported host
+
+The only currently supported end-to-end v2 host is the Codex app / Codex desktop runtime using native Codex Automations and packaged Agent Skills.
+
+The launcher is primarily model-executed packaged-skill instructions that configure the native Codex Automation capability exposed by the Codex app.
+Repository-side deterministic CLI helpers support the skill and its tests; they are not an alternative end-to-end runtime.
+
+Codex CLI, Pi, OMP, ordinary ChatGPT scheduled tasks, cron, GitHub Actions, Windows Task Scheduler, and generic scheduler systems are not alternative v2 hosts.
+Do not build a repository-side scheduler client, private HTTP API, automation SDK, generic scheduler adapter, or mock adapter to substitute for native host integration.
+If the native host does not expose, cannot validate, or rejects requested configuration, report an explicit native-host limitation; do not emulate the configuration by merely storing requested values in campaign state.
+
+### Execution environment gate
+
+Launcher and scheduled-worker execution starts with an environment gate, before PR inspection, GitHub mutation, sub-agent work, or extended analysis.
+Where the native host authoritatively identifies the current task mode, Codex mode is required and ChatGPT, including ChatGPT Work, is rejected; where it authoritatively exposes effective permissions, Full access — unrestricted sandbox access and no approval prompts — is required.
+Values the host does not expose are unknown and are never inferred from model name, task title, directory, global settings, tool availability, or a different task.
+
+A positively identified violation, or an explicit host-generated authorization, approval, policy, or sandbox denial observed before any external product mutation (or after an operation is confirmed not to have occurred), is a hard failure with a closed set of reason codes: `unsupported_execution_mode`, `insufficient_effective_access`, `host_authorization_denied`.
+Through one owned, idempotent handoff the matching campaign forfeits its entire remaining round budget (`rounds_used = max_rounds`) and durably terminalizes as `hard_failed` with the reason code and concise diagnostic detail; a launcher rejection before campaign creation creates no campaign state and no Automation.
+A lock owned by another worker remains a non-counting idle exit, and duplicate or stale deliveries never modify a newer campaign.
+Generic permission, network, authentication, or timeout errors, and denials surfacing after an operation whose outcome may be ambiguous, are not hard failures and keep the existing fail-closed behavior.
+
 ## Authority and runtime truth
 
 Tracked repository files are authoritative for product architecture, implementation, tests, packaging, and documented behavior.
@@ -84,6 +106,16 @@ is development work.
 
 is product or canary work.
 
+### Development test execution
+
+When developing Codex Review Pulse itself, choose tests by changed behavior
+and risk, then consolidate relevant validation for a batch against its final
+proposed state. Editing, fixing another review finding, committing, or pushing
+does not itself require the complete suite. Expand coverage for safety-sensitive
+changes and run the full suite when the affected scope cannot reasonably be
+bounded or an applicable requirement demands it. Follow the detailed policy in
+`CONTRIBUTING.md`.
+
 ### Product or canary mode
 
 Enter product mode only when the user explicitly requests a live run, canary, pilot, trial, or equivalent action.
@@ -96,7 +128,9 @@ Do not silently substitute a stale installed copy when the user intends to test 
 Authorization applies only to the requested campaign and its required product behavior.
 It is not blanket authorization for unrelated repository or GitHub cleanup.
 
-## Development skills
+## Agent skills
+
+### Development skills
 
 Before non-trivial design, implementation, debugging, refactoring, or review, inspect the development skills available in the current harness.
 
@@ -118,11 +152,20 @@ They must not:
 
 A user must be able to start Codex Review Pulse with a simple instruction and specify at least:
 
-- the target GitHub pull request;
 - the maximum number of effective rounds;
 - the scheduled-worker model;
 - the reasoning or thinking level;
 - the interval between scheduled wakes.
+
+The target GitHub pull request may be explicitly supplied, in which case it is authoritative and never silently replaced.
+If the target is omitted, the launcher discovers OPEN pull requests in the current bound repository:
+
+- exactly one -> select it automatically;
+- two or more -> ask the user to choose;
+- zero -> report and stop;
+- discovery failure -> report and stop.
+
+Existing campaign state for another PR is not target-selection evidence.
 
 The current hard safety cap is 10 effective rounds.
 Accept values from 1 through 10.
@@ -234,16 +277,26 @@ Except for the safely scoped best-effort terminal scheduler cleanup described un
 
 If the completion or outcome of such a product-relevant mutating operation remains uncertain, the attempt is ambiguous and the lock remains held.
 
-### Manual recovery
+### Manual recovery and retirement
 
-A permanent lock is cleared only through explicit user-authorized recovery.
+A permanent lock is removed automatically only by its proven current owner through a clean product transition.
 
-Manual clearing is a human safety boundary, not automatic stale-lock detection and not fencing.
+Outside normal owner release, a permanent lock may be removed only through an explicit user-authorized recovery or campaign-retirement operation.
+
+Both are human safety boundaries. Neither is automatic stale-owner detection, automatic recovery, or fencing.
+
+Before either operation may remove ownership, the user must establish that the previous owner and every product-mutating child, subprocess, and in-flight operation can no longer continue.
 
 Where the platform exposes reliable cancellation or execution-state controls, use them.
 Where it does not, do not invent heartbeat, provenance, timing, or conversation-liveness machinery to manufacture certainty.
 
-The user must be told that clearing is safe only when the previous owner can no longer continue mutating the campaign.
+Lock-only recovery preserves the campaign. A later matching worker may start from fresh authoritative GitHub and Git state; it never resumes prior model reasoning or an abandoned in-memory batch.
+
+Campaign retirement removes campaign authority. Old or late deliveries are stale and must not recreate the retired campaign or ownership. A later launcher may create a new campaign through normal setup.
+
+Malformed or unsupported campaign state is preserved for inspection and cannot be retired through the normal retirement primitive.
+
+An invalid, mismatched, or partial-transition lock cannot be bypassed through campaign retirement. Recover the lock explicitly first, then inspect the surviving campaign and choose preservation, rollover, or retirement.
 
 A valid lock with incomplete or missing ownership metadata or incomplete campaign initialization remains recoverable through the same explicit human process.
 
@@ -251,6 +304,18 @@ Where reliable owner identity exists, recovery must avoid accidentally clearing 
 
 After recovery, the next worker starts from fresh authoritative GitHub and Git state.
 It does not resume the prior model's reasoning, frozen batch, or abandoned worktree.
+
+### Retained-lock quarantine
+
+One narrow exception exists for an owned delivery that has already entered a manual-recovery-required outcome while holding the permanent lock.
+When deterministic read-only local verification proves that the delivery's exact owner token still owns the lock, it may make one best-effort pause attempt against its directly self-identified exact native Automation before stopping for manual recovery.
+
+The exact native self identity must come directly from authoritative host metadata for the current delivery; it is never reconstructed through Automation listing, search, naming, or matching, and no repository-side scheduler mechanism is added in its place.
+If the identity is not directly exposed, or the pause attempt is rejected, unsupported, or ambiguous, the delivery reports the limitation, instructs the user to pause the exact Automation manually, and stops.
+
+Quarantine never releases or recovers the lock, never modifies campaign state, never refunds a round, never terminalizes the campaign, never resumes work, and never replaces normal terminal cleanup.
+Later busy deliveries never quarantine.
+Correctness does not depend on quarantine succeeding; the retained permanent lock remains the safety boundary.
 
 ## Round semantics
 
@@ -261,7 +326,10 @@ An effective round is an attempt that commits to one of two external product act
 
 Read-only admission and snapshot construction occur before round consumption.
 
-A round is consumed after ownership and authoritative revalidation establish that an effective action is required, but before remediation work or review-request creation begins.
+A review-request round is consumed at request commitment, inside the owned boundary, before the external mutation.
+
+A remediation round is consumed by the deterministic remediation finalizer, after complete validation of the prepared semantic authorization unit and before the first external product mutation.
+Deterministic remediation preparation and speculative semantic work consume no remediation round.
 
 Code edits, commits, publication, issue creation, review requests, and thread resolution belong to the consumed attempt.
 
@@ -290,6 +358,28 @@ An operation that updates refs, fetch metadata, worktrees, campaign files, sched
 
 Do not treat a command as read-only merely because its purpose is observation.
 
+## Deterministic product boundaries
+
+Product mutations flow through a few narrow deterministic owned boundaries, not composable mutating CLIs.
+
+**Owned campaign creation.** Normal setup and rollover derive all creation evidence themselves from one fresh post-acquisition authoritative GitHub snapshot taken while setup or rollover ownership is held. Callers cannot select the snapshot, its `created_at`, lifecycle-reaction baselines, canonical target evidence, or head evidence. Campaign identity is preallocated on the setup lock and is never regenerated from snapshot server time. A creation lifecycle-reaction baseline of pre-existing applicable reactions does not prove review-in-progress or create attribution waiting; PR-level Codex THUMBS_UP remains approval independently of that baseline. Unresolved review threads remain immediately actionable.
+
+**Owned worker decision.** Each acquired delivery makes one deterministic decision through a single owned boundary: campaign-wide durable-local preflight, one fresh owned S1 observation, guarded head synchronization, the pure decision from the post-sync campaign, then request commitment immediately followed by the existing deterministic committed-request executor and its final classified/disposed result, deterministic remediation preparation with ownership release, terminal confirmation, or safe local release/retention. The pre-ownership admission snapshot is S0 and authorizes only cheap rejection, preliminary validation, and diagnostics — never synchronization, decisions, commitment, or terminalization, even at a matching head. The boundary performs the ownership disposition itself and reports facts, not recommendations. An unknown caller-visible result allows no compensating action and no second invocation.
+
+**Deterministic remediation transaction.** Once the owned decision selects remediation, it hands off into the deterministic remediation subprotocol, and every remediation phase, authority, commitment, mutation-ordering, result-classification, bookkeeping, and ownership-disposition decision after that handoff is deterministic. Preparation runs while ownership is held (freeze the exact batch, capture the campaign-source witness, fetch remote Git state, create the isolated worktree, write the controller-owned packet), consumes no round, performs no external product mutation, and releases ownership before returning the semantic-work action; the packet carries no owner token. The model then performs speculative semantic and code work in the registered worktree without any ownership and submits one bounded semantic proposal covering the exact prepared targets one-for-one. One model-visible finalizer invocation acquires ownership internally, validates packet, proposal, worktree, and fresh external evidence, performs the campaign-source compare-and-swap, derives the proposal-bound tree from the complete tracked plus non-ignored worktree delta, creates the hook-free local commit when publication is required, validates the final remote head, durably commits the remediation round, executes the fixed external mutation order (push, deferred issues, thread resolutions), stops the external suffix on the first definitive failure or ambiguity, persists the mandatory campaign bookkeeping including direct remediation exhaustion when deterministically applicable, and disposes ownership before returning an informational result. The model never carries finalization ownership, supplies authoritative tree identity, selects publication paths, sequences authoritative mutation helpers, or decides ambiguity, continuation, bookkeeping, or release. The former model-orchestrated long-lock remediation path is removed, not preserved for compatibility. Speculative worktrees, preparation packets, snapshots, and unpublished hook-free commits are disposable artifacts; deleting them never changes what authoritative mutation the campaign may perform.
+
+**Effective-action commitment before external work.** Request reservations are durably committed inside the owned boundary before any request work begins, and remediation rounds are durably committed inside the deterministic finalizer before the first external remediation mutation begins. A crash after commitment leaves the round consumed and never resumes an in-memory batch.
+
+**RESERVED durable handoff.** The durable per-head RESERVED guard is the authoritative handoff to the request executor, identified by matching campaign identity, owner lock, and the exact guard — no action IDs, reservation tokens, or handoff tokens. The executor establishes authority from durable state and never reserves or consumes again.
+
+**Terminal proof and disposition.** Terminal decisions carry a deterministic basis: `durable_local` when current durable campaign state alone proves terminality (for example campaign-wide RESERVED ambiguity, inspected across every guard), `observation` when the conclusion also depends on current GitHub state. Observation-derived terminalization is confirmed by exactly one bounded fresh confirmation snapshot; a contradicting or failed confirmation does not terminalize. Callers cannot choose terminal status, proof basis, or disposition. Scheduler cleanup is authorized only after a release-permitted terminal outcome and confirmed matching release.
+
+**Successful final-remediation exhaustion.** When a delivery's remediation batch completes successfully under the deterministic finalizer and durable campaign state alone proves the last effective round was consumed with no other terminal result, no open request window, and no unclassified request attempt on any head, the finalizer terminalizes `rounds_exhausted` in the same invocation, releases the matching terminal lock, and only then authorizes best-effort scheduler cleanup. No later delivery is required merely to discover that the successful final remediation used the last round. Clean-unsuccessful and ambiguous attempts keep their existing release and retention semantics, and correctness never depends on this finalization: a later delivery terminalizes the same exhausted state through the owned-worker decision.
+
+**Response grace.** A request may become `codex_review_service_unresponsive` only at or after `max(interval_minutes, 20)` minutes of authoritative elapsed grace, independent of the scheduler cadence. Effective-round exhaustion prevents new effective actions but never erases an already-started asynchronous review lifecycle: an outstanding current-head request window, applicable 👀 within it, approval, and attributable completion keep precedence over generic exhaustion, and observing them consumes no round. With no outstanding request window, an applicable but current-head-unattributable Codex EYES reaction does not keep an exhausted campaign waiting: exhaustion terminalizes `rounds_exhausted`, and the reaction still proves neither approval nor review progress.
+
+The remediation transaction is deterministic around semantic work through the deterministic remediation finalizer (one-commit one-push Fix-now publication of the exact proposal-bound tree, deferred-issue ensure/create with marker plus evidence-fingerprint identity, and independent target-specific review-thread resolution, each with fresh evidence revalidation, a final ownership check immediately before the mutation, at most one mutation attempt, and confirmed / definitively-failed / ambiguous classification). The request reservation-to-execution handoff is deterministically composed inside one owned-worker invocation; the existing committed-request executor transaction semantics remain intact. Semantic remediation and native Automation lifecycle operations remain model/host-mediated and outside this slice. Validation of this changed build requires a separately authorized live canary.
+
 ## Applicable Codex evidence
 
 Only unresolved review threads whose root review author can be attributed through stable GitHub identity to the configured Codex reviewer are applicable for automatic remediation.
@@ -300,8 +390,13 @@ Human, unknown, and merely lookalike authors must not be used to authorize autom
 
 ## Review lifecycle
 
-Codex lifecycle evidence must apply to the current PR head or current review lifecycle.
-Older-head reactions are not authoritative for the current head.
+Codex EYES and non-approval completion evidence must apply to the current PR
+head or current review lifecycle. A THUMBS_UP reaction on the PR itself from a
+configured Codex approval actor approves the entire PR. It requires no commit
+linkage, request guard, response window, timestamp comparison, or exclusion
+from creation/request baselines. A later head change does not invalidate a
+still-present PR-level THUMBS_UP. Human or unknown actors and comment reactions
+do not authorize PR-wide approval.
 
 Distinguish:
 
@@ -317,7 +412,7 @@ Applicable review feedback must still be processed even if an older 👀 remains
 
 The campaign succeeds early only when:
 
-- applicable current-head Codex approval is proven; and
+- applicable Codex PR-level THUMBS_UP or a current-head approved review is proven; and
 - zero applicable unresolved Codex review threads remain.
 
 A 👍 must never hide applicable unresolved review feedback.
@@ -327,20 +422,20 @@ Further review-request behavior follows campaign policy and the review-request r
 
 ## Remediation batches
 
-Each remediation attempt works against a bounded in-memory set of applicable unresolved Codex review threads from a stable current-head observation.
+Each remediation attempt works against a bounded prepared set of applicable unresolved Codex review threads frozen by deterministic preparation from a stable current-head observation.
 
 Do not continuously absorb newly arriving review feedback into the same attempt.
 
-The in-memory batch exists only for the lifetime of that attempt.
-If the worker is interrupted, the batch is discarded.
-A later attempt observes the current world again.
+The prepared batch is fixed for the lifetime of its semantic proposal; the packet and frozen snapshot that record it are disposable speculative artifacts, not durable workflow state.
+If the worker is interrupted, the proposal is discarded.
+A later attempt observes the current world again and prepares fresh.
 
-Before making a triage outcome externally visible, re-observe the exact target thread and the relevant current-head state.
+Before making a triage outcome externally visible, the deterministic finalizer re-observes the exact target thread and the relevant current-head state.
 
-If external change has invalidated the evidence supporting that outcome, do not apply the stale outcome.
-Either revalidate the outcome within the same in-memory attempt or end the attempt cleanly and allow a later round to work from fresh authoritative state.
+If external change has invalidated the evidence supporting that outcome, the whole proposal is stale and nothing is applied.
+The attempt ends cleanly and a later round works from fresh authoritative state.
 
-A remediation attempt is successfully complete only when every thread in its frozen in-memory batch that remains unresolved has a verified outcome.
+A remediation attempt is successfully complete only when every thread in its exact prepared batch that remains unresolved has a verified outcome.
 
 A thread may be complete because:
 
@@ -401,7 +496,7 @@ When:
 
 - zero applicable unresolved Codex review threads remain;
 - no applicable current-head review is still in progress;
-- current-head approval has not been achieved;
+- applicable Codex approval has not been achieved;
 - and no earlier current-head review-request attempt remains outstanding or has an ambiguous creation result;
 
 campaign policy determines whether to create another Codex review request.
@@ -418,10 +513,6 @@ Do not duplicate the same review-request attempt.
 
 Do not post another request while an earlier current-head request remains outstanding or while its creation result remains ambiguous.
 
-Once an earlier current-head review lifecycle is definitively complete without approval and no applicable unresolved threads remain, campaign policy may allow a later `@codex review` request for the same head as a new effective round.
-
-This is a new review attempt, not a duplicate of an outstanding one.
-
 Review-request creation must support authoritative re-observation and deterministic identity where the platform permits it.
 
 An ambiguous result must never trigger a blind automatic repost.
@@ -431,6 +522,28 @@ If the system still cannot determine whether the request mutation occurred, fail
 If campaign policy forbids automatic review requests, wait for user or external action rather than overriding that policy.
 
 Do not add retry phases or waiting state solely to manage review-request timing.
+
+### Durable per-head request policy
+
+The following decisions are durable product policy for v2 campaigns.
+
+1. For each combination of campaign and authoritative PR head OID, the campaign may begin at most one automatic `@codex review` request-creation attempt.
+   A later completed lifecycle without approval does not authorize a second automatic request for the same campaign and head.
+2. The attempt begins when the campaign durably commits to it, before the external mutation: consume the effective round and reserve the per-head allowance.
+   Neither is restored merely because final revalidation prevents the POST, creation definitively fails, or the creation result is ambiguous.
+   A consumed request attempt must not be repurposed into a remediation batch or another effective action.
+3. Manual requests and requests created by another campaign neither consume nor block the current campaign's per-head allowance.
+   Cross-request and cross-campaign coordination are outside the supported product scope.
+4. A completed review lifecycle that predates the campaign's automatic request does not consume its allowance and does not by itself terminate the campaign as completed without approval.
+5. After the campaign creates its request, temporally eligible completion evidence with neither approval nor applicable unresolved feedback terminates as `review_completed_without_approval`.
+6. After at least one configured interval, an eligible observation with no attributable Codex response terminates as `codex_review_service_unresponsive`.
+7. The per-head request guard survives head changes and explicit manual recovery.
+   Returning to a previously used head does not restore its allowance, and a superseded request response window does not reactivate.
+8. Reaching the effective-round limit prevents new effective actions.
+   It does not prevent non-counting observation of an asynchronous request already started within the budget.
+9. The product does not establish provenance among overlapping external review requests.
+   Negative request outcomes require authoritative temporal eligibility within the campaign request's response window.
+   The runtime may use bounded temporal attribution supported by platform evidence without claiming exact request causality.
 
 ## Failure semantics
 
@@ -506,6 +619,10 @@ Failure or ambiguity of best-effort scheduler cleanup does not by itself make an
 
 Cleanup must remain scoped to the current campaign, and stale-delivery guards must make either cleanup outcome safe.
 
+Normal worker cleanup additionally requires durable terminality whose disposition permits release plus a confirmed matching ownership release; an active fully-consumed campaign with an outstanding current-head request window stays scheduled for non-counting lifecycle observation, and a terminal campaign with retained ambiguity is never cleaned.
+
+Recurring-Automation setup results are classified only from authoritative native-host evidence as confirmed compliant, definitively failed, or ambiguous. Ambiguous setup preserves the active campaign and matching lock fail closed; lock-only recovery after it is a resume only when the campaign is active and the conditions for a compliant existing Automation are established. A durably terminal `ambiguous_interruption` campaign has no resume path: recovery removes only the lock, and a new campaign requires explicit retirement first. An active campaign carrying unresolved durable RESERVED state is not safely resumed by lock deletion alone; the next worker re-detects the ambiguity and terminalizes again.
+
 The effective-round cap limits product attempts, not necessarily non-counting wakes such as:
 
 - lock-blocked delivery;
@@ -537,7 +654,7 @@ Tests should prove the invariants above, especially:
 - stale scheduler delivery cannot control a newer campaign;
 - round accounting remains bounded across failures;
 - human, unknown, or lookalike reviewer identities cannot authorize automatic mutation or completion;
-- old lifecycle evidence cannot incorrectly block or approve a current head;
+- old lifecycle evidence cannot incorrectly prove current-head progress; PR-level Codex THUMBS_UP remains PR-wide approval independently of head changes;
 - stale triage evidence cannot be used to resolve a thread after relevant external change;
 - completion is not mistaken for approval;
 - ambiguous external results never trigger blind automatic retries, and duplicate side effects are avoided through authoritative re-observation and deterministic identity where the platform supports it;

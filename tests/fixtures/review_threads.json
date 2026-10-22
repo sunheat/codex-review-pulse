@@ -8,6 +8,8 @@
         {
           "id": "C1",
           "author": {"login": "chatgpt-codex-connector"},
+          "body": "Fix the null check here.",
+          "updatedAt": "2026-09-14T12:00:00Z",
           "url": "https://example.test/t_codex"
         }
       ]
@@ -22,6 +24,8 @@
         {
           "id": "C2",
           "author": {"login": "ChatGPT-Codex-Connector[bot]"},
+          "body": "Fix the null check here.",
+          "updatedAt": "2026-09-14T12:00:00Z",
           "url": "https://example.test/t_codex_bot"
         }
       ]
@@ -36,6 +40,8 @@
         {
           "id": "C3",
           "author": {"login": "human-reviewer"},
+          "body": "A human comment.",
+          "updatedAt": "2026-09-14T12:00:00Z",
           "url": "https://example.test/t_human"
         }
       ]
