@@ -71,6 +71,10 @@ def main() -> None:
     )
     retire.add_argument("--expected-campaign-id", required=True)
     retire.add_argument(
+        "--expected-lock-witness",
+        help="Raw lock witness from inspection, required for retained-lock retirement",
+    )
+    retire.add_argument(
         "--user-authorized-retirement",
         action="store_true",
         required=True,
@@ -129,12 +133,17 @@ def main() -> None:
             if args.retained_lock
             else storage.retire_campaign_without_lock
         )
+        lock_witness = (
+            {"expected_lock_witness": args.expected_lock_witness}
+            if args.retained_lock else {}
+        )
         print(
             json.dumps(
                 retire(
                     args.repo,
                     args.pr,
                     expected_campaign_id=args.expected_campaign_id,
+                    **lock_witness,
                     user_authorized_retirement=args.user_authorized_retirement,
                     repository_path=args.repository_path,
                 ),

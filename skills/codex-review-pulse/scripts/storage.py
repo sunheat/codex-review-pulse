@@ -1110,13 +1110,14 @@ def retire_campaign_retaining_lock(
     pr_number: int,
     *,
     expected_campaign_id: str,
+    expected_lock_witness: str | None = None,
     user_authorized_retirement: bool,
     repository_path: str | Path = ".",
 ) -> dict[str, Any]:
     """Explicit user-authorized retirement while the matching valid lock remains.
 
-    Requires the exact valid expected campaign, a semantically valid permanent
-    lock whose campaign identity matches, and agreeing repository/PR identity.
+    Requires the exact valid expected campaign and the inspected raw lock
+    witness, plus a semantically valid matching permanent lock.
     Removal order is fixed: campaign record first, lock last. A crash between
     the two leaves campaign-absent + lock-present, which stays fail-closed and
     requires explicit lock recovery. Malformed/unsupported campaign state and
@@ -1133,14 +1134,25 @@ def retire_campaign_retaining_lock(
             raise RuntimeError(
                 "Expected campaign id does not match the campaign record"
             )
-        payload = load_json(target)
-        if payload is None:
+        raw = _read_lock_raw_unlocked(target)
+        if raw is None:
             raise RuntimeError(
                 "No permanent lock exists; use lock-absent retirement"
             )
+        if expected_lock_witness is None or not LOCK_WITNESS_RE.fullmatch(
+            expected_lock_witness
+        ):
+            raise RuntimeError(
+                "Retained-lock retirement requires the inspected lock witness"
+            )
+        if lock_content_witness(raw) != expected_lock_witness:
+            raise RuntimeError(
+                "Refusing retirement: current lock contents do not match the inspected lock"
+            )
         try:
+            payload = _parse_lock_payload_from_raw(raw)
             _validate_lock_shape(payload, repository=repository, pr_number=pr_number)
-        except ValueError as error:
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
             raise RuntimeError(
                 f"Permanent lock is invalid and cannot be bypassed through "
                 f"retirement: {error}"

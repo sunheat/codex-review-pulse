@@ -183,13 +183,17 @@ fully-consumed campaign the user chooses not to continue, `ambiguous_interruptio
 active scheduler-setup orphan. It is never automatic.
 
 Before retiring, confirm that every previous owner and product-mutating
-operation for this campaign can no longer continue. Then choose one mode:
+operation for this campaign can no longer continue. For retained-lock
+retirement, inspect the exact lock to be removed and retain its
+`recovery_witness`; do not obtain the witness again when running the retirement
+command. Then choose one mode:
 
 Retained-lock retirement, when the campaign's valid matching permanent lock
 still exists:
 
 ```text
-python scripts/campaign.py retire --repo OWNER/REPO --pr NUMBER --expected-campaign-id CRPCAMPAIGNID --retained-lock --user-authorized-retirement
+python scripts/lock.py inspect --repo OWNER/REPO --pr NUMBER
+python scripts/campaign.py retire --repo OWNER/REPO --pr NUMBER --expected-campaign-id CRPCAMPAIGNID --expected-lock-witness sha256:HEX --retained-lock --user-authorized-retirement
 ```
 
 Lock-absent retirement, after lock recovery or when no permanent lock remains:
@@ -203,6 +207,11 @@ matching lock after it). Afterwards old or late deliveries are stale: they
 cannot recreate the retired campaign or regain ownership, and a later launcher
 may create a new campaign through normal setup. Retiring a rolled-over C2
 campaign never restores or reconstructs C1.
+
+Retained-lock retirement compares the supplied witness with the current raw
+lock contents under the canonical guard before deleting either file. A
+replacement owner in the same campaign changes the witness and makes the
+retirement refuse without deleting the campaign or lock.
 
 Retirement must not be used to bypass protection boundaries:
 

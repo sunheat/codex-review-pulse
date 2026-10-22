@@ -134,6 +134,11 @@ class AuthorityTests(unittest.TestCase):
             "status"
         ]
 
+    def lock_witness(self, pr: int = 7) -> str:
+        return storage.inspect_lock("owner/repo", pr, repository_path=self.repo)[
+            "recovery_witness"
+        ]
+
     # ------------------------------------------------------------------
     # Guarded initialization
 
@@ -789,12 +794,46 @@ class AuthorityTests(unittest.TestCase):
         result = storage.retire_campaign_retaining_lock(
             "owner/repo", 7,
             expected_campaign_id=CAMPAIGN_ID,
+            expected_lock_witness=self.lock_witness(),
             user_authorized_retirement=True,
             repository_path=self.repo,
         )
         self.assertEqual(result["mode"], "retained-lock")
         self.assertFalse(self.campaign_file().exists())
         self.assertEqual(self.lock_status(), "absent")
+
+    def test_retirement_refuses_replacement_owner_in_same_campaign(self) -> None:
+        self.setup_owned()
+        inspected = storage.inspect_lock(
+            "owner/repo", 7, repository_path=self.repo
+        )["recovery_witness"]
+        storage.recover_lock(
+            "owner/repo", 7,
+            user_authorized_recovery=True,
+            expected_campaign_id=CAMPAIGN_ID,
+            expected_lock_witness=inspected,
+            repository_path=self.repo,
+        )
+        replacement = storage.acquire_worker_lock(
+            "owner/repo", 7,
+            campaign_id=CAMPAIGN_ID,
+            acquired_at=T1,
+            repository_path=self.repo,
+        )
+        self.assertTrue(replacement["acquired"])
+        with self.assertRaisesRegex(RuntimeError, "inspected lock"):
+            storage.retire_campaign_retaining_lock(
+                "owner/repo", 7,
+                expected_campaign_id=CAMPAIGN_ID,
+                expected_lock_witness=inspected,
+                user_authorized_retirement=True,
+                repository_path=self.repo,
+            )
+        self.assertTrue(self.campaign_file().exists())
+        self.assertEqual(
+            storage.load_json(self.lock_file())["owner_token"],
+            replacement["owner_token"],
+        )
 
     def test_retirement_requires_explicit_authorization(self) -> None:
         self.setup_owned()
@@ -820,6 +859,7 @@ class AuthorityTests(unittest.TestCase):
             storage.retire_campaign_retaining_lock(
                 "owner/repo", 7,
                 expected_campaign_id=C2_ID,
+                expected_lock_witness=self.lock_witness(),
                 user_authorized_retirement=True,
                 repository_path=self.repo,
             )
@@ -837,6 +877,7 @@ class AuthorityTests(unittest.TestCase):
         result = storage.retire_campaign_retaining_lock(
             "owner/repo", 7,
             expected_campaign_id=CAMPAIGN_ID,
+            expected_lock_witness=self.lock_witness(),
             user_authorized_retirement=True,
             repository_path=self.repo,
         )
@@ -863,6 +904,7 @@ class AuthorityTests(unittest.TestCase):
         result = storage.retire_campaign_retaining_lock(
             "owner/repo", 8,
             expected_campaign_id=CAMPAIGN_ID,
+            expected_lock_witness=self.lock_witness(8),
             user_authorized_retirement=True,
             repository_path=self.repo,
         )
@@ -914,6 +956,7 @@ class AuthorityTests(unittest.TestCase):
         result = storage.retire_campaign_retaining_lock(
             "owner/repo", 7,
             expected_campaign_id=CAMPAIGN_ID,
+            expected_lock_witness=self.lock_witness(),
             user_authorized_retirement=True,
             repository_path=self.repo,
         )
@@ -931,6 +974,7 @@ class AuthorityTests(unittest.TestCase):
             storage.retire_campaign_retaining_lock(
                 "owner/repo", 7,
                 expected_campaign_id=CAMPAIGN_ID,
+                expected_lock_witness=self.lock_witness(),
                 user_authorized_retirement=True,
                 repository_path=self.repo,
             )
@@ -955,6 +999,7 @@ class AuthorityTests(unittest.TestCase):
             storage.retire_campaign_retaining_lock(
                 "owner/repo", 7,
                 expected_campaign_id=CAMPAIGN_ID,
+                expected_lock_witness=self.lock_witness(),
                 user_authorized_retirement=True,
                 repository_path=self.repo,
             )
@@ -966,6 +1011,7 @@ class AuthorityTests(unittest.TestCase):
             storage.retire_campaign_retaining_lock(
                 "owner/repo", 8,
                 expected_campaign_id=C2_ID,
+                expected_lock_witness=self.lock_witness(8),
                 user_authorized_retirement=True,
                 repository_path=self.repo,
             )
@@ -976,6 +1022,7 @@ class AuthorityTests(unittest.TestCase):
             storage.retire_campaign_retaining_lock(
                 "owner/repo", 9,
                 expected_campaign_id=CAMPAIGN_ID,
+                expected_lock_witness=self.lock_witness(9),
                 user_authorized_retirement=True,
                 repository_path=self.repo,
             )
@@ -1024,6 +1071,7 @@ class AuthorityTests(unittest.TestCase):
         storage.retire_campaign_retaining_lock(
             "owner/repo", 7,
             expected_campaign_id=CAMPAIGN_ID,
+            expected_lock_witness=self.lock_witness(),
             user_authorized_retirement=True,
             repository_path=self.repo,
         )
@@ -1055,6 +1103,7 @@ class AuthorityTests(unittest.TestCase):
         storage.retire_campaign_retaining_lock(
             "owner/repo", 7,
             expected_campaign_id=C2_ID,
+            expected_lock_witness=self.lock_witness(),
             user_authorized_retirement=True,
             repository_path=self.repo,
         )
@@ -1088,14 +1137,24 @@ class AuthorityTests(unittest.TestCase):
 
     def test_cli_retire_requires_authorization_flag(self) -> None:
         self.setup_owned()
+        witness = self.lock_witness()
         missing = self.cli(
             "campaign.py", "retire", "--repo", "owner/repo", "--pr", "7",
             "--expected-campaign-id", CAMPAIGN_ID, "--retained-lock",
         )
         self.assertNotEqual(missing.returncode, 0)
+        missing_witness = self.cli(
+            "campaign.py", "retire", "--repo", "owner/repo", "--pr", "7",
+            "--expected-campaign-id", CAMPAIGN_ID,
+            "--retained-lock", "--user-authorized-retirement",
+        )
+        self.assertNotEqual(missing_witness.returncode, 0)
+        self.assertTrue(self.campaign_file().exists())
+        self.assertEqual(self.lock_status(), "active")
         retired = self.cli(
             "campaign.py", "retire", "--repo", "owner/repo", "--pr", "7",
             "--expected-campaign-id", CAMPAIGN_ID,
+            "--expected-lock-witness", witness,
             "--retained-lock", "--user-authorized-retirement",
         )
         self.assertEqual(retired.returncode, 0, retired.stderr)

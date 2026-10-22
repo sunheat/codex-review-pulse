@@ -141,10 +141,14 @@ class WorkerCliFlowTests(unittest.TestCase):
         )
         token = json.loads(acquired.stdout)["owner_token"]
         self.save_campaign(pr=9)
+        witness = storage.inspect_lock(
+            "owner/repo", 9, repository_path=self.repo
+        )["recovery_witness"]
 
         retired = self.cli(
             "campaign.py", "retire", "--repo", "owner/repo", "--pr", "9",
             "--expected-campaign-id", CAMPAIGN_ID, "--retained-lock",
+            "--expected-lock-witness", witness,
             "--user-authorized-retirement",
         )
         self.assertEqual(retired.returncode, 0, retired.stderr)
