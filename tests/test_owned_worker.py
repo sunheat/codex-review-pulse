@@ -447,12 +447,15 @@ class CommitmentTests(WorkerDecisionFixture):
         self.assertEqual(self.on_disk()["guards"][0]["state"], model.GUARD_ACTIVE)
 
     def test_remediation_preparation_returns_without_consuming_a_round(self) -> None:
+        del self.campaign["config"]["run_full_tests"]
+        storage.save_json(self.campaign_path(), self.campaign)
         self.fetches = [
             snapshot(threads=[thread("T1"), thread("T2")], head=self.h1)
         ]
         outcome = self.decide()
         self.assertEqual(outcome["outcome"], "remediation_prepared")
         self.assertEqual(outcome["action"], "run_semantic_remediation")
+        self.assertIs(outcome["run_full_tests"], False)
         self.assertFalse(outcome["round_committed"])
         self.assertEqual(outcome["targets"], ["T1", "T2"])
         self.assertEqual(outcome["prepared_head"], self.h1)
@@ -470,6 +473,14 @@ class CommitmentTests(WorkerDecisionFixture):
         self.assertEqual([t["id"] for t in packet["targets"]], ["T1", "T2"])
         self.assertNotIn("owner_token", json.dumps(packet))
         self.assertTrue(Path(outcome["worktree"]).exists())
+
+    def test_remediation_preparation_reports_full_suite_opt_in(self) -> None:
+        self.campaign["config"]["run_full_tests"] = True
+        storage.save_json(self.campaign_path(), self.campaign)
+        self.fetches = [snapshot(threads=[thread("T1")], head=self.h1)]
+        outcome = self.decide()
+        self.assertEqual(outcome["outcome"], "remediation_prepared")
+        self.assertIs(outcome["run_full_tests"], True)
 
     def test_request_commitment_reserves_exactly_once(self) -> None:
         self.fetches = [snapshot(), snapshot(head=H2)]

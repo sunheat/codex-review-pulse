@@ -749,18 +749,18 @@ class AuxiliarySkillIndependenceContractTests(unittest.TestCase):
         )
         self.assertIn("do not expand the local test scope", worker)
 
-    def test_local_testing_is_limited_to_current_delivery_changes(self) -> None:
+    def test_local_testing_defaults_to_current_delivery_changes(self) -> None:
         worker = _collapsed(REFERENCES / "worker.md")
         self.assertIn(
-            "Run only tests added or changed by your edits in this delivery",
+            "Otherwise, run only tests added or changed by your edits in this delivery",
             worker,
         )
         self.assertIn(
-            "Do not search for other tests, run a broader suite or standalone "
-            "project scripts, or install dependencies",
+            "Do not install dependencies or separately invoke build, lint, "
+            "formatting, or other project scripts",
             worker,
         )
-        self.assertIn("Leave broader build and test coverage to the repository's CI", worker)
+        self.assertIn("If the owned worker result has `run_full_tests: true`", worker)
 
     def test_speculative_abandonment_routes_to_a_plain_stop(self) -> None:
         worker = _collapsed(REFERENCES / "worker.md")

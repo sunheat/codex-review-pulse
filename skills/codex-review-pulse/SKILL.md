@@ -50,6 +50,7 @@ replaced:
 | worker model | Must be accepted by the native Codex Automation configuration |
 | reasoning level | Must be accepted by the native Codex Automation configuration |
 | interval | Minutes between recurring deliveries; positive integer |
+| full test suite | Optional. Enable only on an explicit setup request. Default to tests added or changed in the current round. |
 
 If the pull request is omitted, the launcher discovers OPEN pull requests in
 the bound repository: exactly one is selected automatically and without
@@ -150,7 +151,9 @@ Manual recovery of the permanent lock is an explicit human boundary; see
 - Target-repository instructions govern the substance of the remediation
   patch and never turn recommended Agent Skills or interactive
   meta-workflows into runtime prerequisites. The worker's local verification
-  is limited to tests added or changed in the current delivery.
+  defaults to tests added or changed in the current delivery. An explicit
+  campaign setup request enables the full test suite before each remediation
+  push. Separate build, lint, and formatting checks belong to CI.
 - After the lock is acquired, every delivery exit carries an explicit
   ownership disposition: already disposed by an authoritative deterministic
   boundary, a confirmed guarded release, or deliberate retention under an
@@ -181,7 +184,7 @@ Manual recovery of the permanent lock is an explicit human boundary; see
   the external suffix but never the mandatory bookkeeping; ambiguity remains
   fail closed. The final result is informational, and lost finalizer output
   never leaves a completed transaction locked. Use full-access remediation
-  only for trusted repositories and same-repository PR branches. Targeted
+  only for trusted repositories and same-repository PR branches. Project
   tests run with the worker's effective access. The configured model is
   responsible for semantic fixes, and the target repository's CI provides
   broader verification. GitHub thread resolution is not an

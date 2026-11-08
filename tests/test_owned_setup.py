@@ -130,13 +130,17 @@ class OwnedBoundaryFixture(unittest.TestCase):
 
 
 class CreationAuthorityTests(OwnedBoundaryFixture):
-    def create(self, snap, *, token: str | None = None, pr: int = 7) -> dict:
+    def create(
+        self, snap, *, token: str | None = None, pr: int = 7,
+        run_full_tests: bool = False,
+    ) -> dict:
         return owned.create_campaign_owned(
             repository="owner/repo",
             pr_number=pr,
             owner_token=token or self.acquire_setup(pr),
             fetch_snapshot=lambda: snap,
             repository_path=self.repository_path,
+            run_full_tests=run_full_tests,
             **CONFIG,
         )
 
@@ -153,6 +157,7 @@ class CreationAuthorityTests(OwnedBoundaryFixture):
         self.assertTrue(result["created"])
         record = self.campaign_record()
         model.validate_campaign(record, repository="owner/repo", pull_request_number=7)
+        self.assertIs(record["config"]["run_full_tests"], False)
         # The campaign identity is the one preallocated on the setup lock.
         self.assertEqual(record["campaign_id"], CAMPAIGN_ID)
         # created_at comes from the owned snapshot, independently of the
@@ -166,6 +171,10 @@ class CreationAuthorityTests(OwnedBoundaryFixture):
         )
         self.assertEqual(result["head_oid"], H1)
         self.assertEqual(result["server_time"], SNAPSHOT_TIME)
+
+    def test_creation_persists_full_suite_opt_in(self) -> None:
+        self.assertTrue(self.create(snapshot(), run_full_tests=True)["created"])
+        self.assertIs(self.campaign_record()["config"]["run_full_tests"], True)
 
     def test_caller_cannot_select_the_creation_snapshot_or_its_evidence(self) -> None:
         with self.assertRaises(TypeError):

@@ -89,9 +89,11 @@ primary worktree is never modified.
 
 Use unattended remediation only with repositories and same-repository PR
 branches whose code and test dependencies you trust. The full-access worker
-runs only tests it adds or changes in the current round, when the existing
-environment can run them directly. Test code runs with the worker's effective
-access. The target repository's CI owns broader build and test coverage.
+runs tests it adds or changes in the current round by default, when the
+existing environment can run them directly. To opt in, add “Run the full test
+suite before each remediation push” to the campaign setup request. Test code
+runs with the worker's effective access. Separate build, lint, and formatting
+checks and any remaining test coverage belong to the target repository's CI.
 Fix quality depends on the configured model, and publication does not certify
 that the fix compiles or passes CI.
 

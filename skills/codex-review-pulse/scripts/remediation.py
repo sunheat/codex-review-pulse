@@ -26,7 +26,7 @@ semantic/model work:
   when deterministically applicable), and disposes ownership before
   returning an informational result.
 
-The model owns only semantic judgment, code editing, and targeted testing
+The model owns only semantic judgment, code editing, and project testing
 inside the registered speculative worktree. It never
 receives finalization ownership, never infers the remediation phase, never
 supplies authoritative tree identity, and never carries receipts between

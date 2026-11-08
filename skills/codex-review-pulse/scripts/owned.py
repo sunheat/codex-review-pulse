@@ -152,6 +152,7 @@ def create_campaign_owned(
     model_name: str,
     reasoning_level: str,
     interval_minutes: int,
+    run_full_tests: bool = False,
     reviewer_logins: list[str] | None = None,
     approval_logins: list[str] | None = None,
     fetch_snapshot: FetchSnapshot,
@@ -203,6 +204,7 @@ def create_campaign_owned(
             model=config["model"],
             reasoning_level=config["reasoning_level"],
             interval_minutes=config["interval_minutes"],
+            run_full_tests=run_full_tests,
             reviewer_logins=reviewers,
             approval_logins=approvers,
             creation_baseline=model.creation_baseline_reaction_ids(
@@ -265,6 +267,7 @@ def prepare_rollover_owned(
     model_name: str,
     reasoning_level: str,
     interval_minutes: int,
+    run_full_tests: bool = False,
     reviewer_logins: list[str] | None = None,
     approval_logins: list[str] | None = None,
     fetch_snapshot: FetchSnapshot,
@@ -318,6 +321,7 @@ def prepare_rollover_owned(
             model=config["model"],
             reasoning_level=config["reasoning_level"],
             interval_minutes=config["interval_minutes"],
+            run_full_tests=run_full_tests,
             reviewer_logins=reviewers,
             approval_logins=approvers,
             creation_baseline=model.creation_baseline_reaction_ids(
@@ -569,6 +573,7 @@ def run_worker_decision(
                 "prepared_head": prepared["packet"]["prepared_head"],
                 "worktree": prepared["packet"]["worktree_path"],
                 "targets": [t["id"] for t in prepared["packet"]["targets"]],
+                "run_full_tests": post_sync["config"].get("run_full_tests", False),
                 "round_committed": False,
                 "ownership": "released",
                 "scheduler_cleanup_authorized": False,
@@ -1050,6 +1055,7 @@ def main() -> None:
     config_args.add_argument("--model", required=True, dest="model_name")
     config_args.add_argument("--reasoning-level", required=True)
     config_args.add_argument("--interval-minutes", required=True, type=int)
+    config_args.add_argument("--run-full-tests", action="store_true")
     config_args.add_argument(
         "--reviewer-login", action="append", dest="reviewer_logins"
     )
@@ -1092,6 +1098,7 @@ def main() -> None:
             model_name=args.model_name,
             reasoning_level=args.reasoning_level,
             interval_minutes=args.interval_minutes,
+            run_full_tests=args.run_full_tests,
             reviewer_logins=args.reviewer_logins,
             approval_logins=args.approval_logins,
             fetch_snapshot=fetch,
@@ -1106,6 +1113,7 @@ def main() -> None:
             model_name=args.model_name,
             reasoning_level=args.reasoning_level,
             interval_minutes=args.interval_minutes,
+            run_full_tests=args.run_full_tests,
             reviewer_logins=args.reviewer_logins,
             approval_logins=args.approval_logins,
             fetch_snapshot=fetch,

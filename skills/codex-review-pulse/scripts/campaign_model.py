@@ -242,6 +242,7 @@ def new_campaign(
     reviewer_logins: Iterable[str],
     approval_logins: Iterable[str],
     creation_baseline: Iterable[str] | None = None,
+    run_full_tests: bool = False,
 ) -> dict[str, Any]:
     if not CAMPAIN_ID_RE.fullmatch(campaign_id):
         raise ValueError("Campaign id must have the form crp-YYYYMMDDTHHMMSSZ-hex")
@@ -282,6 +283,7 @@ def new_campaign(
             "model": model.strip(),
             "reasoning_level": reasoning_level.strip(),
             "interval_minutes": interval_minutes,
+            "run_full_tests": run_full_tests,
             "reviewer_logins": unique_logins(reviewer_logins, label="reviewer"),
             "approval_logins": unique_logins(approval_logins, label="approval"),
         },
@@ -411,6 +413,8 @@ def validate_campaign(
     rounds_used = campaign.get("rounds_used")
     if not _is_int(rounds_used) or rounds_used < 0 or rounds_used > max_rounds:
         raise ValueError("Campaign rounds_used is invalid")
+    if not isinstance(config.get("run_full_tests", False), bool):
+        raise ValueError("Campaign run_full_tests is invalid")
     interval_minutes = config.get("interval_minutes")
     if not _is_int(interval_minutes) or interval_minutes < MIN_INTERVAL_MINUTES:
         raise ValueError("Campaign interval_minutes is invalid")

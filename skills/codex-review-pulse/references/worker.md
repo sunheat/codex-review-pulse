@@ -267,8 +267,9 @@ GitHub and Git state.
 
 Work only from the boundary's returned values: `packet_path` (the
 controller-owned preparation packet), `prepared_head` (H1), `worktree` (the
-isolated registered speculative worktree), and the `targets` enumeration,
-which is this delivery's only target list. The packet is Python-owned
+isolated registered speculative worktree), `run_full_tests` (the campaign's
+full-suite opt-in), and the `targets` enumeration, which is this delivery's
+only target list. The packet is Python-owned
 evidence; never edit, re-save, or move it, and never rebuild a batch from
 campaign state. The packet binds the matching frozen evidence snapshot, the
 campaign-source witness, and the exact prepared head. Never scan the snapshot
@@ -282,15 +283,25 @@ enumeration is not part of this batch and waits for a later delivery.
 
    - **Fix now** — implement the smallest correct change by editing the
      registered worktree (edit tracked files, add new source files, remove
-     obsolete files). Run only tests added or changed by your edits in this
-     delivery. Use the available test runner to select those tests directly
-     inside the registered worktree.
-     If none changed, the runner cannot select them directly, or dependencies
-     are unavailable, skip execution. Do not search for other tests, run a
-     broader suite or standalone project scripts, or install dependencies.
-     Leave broader build and test coverage to the repository's CI. Report
+     obsolete files). For changes to be published, run tests inside that
+     worktree before invoking the finalizer:
+     - If the owned worker result has `run_full_tests: true`, run the
+       repository's normal full suite using a test-only entry point.
+       Compilation implicit in the test runner is allowed. Leave composite
+       build and validation commands to CI. If the full suite cannot run,
+       report the reason and end the delivery without invoking the finalizer.
+     - Otherwise, run only tests added or changed by your edits in this
+       delivery. Select them directly with the available runner. If none
+       changed or the runner cannot select them directly, skip execution.
+       Do not search for other tests.
+
+     If the runner or dependencies are unavailable, skip execution. Do not
+     install dependencies or separately invoke build, lint, formatting, or
+     other project scripts. Leave those checks and any test coverage beyond
+     the selected scope to the repository's CI. Report
      what ran and its result, or why no tests ran, in this delivery's output.
-     An unavailable test run does not block an otherwise justified proposal.
+     In the default mode, an unavailable test run does not block an
+     otherwise justified proposal.
      Treat a test failure as evidence when deciding whether the fix is ready.
      This is speculative local work. It publishes nothing and consumes nothing.
    - **Fix later** — draft a concise issue title and body.
