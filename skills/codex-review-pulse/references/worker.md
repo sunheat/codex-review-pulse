@@ -52,16 +52,15 @@ work, not an auxiliary-skill dependency.
 
 Target-repository instructions remain authoritative for the substance of the
 patch: architecture and safety constraints, coding conventions, supported
-runtimes, file scope, required documentation, and concrete build, test, lint,
-and formatting requirements. They do not turn recommended Agent Skills or
-interactive meta-workflows into runtime prerequisites, and they never alter
+runtimes, file scope, required documentation, and coding and test standards.
+They do not expand the local test scope defined below or turn recommended
+Agent Skills or interactive meta-workflows into runtime prerequisites, and they never alter
 campaign identity, batch membership, round accounting, ownership disposition,
-or this skill boundary. If a mandatory concrete acceptance requirement cannot
+or this skill boundary. If a mandatory requirement for the patch itself cannot
 be satisfied, do not waive it: do not propose the affected Fix-now change, and
 do not classify its thread as fixed. Abandon the unpublished local work and
 end the delivery — the speculative interval holds no ownership and has
-consumed nothing. Only tooling explicitly optional under the applicable
-target-repository contract may be skipped as optional.
+consumed nothing.
 
 If, contrary to this boundary, an attempted auxiliary workflow has already
 left this delivery unable to continue safely, abandon the unpublished local
@@ -283,9 +282,17 @@ enumeration is not part of this batch and waits for a later delivery.
 
    - **Fix now** — implement the smallest correct change by editing the
      registered worktree (edit tracked files, add new source files, remove
-     obsolete files), and run the repository-required validation (build,
-     tests, lint, formatting) inside the worktree. This is speculative local
-     work: it publishes nothing and consumes nothing.
+     obsolete files). Run only tests added or changed by your edits in this
+     delivery. Use the available test runner to select those tests directly
+     inside the registered worktree.
+     If none changed, the runner cannot select them directly, or dependencies
+     are unavailable, skip execution. Do not search for other tests, run a
+     broader suite or standalone project scripts, or install dependencies.
+     Leave broader build and test coverage to the repository's CI. Report
+     what ran and its result, or why no tests ran, in this delivery's output.
+     An unavailable test run does not block an otherwise justified proposal.
+     Treat a test failure as evidence when deciding whether the fix is ready.
+     This is speculative local work. It publishes nothing and consumes nothing.
    - **Fix later** — draft a concise issue title and body.
    - **No fix required** — establish concrete evidence (already fixed on the
      prepared head, false positive, or explicitly unsupported).

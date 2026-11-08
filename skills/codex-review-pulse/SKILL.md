@@ -148,9 +148,9 @@ Manual recovery of the permanent lock is an explicit human boundary; see
   fallback; their absence never stops an otherwise viable remediation attempt,
   retains ownership, or requires manual recovery.
 - Target-repository instructions govern the substance of the remediation
-  patch, including mandatory concrete build, test, lint, and formatting
-  requirements, but never turn recommended Agent Skills or interactive
-  meta-workflows into runtime prerequisites.
+  patch and never turn recommended Agent Skills or interactive
+  meta-workflows into runtime prerequisites. The worker's local verification
+  is limited to tests added or changed in the current delivery.
 - After the lock is acquired, every delivery exit carries an explicit
   ownership disposition: already disposed by an authoritative deterministic
   boundary, a confirmed guarded release, or deliberate retention under an
@@ -180,7 +180,10 @@ Manual recovery of the permanent lock is an explicit human boundary; see
   definitively-failed / ambiguous classification. Definitive failure stops
   the external suffix but never the mandatory bookkeeping; ambiguity remains
   fail closed. The final result is informational, and lost finalizer output
-  never leaves a completed transaction locked. Full-access Codex execution
-  is not hard capability isolation, and GitHub thread resolution is not an
+  never leaves a completed transaction locked. Use full-access remediation
+  only for trusted repositories and same-repository PR branches. Targeted
+  tests run with the worker's effective access. The configured model is
+  responsible for semantic fixes, and the target repository's CI provides
+  broader verification. GitHub thread resolution is not an
   atomic compare-and-swap. Raw transport mutators are not alternate packaged
   product paths.

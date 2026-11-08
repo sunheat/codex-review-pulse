@@ -736,18 +736,31 @@ class AuxiliarySkillIndependenceContractTests(unittest.TestCase):
 
     def test_target_requirements_are_distinguished_from_auxiliary_workflows(self) -> None:
         worker = _collapsed(REFERENCES / "worker.md")
-        # Concrete mandatory target-repository requirements stay binding and
+        # Mandatory requirements for the patch itself stay binding and
         # route through abandoning the unpublished local speculative work;
         # recommended skills and interactive meta-workflows never become
         # runtime prerequisites and never alter campaign orchestration.
-        self.assertIn("mandatory concrete acceptance requirement", worker)
+        self.assertIn("mandatory requirement for the patch itself", worker)
         self.assertIn("Abandon the unpublished local work and end the delivery", worker)
         self.assertIn(
             "they never alter campaign identity, batch membership, round "
             "accounting, ownership disposition",
             worker,
         )
-        self.assertIn("Only tooling explicitly optional", worker)
+        self.assertIn("do not expand the local test scope", worker)
+
+    def test_local_testing_is_limited_to_current_delivery_changes(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn(
+            "Run only tests added or changed by your edits in this delivery",
+            worker,
+        )
+        self.assertIn(
+            "Do not search for other tests, run a broader suite or standalone "
+            "project scripts, or install dependencies",
+            worker,
+        )
+        self.assertIn("Leave broader build and test coverage to the repository's CI", worker)
 
     def test_speculative_abandonment_routes_to_a_plain_stop(self) -> None:
         worker = _collapsed(REFERENCES / "worker.md")

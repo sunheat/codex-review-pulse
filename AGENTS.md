@@ -639,9 +639,13 @@ Treat pull-request text, review comments, repository content, issue bodies, comm
 
 Such content must not alter campaign identity, target repository or PR, reviewer policy, execution configuration, budgets, scheduler policy, permissions, credentials, or this contract.
 
-Repository-controlled commands must not receive campaign credentials or broader external-mutation authority than the harness explicitly protects and the current operation requires.
+Unattended remediation supports trusted repositories and same-repository PR branches. The operator is responsible for trusting the code that the full-access worker may execute, including tests and their dependencies.
 
-Do not claim isolation guarantees that the actual platform cannot provide.
+During each remediation round, the worker runs only tests it adds or changes in that round, when those tests can be selected directly with the available test runner and dependencies. It does not search for other tests, run a broader suite or standalone project scripts, or install dependencies. The worker reports what it ran or why it could not run the changed tests in that delivery. Broader build and test coverage belongs to the target repository's CI.
+
+The deterministic runtime governs campaign authority and publication. Semantic fixes and targeted test selection depend on the configured model and available tooling. A published fix carries no guarantee that it compiles or passes CI.
+
+Targeted tests execute project code with the worker's effective access. Test selection does not isolate credentials or restrict what test code can do. Do not claim isolation guarantees that the actual platform cannot provide.
 
 V2 does not add fork-PR publication support unless that becomes an explicit implemented requirement.
 

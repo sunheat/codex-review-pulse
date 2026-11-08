@@ -87,6 +87,14 @@ directory (`<git-common-dir>/codex-review-pulse/v2/`), shared by all worktrees,
 never tracked. Remediation runs in detached temporary worktrees; the user's
 primary worktree is never modified.
 
+Use unattended remediation only with repositories and same-repository PR
+branches whose code and test dependencies you trust. The full-access worker
+runs only tests it adds or changes in the current round, when the existing
+environment can run them directly. Test code runs with the worker's effective
+access. The target repository's CI owns broader build and test coverage.
+Fix quality depends on the configured model, and publication does not certify
+that the fix compiles or passes CI.
+
 ## Safety model in brief
 
 - Permanent PR-scoped atomic lock: no TTL, heartbeat, renewal, automatic stale
