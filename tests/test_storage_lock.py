@@ -27,6 +27,30 @@ class DiagnosticTests(unittest.TestCase):
         )
 
 
+class SaveJsonTests(unittest.TestCase):
+    def test_posix_directory_sync_follows_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "campaign.json"
+            read_only = storage.os.O_RDONLY
+            with mock.patch.object(storage, "os", wraps=storage.os) as os_calls:
+                os_calls.name = "posix"
+                os_calls.O_RDONLY = read_only
+                os_calls.open.return_value = 12345
+                os_calls.fsync.side_effect = lambda fd: None
+                os_calls.close.side_effect = lambda fd: None
+                storage.save_json(target, {"rounds_used": 1})
+            self.assertEqual(storage.load_json(target), {"rounds_used": 1})
+            self.assertEqual(
+                os_calls.mock_calls[-3:],
+                [
+                    mock.call.open(target.parent, storage.os.O_RDONLY),
+                    mock.call.fsync(12345),
+                    mock.call.close(12345),
+                ],
+            )
+            self.assertEqual(os_calls.mock_calls[-4][0], "replace")
+
+
 def git(cwd: Path, *args: str) -> str:
     process = subprocess.run(
         ["git", *args], cwd=str(cwd), capture_output=True, text=True
