@@ -263,18 +263,11 @@ def push_publication_commit(
         cwd=worktree, executor=runner, before_execute=before_push,
     )
     if push.returncode != 0:
-        # Re-observe to classify a potentially-accepted push instead of guessing.
+        # Only the intended commit proves publication; the old head does not
+        # prove that a disconnected server-side push cannot still complete.
         observed = remote_head(repository_path, branch, remote=remote)
         if observed == local_commit:
             return {"published": True, "status": "pushed", "commit": local_commit}
-        if observed == expected_head:
-            return {
-                "published": False,
-                "status": "push_failed_clean",
-                "local_commit": local_commit,
-                "remote_head": observed,
-                "error": push.stderr.strip(),
-            }
         return {
             "published": False,
             "status": "ambiguous_publication",

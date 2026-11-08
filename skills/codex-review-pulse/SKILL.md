@@ -102,6 +102,8 @@ Manual recovery of the permanent lock is an explicit human boundary; see
 - One remediation batch creates at most one commit and one push; never force
   push; publish fixing state before resolving a thread. The deterministic
   finalizer enforces this ordering itself.
+- A nonzero push result remains ambiguous unless the intended commit is
+  observed. An unchanged remote head does not prove rejection; retain ownership.
 - The remediation round is committed by the deterministic finalizer, after
   complete validation of the prepared semantic authorization unit and before
   the first external product mutation; it is never refunded.

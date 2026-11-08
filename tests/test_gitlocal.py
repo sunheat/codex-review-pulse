@@ -353,21 +353,23 @@ class PublishTests(unittest.TestCase):
         self.assertNotIn("--force-with-lease", push_args)
         self.assertIn("HEAD:refs/heads/main", push_args)
 
-    def test_injected_clean_push_failure_is_single_attempt(self) -> None:
+    def test_transport_failure_with_old_head_is_ambiguous_and_single_attempt(self) -> None:
         (self.worktree / "file.txt").write_text("v2", encoding="utf-8")
         local = self.stage_tree_and_commit()
         attempts = []
         def executor(command, **kwargs):
             if "push" in command:
                 attempts.append(command)
-                return subprocess.CompletedProcess(command, 1, "", "definite refusal")
+                return subprocess.CompletedProcess(
+                    command, 128, "", "fatal: the remote end hung up unexpectedly"
+                )
             return subprocess.run(command, **kwargs)
         result = gitlocal.push_publication_commit(
             worktree=self.worktree, branch="main", expected_head=self.head1,
             local_commit=local, repository=self.repo, pr_number=self.pr,
             owner_token=self.token, repository_path=self.env.clone, runner=executor,
         )
-        self.assertEqual(result["status"], "push_failed_clean")
+        self.assertEqual(result["status"], "ambiguous_publication")
         self.assertEqual(len(attempts), 1)
         self.assertEqual(gitlocal.remote_head(self.env.clone, "main"), self.head1)
 
@@ -419,6 +421,13 @@ class PublishTests(unittest.TestCase):
 
         (self.worktree / "file.txt").write_text("v2\n", encoding="utf-8")
         local = self.stage_tree_and_commit()
+        attempts = []
+
+        def executor(command, **kwargs):
+            if "push" in command:
+                attempts.append(command)
+            return subprocess.run(command, **kwargs)
+
         result = gitlocal.push_publication_commit(
             worktree=self.worktree,
             branch="main",
@@ -428,10 +437,12 @@ class PublishTests(unittest.TestCase):
             pr_number=self.pr,
             owner_token=self.token,
             repository_path=self.env.clone,
+            runner=executor,
         )
         self.assertFalse(result["published"])
         self.assertEqual(result["status"], "remote_head_advanced_after_commit")
         self.assertEqual(result["remote_head"], advanced)
+        self.assertEqual(attempts, [])
 
     def test_push_requires_ownership(self) -> None:
         (self.worktree / "file.txt").write_text("v2\n", encoding="utf-8")

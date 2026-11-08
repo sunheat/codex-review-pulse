@@ -961,18 +961,21 @@ class DefinitiveFailureTests(RemediationFixture):
         self.prepare(threads=[raw_thread("T1"), raw_thread("T2")])
         (self.worktree / "f.txt").write_text("v2\n", encoding="utf-8")
 
-        def failing_push(**kwargs):
-            return {
-                "published": False,
-                "status": "push_failed_clean",
-                "local_commit": "local-1",
-                "remote_head": self.h1,
-            }
+        original_push = gitlocal.push_publication_commit
+        pushes = []
+
+        def advanced_before_push(**kwargs):
+            with patch.object(gitlocal, "remote_head", return_value="f" * 40):
+                return original_push(**kwargs)
+
+        def recording_runner(command, **kwargs):
+            if "push" in command:
+                pushes.append(command)
+            return subprocess.run(command, **kwargs)
 
         created: list[str] = []
         resolved, resolve_call = self.resolving()
-        original_push = gitlocal.push_publication_commit
-        gitlocal.push_publication_commit = failing_push
+        gitlocal.push_publication_commit = advanced_before_push
         try:
             result = self.finalize(
                 proposal_text=proposal_json(
@@ -981,15 +984,18 @@ class DefinitiveFailureTests(RemediationFixture):
                 ),
                 resolve_call=resolve_call,
                 create_issue=lambda t, b: (created.append(t) or "url"),
+                runner=recording_runner,
             )
         finally:
             gitlocal.push_publication_commit = original_push
         self.assertEqual(result["outcome"], "remediation_failed_definitive")
+        self.assertEqual(result["publication"]["status"], "remote_head_advanced_after_commit")
         self.assertTrue(result["round_committed"])
         self.assertEqual(self.on_disk()["rounds_used"], 1)
         self.assertEqual(self.on_disk()["status"], model.ACTIVE)
         self.assertEqual(created, [])
         self.assertEqual(resolved, [])
+        self.assertEqual(pushes, [])
         self.assertEqual(result["ownership"], "released")
         self.assertEqual(self.lock_status(), "absent")
 
@@ -1009,9 +1015,9 @@ class DefinitiveFailureTests(RemediationFixture):
         def failing_push(**kwargs):
             return {
                 "published": False,
-                "status": "push_failed_clean",
+                "status": "remote_head_advanced_after_commit",
                 "local_commit": "local-1",
-                "remote_head": self.h1,
+                "remote_head": "f" * 40,
             }
 
         gitlocal.push_publication_commit = failing_push
@@ -1115,6 +1121,81 @@ class ReleaseFailureTests(RemediationFixture):
 
 
 class AmbiguousFailureTests(RemediationFixture):
+    def test_push_disconnect_with_old_head_retains_ownership_and_stops_suffix(self) -> None:
+        self.prepare(threads=[raw_thread("T1"), raw_thread("T2")])
+        (self.worktree / "f.txt").write_text("v2\n", encoding="utf-8")
+        pushes = []
+
+        def disconnected_push(command, **kwargs):
+            if "push" in command:
+                pushes.append(command)
+                return subprocess.CompletedProcess(
+                    command, 128, "", "fatal: the remote end hung up unexpectedly"
+                )
+            return subprocess.run(command, **kwargs)
+
+        resolved, resolve_call = self.resolving()
+        result = self.finalize(
+            proposal_text=proposal_json(
+                disposition("T1", "fix_now", mode=externalize.FIX_NOW_PROSPECTIVE),
+                disposition("T2", "fix_later"),
+            ),
+            runner=disconnected_push,
+            resolve_call=resolve_call,
+        )
+
+        self.assertEqual(result["outcome"], "remediation_failed_ambiguous")
+        self.assertEqual(result["publication"]["status"], "ambiguous_publication")
+        self.assertTrue(result["round_committed"])
+        self.assertEqual(self.on_disk()["rounds_used"], 1)
+        self.assertEqual(self.on_disk()["status"], model.ACTIVE)
+        self.assertEqual(result["ownership"], "retained")
+        self.assertEqual(self.lock_status(), "active")
+        self.assertFalse(result["scheduler_cleanup_authorized"])
+        self.assertEqual(len(pushes), 1)
+        self.assertEqual(self.remote_head(), self.h1)
+        self.assertEqual(self.created_issues, [])
+        self.assertEqual(resolved, [])
+
+    def test_push_disconnect_with_unreadable_head_retains_ownership(self) -> None:
+        self.prepare(threads=[raw_thread("T1"), raw_thread("T2")])
+        (self.worktree / "f.txt").write_text("v2\n", encoding="utf-8")
+        pushes = []
+        real_remote_head = gitlocal.remote_head
+
+        def disconnected_push(command, **kwargs):
+            if "push" in command:
+                pushes.append(command)
+                return subprocess.CompletedProcess(command, 128, "", "connection lost")
+            return subprocess.run(command, **kwargs)
+
+        def observe_head(*args, **kwargs):
+            if pushes:
+                raise RuntimeError("remote head unavailable")
+            return real_remote_head(*args, **kwargs)
+
+        resolved, resolve_call = self.resolving()
+        with patch.object(gitlocal, "remote_head", side_effect=observe_head):
+            result = self.finalize(
+                proposal_text=proposal_json(
+                    disposition("T1", "fix_now", mode=externalize.FIX_NOW_PROSPECTIVE),
+                    disposition("T2", "fix_later"),
+                ),
+                runner=disconnected_push,
+                resolve_call=resolve_call,
+            )
+
+        self.assertEqual(result["outcome"], "local_fail_closed")
+        self.assertTrue(result["round_committed"])
+        self.assertEqual(self.on_disk()["rounds_used"], 1)
+        self.assertEqual(self.on_disk()["status"], model.ACTIVE)
+        self.assertEqual(result["ownership"], "retained")
+        self.assertEqual(self.lock_status(), "active")
+        self.assertFalse(result["scheduler_cleanup_authorized"])
+        self.assertEqual(len(pushes), 1)
+        self.assertEqual(self.created_issues, [])
+        self.assertEqual(resolved, [])
+
     def test_ambiguous_issue_creation_stops_suffix_and_retains_ownership(self) -> None:
         self.prepare(threads=[raw_thread("T1"), raw_thread("T2")])
         resolved, resolve_call = self.resolving()
