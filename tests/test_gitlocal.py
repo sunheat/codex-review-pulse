@@ -31,6 +31,30 @@ def require(cwd: Path, *args: str) -> str:
     return process.stdout.strip()
 
 
+class WorktreePathTests(unittest.TestCase):
+    def test_worktree_registration_preserves_nul_delimited_path(self) -> None:
+        path = Path("repo\nname") / "worktree "
+        listing = f"worktree {path}\0HEAD abc\0detached\0\0"
+        with patch.object(gitlocal, "git_text", return_value=listing):
+            self.assertTrue(gitlocal.worktree_is_registered(".", path))
+
+    def test_worktree_add_rejects_names_that_escape_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "worktrees"
+            with (
+                patch.object(storage, "ensure_active_campaign_owner"),
+                patch.object(gitlocal, "worktree_root", return_value=root),
+                patch.object(gitlocal, "git") as run_git,
+            ):
+                for name in ("../outside", str(root.parent / "outside"), "nested/name", ".."):
+                    with self.subTest(name=name):
+                        with self.assertRaisesRegex(RuntimeError, "worktree name"):
+                            gitlocal.add_worktree(
+                                "owner/repo", 1, "abc", owner_token="owner", name=name
+                            )
+                run_git.assert_not_called()
+
+
 class GitEnvironment:
     def __init__(self, root: Path) -> None:
         origin = root / "origin.git"

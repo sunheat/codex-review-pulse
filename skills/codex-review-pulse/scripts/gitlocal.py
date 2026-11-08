@@ -98,9 +98,8 @@ def _registered_worktrees(repository_path: str | Path) -> list[Path]:
     )
     paths: list[Path] = []
     for record in listing.split("\0"):
-        for line in record.splitlines():
-            if line.startswith("worktree "):
-                paths.append(Path(line[len("worktree "):].strip()))
+        if record.startswith("worktree "):
+            paths.append(Path(record[len("worktree "):]))
     return paths
 
 
@@ -117,9 +116,13 @@ def add_worktree(
         repository, pr_number, owner_token, repository_path=repository_path
     )
     root = worktree_root(repository, pr_number, repository_path=repository_path)
-    root.mkdir(parents=True, exist_ok=True)
-    suffix = name or commit[:12]
+    suffix = commit[:12] if name is None else name
+    if suffix in ("", ".", "..") or Path(suffix).name != suffix:
+        raise RuntimeError(f"Invalid temporary worktree name: {suffix!r}")
     target = root / suffix
+    if os.path.dirname(_canonical(target)) != _canonical(root):
+        raise RuntimeError(f"Temporary worktree path escapes the campaign root: {target}")
+    root.mkdir(parents=True, exist_ok=True)
     if target.exists():
         raise RuntimeError(f"Temporary worktree path already exists: {target}")
     process = git(
