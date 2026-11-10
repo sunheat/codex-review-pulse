@@ -418,6 +418,7 @@ class HigherLevelClassificationTests(unittest.TestCase):
                     "path": "src/a.py", "root_comment_id": "T1-c1",
                     "root_login": CODEX, "body": "Fix this.",
                     "root_updated_at": T0, "url": "https://example.test/T1",
+                    "replies": [],
                 }],
                 "reactions": [], "reviews": [], "comments": [],
             }

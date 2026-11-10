@@ -356,7 +356,8 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
         nodes {
           id isResolved isOutdated path
           comments(first: 100) {
-            nodes { id body createdAt updatedAt author { login } url }
+            pageInfo { hasNextPage endCursor }
+            nodes { id body updatedAt author { login ... on Node { id } } url }
           }
         }
       }
@@ -364,6 +365,41 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
   }
 }
 """
+
+THREAD_COMMENTS_QUERY = """
+query($thread: ID!, $cursor: String!) {
+  node(id: $thread) {
+    ... on PullRequestReviewThread {
+      comments(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id body updatedAt author { login ... on Node { id } } }
+      }
+    }
+  }
+}
+"""
+
+
+def _complete_thread_comments(
+    thread: dict[str, Any], graphql_call: Callable[..., dict[str, Any]]
+) -> None:
+    connection = thread["comments"]
+    nodes = list(connection["nodes"])
+    seen_cursors: set[str] = set()
+    while connection["pageInfo"]["hasNextPage"]:
+        cursor = connection["pageInfo"]["endCursor"]
+        if not cursor or cursor in seen_cursors:
+            raise RuntimeError("Review thread comments pagination did not advance")
+        seen_cursors.add(cursor)
+        payload = graphql_call(
+            THREAD_COMMENTS_QUERY, {"thread": thread["id"], "cursor": cursor}
+        )
+        connection = payload["data"]["node"]["comments"]
+        nodes.extend(connection["nodes"])
+    if len({node["id"] for node in nodes}) != len(nodes):
+        raise RuntimeError("Review thread comments pagination returned duplicate comments")
+    thread["comments"]["nodes"] = nodes
+
 
 REACTIONS_QUERY = """
 query($owner: String!, $repo: String!, $number: Int!, $cursor: String, $content: ReactionContent!) {
@@ -489,6 +525,16 @@ def normalize_snapshot(
                 "body": root.get("body"),
                 "root_updated_at": root.get("updatedAt"),
                 "url": root.get("url"),
+                "replies": [
+                    {
+                        "id": reply["id"],
+                        "author_id": (reply["author"] or {}).get("id"),
+                        "author_login": (reply["author"] or {}).get("login"),
+                        "body": reply["body"],
+                        "updated_at": reply["updatedAt"],
+                    }
+                    for reply in nodes[1:]
+                ],
             }
         )
     normalized_reactions = [
@@ -557,6 +603,8 @@ def fetch_snapshot(
     threads, _ = fetch_connection(
         THREADS_QUERY, "reviewThreads", owner, repo, number, graphql_call=graphql_call
     )
+    for thread in threads:
+        _complete_thread_comments(thread, graphql_call)
     thumbs_up, _ = fetch_reactions(
         "THUMBS_UP", owner, repo, number, graphql_call=graphql_call
     )

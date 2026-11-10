@@ -128,6 +128,9 @@ def _frozen_thread(snapshot: dict[str, Any], thread_id: str) -> dict[str, Any]:
         raise FrozenEvidenceError(
             f"Frozen thread is missing its body or path: {thread_id}"
         )
+    replies = thread.get("replies")
+    if not isinstance(replies, list):
+        raise FrozenEvidenceError(f"Frozen thread has no reply evidence: {thread_id}")
     return {
         "id": thread_id,
         "path": thread["path"],
@@ -135,6 +138,7 @@ def _frozen_thread(snapshot: dict[str, Any], thread_id: str) -> dict[str, Any]:
         "root_author": root_author,
         "body": thread["body"],
         "root_updated_at": root_updated_at,
+        "replies": replies,
     }
 
 
@@ -199,6 +203,7 @@ def _frozen_consistent(
         and current.get("root_login") == target["root_author"]
         and current.get("body") == target["body"]
         and current.get("root_updated_at") == target["root_updated_at"]
+        and current.get("replies") == target["replies"]
     )
 
 
@@ -270,7 +275,7 @@ def deferred_issue_fingerprint(
     """Versioned SHA-256 evidence fingerprint from canonical frozen evidence.
 
     Deterministic Python computes it; the model never supplies it. Changing the
-    expected triage head or any frozen identity field changes the fingerprint.
+    expected triage head or frozen root evidence changes the fingerprint.
     """
     canonical = json.dumps(
         {

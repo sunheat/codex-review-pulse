@@ -115,6 +115,43 @@ class FakeGraphQL:
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_snapshot_includes_replies_from_every_thread_comment_page(self) -> None:
+        def reply(comment_id: str, author: dict | None) -> dict:
+            return {
+                "id": comment_id, "body": f"Reply {comment_id}",
+                "author": author, "updatedAt": SERVER_TIME,
+            }
+
+        class PagedReplies(FakeGraphQL):
+            threads = [{
+                "id": "T1",
+                "comments": {
+                    "nodes": [{"id": "root"}, reply("R1", {"id": "U1", "login": "reviewer"})],
+                    "pageInfo": {"hasNextPage": True, "endCursor": "next"},
+                },
+            }]
+
+            def __call__(self, query: str, variables: dict) -> dict:
+                if query == github_api.THREAD_COMMENTS_QUERY:
+                    self.variables = variables
+                    return timed({"data": {"node": {"comments": {
+                        "nodes": [reply("R2", None)],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }}}})
+                return super().__call__(query, variables)
+
+        fake = PagedReplies()
+        snapshot = github_api.fetch_snapshot(
+            "owner/repo", 7, graphql_call=fake, viewer_call=lambda: "op"
+        )
+        self.assertEqual(fake.variables, {"thread": "T1", "cursor": "next"})
+        self.assertEqual(snapshot["threads"][0]["replies"], [
+            {"id": "R1", "author_id": "U1", "author_login": "reviewer",
+             "body": "Reply R1", "updated_at": SERVER_TIME},
+            {"id": "R2", "author_id": None, "author_login": None,
+             "body": "Reply R2", "updated_at": SERVER_TIME},
+        ])
+
     def test_mixed_case_repository_names_are_canonicalized(self) -> None:
         class MixedCase(FakeGraphQL):
             def __call__(self, query: str, variables: dict) -> dict:

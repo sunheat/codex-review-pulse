@@ -639,21 +639,7 @@ def finalize_remediation(
             packet, canonical=canonical, pr_number=pr_number
         )
 
-        # 3. Whole-proposal staleness against fresh authoritative evidence.
-        current = fetch_snapshot()
-        try:
-            externalize._validate_current_repository(
-                current,
-                canonical=canonical,
-                pr_number=pr_number,
-                expected_head=packet["prepared_head"],
-            )
-            for target in packet["targets"]:
-                externalize._validate_applicable_target(current, target)
-        except externalize.FrozenEvidenceError as error:
-            raise RemediationStale(storage.error_text(error)) from error
-
-        # 4. Controller-owned proposal-bound tree derivation.
+        # 3. Controller-owned proposal-bound tree derivation.
         gitlocal.stage_complete_delta(worktree, runner=runner)
         prospective_tree = gitlocal.write_tree(worktree, runner=runner)
         base_tree = gitlocal.head_tree_oid(worktree, runner=runner)
@@ -674,7 +660,7 @@ def finalize_remediation(
                 "authorizes prospective-tree publication"
             )
 
-        # 5. Hook-free local commit and final remote-head validation.
+        # 4. Hook-free local commit and final remote-head validation.
         local_commit: str | None = None
         if publication_required:
             gitlocal.gitexec.preflight_publication(worktree, prospective_tree, executor=runner)
@@ -696,6 +682,20 @@ def finalize_remediation(
             storage.ensure_active_campaign_owner(
                 canonical, pr_number, token, repository_path=repository_path
             )
+
+        # 5. Revalidate the entire proposal after all speculative Git work.
+        current = fetch_snapshot()
+        try:
+            externalize._validate_current_repository(
+                current,
+                canonical=canonical,
+                pr_number=pr_number,
+                expected_head=packet["prepared_head"],
+            )
+            for target in packet["targets"]:
+                externalize._validate_applicable_target(current, target)
+        except externalize.FrozenEvidenceError as error:
+            raise RemediationStale(storage.error_text(error)) from error
 
         # 6. Durable remediation-round commitment (the commitment point).
         committed_record = storage.apply_campaign_transition_if_current(

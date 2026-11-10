@@ -70,6 +70,7 @@ def raw_thread(
         "root_login": author,
         "body": body,
         "root_updated_at": updated_at,
+        "replies": [],
         "url": f"https://example.test/{thread_id}",
     }
 
@@ -550,6 +551,46 @@ class StaleProposalTests(RemediationFixture):
         resolved = [raw_thread("T1", resolved=True)]
         result = self.finalize(fetch=lambda: self.snapshot(threads=resolved))
         self.stale(result)
+
+    def test_changed_replies_make_whole_proposal_stale(self) -> None:
+        reply = {
+            "id": "R1", "author_id": "U1", "body": "More context.", "updated_at": T0,
+        }
+        edited = {**reply, "body": "The original report is incorrect."}
+        for before, after in (([], [reply]), ([reply], [edited]), ([reply], [])):
+            with self.subTest(before=before, after=after):
+                self.prepare(threads=[{**raw_thread("T1"), "replies": before}])
+                resolved, resolve = self.resolving()
+                result = self.finalize(
+                    fetch=lambda: self.snapshot(
+                        threads=[{**raw_thread("T1"), "replies": after}]
+                    ),
+                    resolve_call=resolve,
+                )
+                self.stale(result)
+                self.assertEqual(resolved, [])
+
+    def test_reply_arriving_during_local_preparation_prevents_push(self) -> None:
+        self.prepare()
+        (self.worktree / "f.txt").write_text("v2\n", encoding="utf-8")
+
+        def remote_head(_ref: str) -> str:
+            self.threads = [
+                {**raw_thread("T1"), "replies": [
+                    {"id": "R1", "author_id": "U1", "author_login": "reviewer",
+                     "body": "This change is unnecessary.", "updated_at": T0},
+                ]},
+            ]
+            return self.h1
+
+        result = self.finalize(
+            proposal_text=proposal_json(
+                disposition("T1", "fix_now", mode=externalize.FIX_NOW_PROSPECTIVE)
+            ),
+            remote_head_call=remote_head,
+        )
+        self.stale(result)
+        self.assertEqual(self.remote_head(), self.h1)
 
     def test_new_feedback_outside_the_batch_neither_enlarges_nor_invalidates(self) -> None:
         self.prepare(threads=[raw_thread("T1")])

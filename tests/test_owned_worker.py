@@ -88,6 +88,7 @@ def thread(thread_id: str, *, login: str = CODEX, resolved: bool = False) -> dic
         "body": "change",
         "root_comment_id": f"{thread_id}-rc1",
         "root_updated_at": T0,
+        "replies": [],
         "url": f"https://example.test/{thread_id}",
     }
 
@@ -725,6 +726,7 @@ def raw_thread(
         "root_login": login,
         "root_comment_id": root_comment or f"{thread_id}-rc1",
         "root_updated_at": updated_at,
+        "replies": [],
         "path": "x.py",
         "body": "change",
         "url": f"https://example.test/{thread_id}",

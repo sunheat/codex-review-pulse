@@ -54,6 +54,7 @@ def thread(
         "root_login": author,
         "body": body,
         "root_updated_at": updated_at,
+        "replies": [],
         "url": f"https://example.test/{tid}",
     }
 
