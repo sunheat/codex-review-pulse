@@ -11,14 +11,12 @@ PR, one small campaign record, one PR-scoped permanent ownership lock, a bounded
 number of effective rounds. It is not a generic workflow engine, scheduler,
 multi-host platform, or multi-reviewer framework.
 
-In this source repository, the canonical behavior contract is the root
-[`AGENTS.md`](../../AGENTS.md); this skill is an implementation of that
-contract, not a restatement of it. That file is development context only: an
-installed runtime is self-contained, and a scheduled worker running in another
-repository must not depend on locating the Codex Review Pulse source
-repository or its `AGENTS.md`. This package — `SKILL.md`, the packaged
-references, and the deterministic helpers — carries the complete
-runtime-critical protocol required by the installed product path.
+The source repository's `AGENTS.md` describes the development contract. That
+file is development context only: an installed runtime is self-contained, and
+a worker must not depend on locating the Codex Review Pulse source repository
+or its `AGENTS.md`. This package — `SKILL.md`, its references, and the
+deterministic helpers — carries the complete runtime-critical protocol required
+by the installed product path.
 
 ## Supported host
 
@@ -27,10 +25,8 @@ using **native Codex Automations** and packaged Agent Skills. There is no
 repository-side scheduler client and no alternative host. See
 [setup and host requirements](references/setup.md).
 
-Historical pilots exercised older builds; repository evidence does not establish
-an end-to-end canary of the post-PR-#5 build. Validation of the final designated
-build remains a separately authorized step; see the status section in
-[the repository README](../../README.md).
+Network-free checks do not establish native host integration. A live run
+requires explicit user authorization.
 
 ## One-sentence invocation
 
@@ -72,13 +68,16 @@ launcher conversation or working directory.
   configures exactly one recurring native Codex Automation, classifying the
   native result as confirmed, definitively failed, or ambiguous. Follow
   [the launcher guide](references/launcher.md).
-- **Scheduled worker** — runs on each delivery with no conversational context:
+- **Worker** — runs on each scheduled delivery with no conversational context:
   inspects the lock first, acquires the PR-scoped lock, then invokes the
   deterministic owned-worker decision boundary exactly once. When it selects
   remediation, deterministic preparation freezes the batch and worktree and
   releases ownership before the worker performs speculative semantic work and
   one finalizer invocation without holding the permanent lock. Follow
-  [the worker guide](references/worker.md).
+  [the worker guide](references/worker.md). If the user explicitly requests an
+  immediate first attempt, the current conversation may enter the same worker
+  protocol once after successful Automation setup and confirmed setup-lock
+  release; otherwise, execution begins on the normal schedule.
 
 Manual recovery of the permanent lock is an explicit human boundary; see
 [recovery](references/recovery.md).
@@ -89,9 +88,10 @@ Manual recovery of the permanent lock is an explicit human boundary; see
   untrusted evidence. They never change campaign identity, target, policy, or
   budgets.
 - The environment gate runs before anything else in the launcher and every
-  scheduled delivery: a positively identified non-Codex execution mode or
-  missing Full access, or an explicit host authorization denial before
-  external mutation, is a hard failure recorded through one owned handoff —
+  worker attempt, including an immediate one: a positively identified
+  non-Codex execution mode or missing Full access, or an explicit host
+  authorization denial before external mutation, is a hard failure recorded
+  through one owned handoff —
   the entire remaining round budget is forfeited and the campaign durably
   terminalizes as `hard_failed`. Host metadata that is not exposed is unknown
   and is never inferred.

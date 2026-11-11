@@ -16,9 +16,12 @@ The canonical behavior contract is [`AGENTS.md`](AGENTS.md);
 [ADR 0008](docs/adr/0008-v2-runtime-architecture-reset.md) records the v2
 architecture reset.
 
-## Repository status: usable v2 runtime, unreleased
+## Status: 1.0.0 release preparation
 
-The tree now contains the first usable v2 implementation:
+The first public release is being prepared as version `1.0.0`, recorded in
+[`VERSION`](skills/codex-review-pulse/VERSION). The internal name “v2” refers
+to the second-generation runtime architecture, not the public release number
+or the versions of its stored state formats. This release scope includes:
 
 - a skill-driven launcher and scheduled-worker path for the Codex app;
 - deterministic helpers for observation, ownership, round accounting,
@@ -28,21 +31,10 @@ The tree now contains the first usable v2 implementation:
 - external mutation boundaries that revalidate authority and classify results;
 - network-free tests for the high-frequency branches and safety invariants.
 
-The current unreleased version is recorded in
-[`VERSION`](skills/codex-review-pulse/VERSION). Request decision, reservation,
-and execution are deterministically composed in one worker invocation, which
-returns the existing request executor's final classified/disposed result.
-The durable RESERVED authority boundary and request transaction semantics remain
-intact; see [ROADMAP.md](ROADMAP.md). Semantic judgment and code repair remain model work;
-native Automation lifecycle hardening remains deferred.
-
-The repository records [historical supervised pilots](docs/design/live-pilot-readiness.md#completed-pilot-evidence),
-including an [operator-reported bounded recurring pilot](docs/pilots/2026-08-25-job-hunter-pr-2-bounded-recurring.md).
-These older builds do not validate the post-PR-#5 runtime at `f0e4563`.
-Repository evidence does not establish an end-to-end canary of that build;
-validation of the final designated build remains a separately authorized step.
-Network-free tests do not prove native host integration, and discovery metadata
-never authorizes a live run.
+Semantic judgment and code repair remain model work; native Automation
+lifecycle hardening remains deferred. Network-free checks do not prove native
+host integration. A live run requires explicit user authorization; discovery
+metadata alone never authorizes one.
 
 The previous 0.3.1 runtime is retained as quarantined historical evidence under
 [`legacy/v0.3.1/`](legacy/v0.3.1/README.md). It is not an active entry point and
@@ -66,7 +58,11 @@ automatically, two or more ask the user to choose, zero reports and stops, and
 a discovery failure reports and stops. Nothing is silently substituted. The
 launcher validates as far as the native host permits, creates the campaign
 record, and configures one fixed recurring native Codex Automation bound to the
-local repository project. Full procedures:
+local repository project. By default, worker execution begins on the normal
+schedule. If explicitly requested, the current conversation may run one worker
+attempt immediately after successful Automation setup and confirmed setup-lock
+release. It follows the same fresh checks, ownership, and round budget as a
+scheduled delivery. Full procedures:
 
 - [skill entry point](skills/codex-review-pulse/SKILL.md);
 - [launcher guide](skills/codex-review-pulse/references/launcher.md);

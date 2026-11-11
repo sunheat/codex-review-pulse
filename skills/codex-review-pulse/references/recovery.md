@@ -31,10 +31,11 @@ Clearing a lock is safe only when the previous owner can no longer mutate the
 campaign, scheduler, Git, or GitHub state. Confirm that no Codex delivery,
 shell, worktree process, or automation for this campaign is still running.
 
-An interrupted attempt has already consumed its round; recovery does not
-refund rounds or restore a per-head review-request allowance. The next delivery
-starts from fresh authoritative GitHub and Git state. It does not resume an
-interrupted batch, worktree, or reasoning.
+If an interrupted attempt committed a round, that round remains consumed;
+interruptions before commitment consume none. Recovery does not refund rounds
+or restore a per-head review-request allowance. The next delivery starts from
+fresh authoritative GitHub and Git state. It does not resume an interrupted
+batch, worktree, or reasoning.
 
 ## Retained-lock quarantine states
 

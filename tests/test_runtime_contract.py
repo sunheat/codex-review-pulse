@@ -96,6 +96,53 @@ class SchedulerEvidenceContractTests(unittest.TestCase):
         self.assertIn("`$codex-review-pulse` marker is the supported", setup)
 
 
+class ImmediateWorkerContractTests(unittest.TestCase):
+    def test_launcher_requires_explicit_request_and_confirmed_setup_release(self) -> None:
+        launcher = _collapsed(REFERENCES / "launcher.md")
+        setup = launcher.split("## 6.", 1)[1].split("## 7.", 1)[0]
+        rollover = launcher.split("## 7.", 1)[1].split("## 8.", 1)[0]
+        self.assertIn("explicitly requests one immediate first worker attempt", launcher)
+        self.assertIn(
+            "Otherwise, execution begins on the ordinary recurring schedule", launcher
+        )
+        self.assertIn(
+            'Continue only after `{"released": true, ...}` confirms release', setup
+        )
+        self.assertIn("If release fails or its result is unknown, stop", setup)
+        self.assertIn('only `{"released": true, ...}` confirms release', rollover)
+        self.assertIn("If release fails or is unknown, stop", rollover)
+        self.assertIn(
+            "If setup failed or was ambiguous, or lock release was not confirmed, "
+            "do not start the immediate attempt",
+            launcher,
+        )
+        self.assertIn("or run a second immediate attempt for this launch", launcher)
+        self.assertIn("Never create a second or temporary Automation", launcher)
+        self.assertNotIn("Do not perform first-round work", launcher)
+        self.assertNotIn("Do not implement immediate bootstrap", launcher)
+
+    def test_immediate_attempt_uses_fresh_ordinary_worker_authority(self) -> None:
+        launcher = _collapsed(REFERENCES / "launcher.md")
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn(
+            "follow [the worker guide](worker.md) from its environment gate", launcher
+        )
+        self.assertIn("do not reuse the setup owner token, setup snapshot", launcher)
+        self.assertIn(
+            "ordinary PR-scoped lock, deterministic boundaries, round budget", launcher
+        )
+        self.assertIn(
+            "A busy or terminal observation follows the ordinary worker rules", launcher
+        )
+        self.assertIn(
+            "Start again with the environment gate, lock inspection, and fresh admission",
+            worker,
+        )
+        self.assertIn("read its policy from the current campaign record", worker)
+        self.assertIn("it has no native self identity for quarantine", worker)
+        self.assertIn("A handle from launcher setup is not a substitute", worker)
+
+
 class ResponseGraceTests(unittest.TestCase):
     CODEX = "chatgpt-codex-connector"
     H = "h1-oid"
@@ -461,6 +508,14 @@ class CleanupAuthorityTests(unittest.TestCase):
 
 
 class RecoveryDocumentationTests(unittest.TestCase):
+    def test_interruption_consumes_only_a_committed_round(self) -> None:
+        recovery = _collapsed(REFERENCES / "recovery.md")
+        self.assertIn(
+            "If an interrupted attempt committed a round, that round remains consumed",
+            recovery,
+        )
+        self.assertIn("interruptions before commitment consume none", recovery)
+
     def test_recovery_distinguishes_resume_from_retirement(self) -> None:
         recovery = _read(REFERENCES / "recovery.md")
         self.assertIn("resume", recovery.lower())

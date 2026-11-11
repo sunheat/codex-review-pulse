@@ -47,7 +47,7 @@ If the native host does not expose, cannot validate, or rejects requested config
 
 ### Execution environment gate
 
-Launcher and scheduled-worker execution starts with an environment gate, before PR inspection, GitHub mutation, sub-agent work, or extended analysis.
+Launcher and worker execution, whether scheduled or explicitly immediate, starts with an environment gate, before PR inspection, GitHub mutation, sub-agent work, or extended analysis.
 Where the native host authoritatively identifies the current task mode, Codex mode is required and ChatGPT, including ChatGPT Work, is rejected; where it authoritatively exposes effective permissions, Full access — unrestricted sandbox access and no approval prompts — is required.
 Values the host does not expose are unknown and are never inferred from model name, task title, directory, global settings, tool availability, or a different task.
 
@@ -606,6 +606,8 @@ Best-effort cleanup failure after otherwise safe product completion is residue, 
 The scheduler is dumb delivery infrastructure, not workflow state.
 
 A campaign uses one fixed recurring delivery mechanism.
+
+By default, the first worker attempt begins on that ordinary schedule. After confirmed compliant native Automation setup and confirmed release of the setup lock, an explicit user request may transition the current conversation from launcher to worker for one immediate attempt. That attempt starts with fresh environment and admission checks and follows the ordinary worker protocol for the same campaign, including PR-scoped ownership, deterministic boundaries, round budget, testing policy, and result handling. It does not reuse setup ownership or evidence, create a second Automation, duplicate an action, or grant an additional round. A busy or terminal campaign follows the normal worker rules. Failed or ambiguous setup, unconfirmed release, or no explicit request never starts the immediate attempt; do not repeat it for that launch.
 
 Normal workers do not create successors or build a scheduler lifecycle protocol.
 

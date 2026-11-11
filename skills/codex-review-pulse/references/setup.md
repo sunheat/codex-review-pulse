@@ -116,9 +116,7 @@ setup preserves the campaign and lock fail closed for explicit human recovery.
 ## Verification boundary
 
 The deterministic helpers, state machine, owned boundaries, and external
-mutation boundaries are covered by network-free unit tests. Native
-Automation creation, scheduled delivery in the Codex app, and live GitHub
-mutation paths require a separately authorized Codex-app canary of the final
-designated build. Historical pilots exercised older builds; repository evidence
-does not establish an end-to-end canary of the post-PR-#5 runtime. Those pilots
-do not establish current-build validation; see [the repository README](../../../README.md).
+mutation boundaries are covered by network-free unit tests. Local and CI
+checks do not establish native Automation creation, scheduled delivery in the
+Codex app, or live GitHub mutation behavior. A live Codex-app run requires
+explicit user authorization.
