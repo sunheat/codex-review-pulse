@@ -117,6 +117,15 @@ def load_json(path: str | Path) -> dict[str, Any] | None:
     return payload
 
 
+def _sync_directory(directory: Path) -> None:
+    if os.name == "posix":
+        directory_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+
 def save_json(path: str | Path, payload: dict[str, Any]) -> None:
     """Atomically replace a JSON document using a sibling temporary file."""
     target = Path(path)
@@ -138,12 +147,7 @@ def save_json(path: str | Path, payload: dict[str, Any]) -> None:
             os.fsync(stream.fileno())
         os.replace(temporary_name, target)
         temporary_name = None
-        if os.name == "posix":
-            directory_fd = os.open(target.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+        _sync_directory(target.parent)
     finally:
         if temporary_name is not None:
             try:
@@ -1044,6 +1048,7 @@ def abort_unused_campaign(
                 "rounds and no request guards"
             )
         path.unlink()
+        _sync_directory(path.parent)
         target.unlink()
     return {"aborted": True, "removed": str(path)}
 
@@ -1169,6 +1174,7 @@ def retire_campaign_retaining_lock(
                 "lock explicitly before retiring the campaign"
             )
         path.unlink()
+        _sync_directory(path.parent)
         target.unlink()
     return {"retired": True, "mode": "retained-lock", "campaign_id": expected_campaign_id}
 
@@ -1204,6 +1210,7 @@ def retire_campaign_without_lock(
                 "Use explicit lock recovery first"
             )
         path.unlink()
+        _sync_directory(path.parent)
     return {"retired": True, "mode": "lock-absent", "campaign_id": expected_campaign_id}
 
 

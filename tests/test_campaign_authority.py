@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "skills" / "codex-review-pulse" / "scripts"
@@ -801,6 +802,45 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(result["mode"], "retained-lock")
         self.assertFalse(self.campaign_file().exists())
         self.assertEqual(self.lock_status(), "absent")
+
+    def test_campaign_removal_requires_directory_sync_before_releasing_authority(self) -> None:
+        for mode in ("lock-absent", "retained-lock", "abort"):
+            with self.subTest(mode=mode):
+                token = self.setup_owned()
+                campaign_file = self.campaign_file()
+                lock_file = storage.lock_path("owner/repo", 7, repository_path=self.repo)
+                if mode == "lock-absent":
+                    storage.release_lock("owner/repo", 7, token, repository_path=self.repo)
+                retirement = {
+                    "expected_campaign_id": CAMPAIGN_ID,
+                    "user_authorized_retirement": True,
+                    "repository_path": self.repo,
+                }
+
+                def fail_sync(directory: Path) -> None:
+                    self.assertEqual(directory, campaign_file.parent)
+                    self.assertFalse(campaign_file.exists())
+                    self.assertEqual(lock_file.exists(), mode != "lock-absent")
+                    raise OSError("directory sync failed")
+
+                with mock.patch.object(
+                    storage, "_sync_directory", side_effect=fail_sync
+                ), self.assertRaisesRegex(OSError, "directory sync failed"):
+                    if mode == "lock-absent":
+                        storage.retire_campaign_without_lock("owner/repo", 7, **retirement)
+                    elif mode == "retained-lock":
+                        storage.retire_campaign_retaining_lock(
+                            "owner/repo", 7,
+                            expected_lock_witness=self.lock_witness(),
+                            **retirement,
+                        )
+                    else:
+                        storage.abort_unused_campaign(
+                            "owner/repo", 7, owner_token=token, repository_path=self.repo
+                        )
+                self.assertEqual(lock_file.exists(), mode != "lock-absent")
+                if lock_file.exists():
+                    lock_file.unlink()
 
     def test_retirement_refuses_replacement_owner_in_same_campaign(self) -> None:
         self.setup_owned()
