@@ -22,9 +22,10 @@ import re
 import subprocess
 import sys
 from typing import Any, Callable
+from urllib.parse import quote
 
 import storage
-from campaign_model import canonical_repository, normalize_login
+from campaign_model import canonical_repository, github_account_id, normalize_login
 
 
 class GithubRejectionError(RuntimeError):
@@ -67,6 +68,26 @@ def run_json(command: list[str], stdin: str | None = None) -> Any:
         return json.loads(run(command, stdin))
     except json.JSONDecodeError as error:
         raise RuntimeError(f"Command did not return JSON: {' '.join(command)}") from error
+
+
+def resolve_bot_account_id(login: str) -> int:
+    """Look up the exact GitHub App bot account named by setup configuration."""
+    name = normalize_login(login)
+    if name is None or not re.fullmatch(r"[a-z0-9-]+", name):
+        raise ValueError("Expected a GitHub App bot login")
+    bot_login = f"{name}[bot]"
+    account = run_json(["gh", "api", f"users/{quote(bot_login, safe='')}"])
+    if isinstance(account, dict):
+        returned_login = account.get("login")
+        account_id = github_account_id(account.get("id"))
+        if (
+            account.get("type") == "Bot"
+            and isinstance(returned_login, str)
+            and returned_login.casefold() == bot_login
+            and account_id is not None
+        ):
+            return account_id
+    raise RuntimeError(f"GitHub did not verify the configured bot account {bot_login}")
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -357,7 +378,10 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
           id isResolved isOutdated path
           comments(first: 100) {
             pageInfo { hasNextPage endCursor }
-            nodes { id body updatedAt author { login ... on Node { id } } url }
+            nodes {
+              id body updatedAt url
+              author { login ... on Node { id } ... on Bot { databaseId } ... on User { databaseId } }
+            }
           }
         }
       }
@@ -407,7 +431,7 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String, $content:
     pullRequest(number: $number) {
       reactions(first: 100, after: $cursor, content: $content) {
         pageInfo { hasNextPage endCursor }
-        nodes { id content createdAt user { login } }
+        nodes { id content createdAt user { login databaseId } }
       }
     }
   }
@@ -421,7 +445,8 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
       reviews(first: 100, after: $cursor) {
         pageInfo { hasNextPage endCursor }
         nodes {
-          id state body submittedAt updatedAt author { login } url
+          id state body submittedAt updatedAt url
+          author { login ... on Bot { databaseId } ... on User { databaseId } }
           commit { oid }
         }
       }
@@ -436,7 +461,10 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
     pullRequest(number: $number) {
       comments(first: 100, after: $cursor) {
         pageInfo { hasNextPage endCursor }
-        nodes { id body createdAt updatedAt author { login } url }
+        nodes {
+          id body createdAt updatedAt url
+          author { login ... on Bot { databaseId } ... on User { databaseId } }
+        }
       }
     }
   }
@@ -522,6 +550,7 @@ def normalize_snapshot(
                 "path": thread.get("path"),
                 "root_comment_id": root.get("id"),
                 "root_login": normalize_login((root.get("author") or {}).get("login")),
+                "root_account_id": github_account_id((root.get("author") or {}).get("databaseId")),
                 "body": root.get("body"),
                 "root_updated_at": root.get("updatedAt"),
                 "url": root.get("url"),
@@ -542,6 +571,7 @@ def normalize_snapshot(
             "id": item.get("id"),
             "content": item.get("content"),
             "login": normalize_login((item.get("user") or {}).get("login")),
+            "account_id": github_account_id((item.get("user") or {}).get("databaseId")),
             "created_at": item.get("createdAt"),
         }
         for item in reactions
@@ -551,6 +581,7 @@ def normalize_snapshot(
             "id": item.get("id"),
             "state": item.get("state"),
             "login": normalize_login((item.get("author") or {}).get("login")),
+            "account_id": github_account_id((item.get("author") or {}).get("databaseId")),
             "commit_oid": (item.get("commit") or {}).get("oid"),
             "submitted_at": item.get("submittedAt"),
             "body": item.get("body"),
@@ -562,6 +593,7 @@ def normalize_snapshot(
         {
             "id": item.get("id"),
             "login": normalize_login((item.get("author") or {}).get("login")),
+            "account_id": github_account_id((item.get("author") or {}).get("databaseId")),
             "created_at": item.get("createdAt"),
             "body": item.get("body"),
             "url": item.get("url"),

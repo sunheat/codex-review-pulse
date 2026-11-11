@@ -35,8 +35,8 @@ def campaign() -> dict:
         model="a-model",
         reasoning_level="medium",
         interval_minutes=30,
-        reviewer_logins=[CODEX],
-        approval_logins=[CODEX],
+        reviewer_ids=[71],
+        approval_ids=[71],
     )
 
 
@@ -262,7 +262,7 @@ class RequestBoundaryTests(unittest.TestCase):
         result = self.run_boundary(
             observer=lambda: snap(
                 time=T1,
-                threads=[{"id": "T1", "is_resolved": False, "root_login": CODEX}],
+                threads=[{"id": "T1", "is_resolved": False, "root_login": CODEX, "root_account_id": 71}],
             ),
             commenter=lambda *a: posted.append(a) or {},
         )
@@ -291,7 +291,7 @@ class RequestBoundaryTests(unittest.TestCase):
         posted = []
         result = self.run_boundary(
             observer=lambda: snap(time=T1, reactions=[{
-                "id": "pr-up", "content": m.THUMBS_UP, "login": CODEX,
+                "id": "pr-up", "content": m.THUMBS_UP, "login": CODEX, "account_id": 71,
                 "created_at": "2026-09-13T12:00:00Z",
             }]),
             commenter=lambda *args: posted.append(args) or {},

@@ -56,8 +56,8 @@ def campaign(status: str = model.ACTIVE) -> dict:
         model="a-model",
         reasoning_level="medium",
         interval_minutes=30,
-        reviewer_logins=["chatgpt-codex-connector"],
-        approval_logins=["chatgpt-codex-connector"],
+        reviewer_ids=[71],
+        approval_ids=[71],
     )
     if status != model.ACTIVE:
         data = model.terminate(data, status=status, at="2026-09-14T12:05:00Z")

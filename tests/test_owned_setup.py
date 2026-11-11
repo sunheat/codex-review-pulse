@@ -74,11 +74,19 @@ def snapshot(
 
 
 def reaction(content: str, rid: str, *, login: str = CODEX, created_at: str = "2026-09-14T09:00:00Z") -> dict:
-    return {"id": rid, "content": content, "login": login, "created_at": created_at}
+    return {
+        "id": rid, "content": content, "login": login,
+        "account_id": 71 if login == CODEX else 72, "created_at": created_at,
+    }
 
 
 class OwnedBoundaryFixture(unittest.TestCase):
     def setUp(self) -> None:
+        lookup_bot = unittest.mock.patch.object(
+            owned.github_api, "resolve_bot_account_id", return_value=71
+        )
+        self.lookup_bot = lookup_bot.start()
+        self.addCleanup(lookup_bot.stop)
         self._tmp = tempfile.TemporaryDirectory()
         self.repo = Path(self._tmp.name) / "repo"
         self.repo.mkdir()
@@ -124,8 +132,8 @@ class OwnedBoundaryFixture(unittest.TestCase):
             model="a-model",
             reasoning_level="medium",
             interval_minutes=30,
-            reviewer_logins=[CODEX],
-            approval_logins=[CODEX],
+            reviewer_ids=[71],
+            approval_ids=[71],
         )
 
 
@@ -157,6 +165,9 @@ class CreationAuthorityTests(OwnedBoundaryFixture):
         self.assertTrue(result["created"])
         record = self.campaign_record()
         model.validate_campaign(record, repository="owner/repo", pull_request_number=7)
+        self.lookup_bot.assert_called_once_with(CODEX)
+        self.assertEqual(record["config"]["reviewer_ids"], [71])
+        self.assertEqual(record["config"]["approval_ids"], [71])
         self.assertIs(record["config"]["run_full_tests"], False)
         # The campaign identity is the one preallocated on the setup lock.
         self.assertEqual(record["campaign_id"], CAMPAIGN_ID)
@@ -175,6 +186,17 @@ class CreationAuthorityTests(OwnedBoundaryFixture):
     def test_creation_persists_full_suite_opt_in(self) -> None:
         self.assertTrue(self.create(snapshot(), run_full_tests=True)["created"])
         self.assertIs(self.campaign_record()["config"]["run_full_tests"], True)
+
+    def test_unverified_bot_cancels_setup(self) -> None:
+        self.lookup_bot.side_effect = RuntimeError("Bot lookup failed")
+
+        result = self.create(snapshot())
+
+        self.assertFalse(result["created"])
+        self.assertTrue(result["cancelled"])
+        self.assertIn("Bot lookup failed", result["reason"])
+        self.assertIsNone(self.campaign_record())
+        self.assertEqual(self.lock_status(), "absent")
 
     def test_caller_cannot_select_the_creation_snapshot_or_its_evidence(self) -> None:
         with self.assertRaises(TypeError):
@@ -286,8 +308,8 @@ class CreationAuthorityTests(OwnedBoundaryFixture):
             model="m",
             reasoning_level="low",
             interval_minutes=30,
-            reviewer_logins=[CODEX],
-            approval_logins=[CODEX],
+            reviewer_ids=[71],
+            approval_ids=[71],
             creation_baseline=["eyes-1"],
         )
         self.assertEqual(campaign["creation_baseline"], {"reaction_ids": ["eyes-1"]})

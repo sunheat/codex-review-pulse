@@ -13,6 +13,7 @@ sys.path.insert(0, str(SCRIPTS))
 FIXTURES = ROOT / "tests" / "fixtures"
 
 import github_api  # noqa: E402
+import campaign_model as model  # noqa: E402
 
 
 SERVER_TIME = "2026-09-14T12:00:00Z"
@@ -115,6 +116,32 @@ class FakeGraphQL:
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_codex_evidence_follows_bound_account_through_rename(self) -> None:
+        renamed = {"login": "renamed-connector", "databaseId": 71}
+        impostor = {"login": CODEX, "databaseId": 72}
+        fake = FakeGraphQL(reactions={"THUMBS_UP": [
+            {"id": "other-up", "content": "THUMBS_UP", "user": impostor},
+            {"id": "codex-up", "content": "THUMBS_UP", "user": renamed},
+        ]})
+        fake.threads = [
+            {"id": thread_id, "comments": {
+                "nodes": [{"id": thread_id + "-root", "author": author}],
+                "pageInfo": {"hasNextPage": False},
+            }}
+            for thread_id, author in (("codex-thread", renamed), ("other-thread", impostor))
+        ]
+        snapshot = github_api.fetch_snapshot(
+            "owner/repo", 7, graphql_call=fake, viewer_call=lambda: "operator"
+        )
+        campaign = {"config": {
+            "reviewer_ids": [71], "approval_ids": [71],
+        }}
+
+        evidence = model.evaluate(campaign, snapshot)
+
+        self.assertEqual([thread["id"] for thread in evidence["threads"]], ["codex-thread"])
+        self.assertEqual(evidence["approval"]["id"], "codex-up")
+
     def test_snapshot_includes_replies_from_every_thread_comment_page(self) -> None:
         def reply(comment_id: str, author: dict | None) -> dict:
             return {

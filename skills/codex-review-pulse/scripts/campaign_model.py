@@ -17,7 +17,7 @@ import secrets
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_CODEX_LOGINS = ("chatgpt-codex-connector",)
 
 MIN_ROUNDS = 1
@@ -109,7 +109,7 @@ def canonical_repository(repository: str) -> str:
 
 
 def normalize_login(login: object) -> str | None:
-    """Normalize GitHub bot/non-bot spellings to one stable identity key."""
+    """Normalize GitHub login spellings for name-based lookups and diagnostics."""
     if not isinstance(login, str):
         return None
     value = login.strip().casefold()
@@ -118,25 +118,16 @@ def normalize_login(login: object) -> str | None:
     return value or None
 
 
-def unique_logins(
-    configured: Iterable[str] | None,
-    *,
-    defaults: Iterable[str] = DEFAULT_CODEX_LOGINS,
-    label: str,
-) -> list[str]:
-    values = list(configured) if configured is not None else list(defaults)
-    result: list[str] = []
-    seen: set[str] = set()
-    for login in values:
-        key = normalize_login(login)
-        if key is None:
-            raise ValueError(f"{label} logins must not be empty")
-        if key not in seen:
-            result.append(key)
-            seen.add(key)
-    if not result:
-        raise ValueError(f"At least one {label} login is required")
-    return result
+def github_account_id(value: object) -> int | None:
+    """Accept only a positive numeric GitHub account ID."""
+    return value if type(value) is int and value > 0 else None
+
+
+def unique_account_ids(values: Iterable[int], *, label: str) -> list[int]:
+    ids = list(values)
+    if not ids or any(github_account_id(value) is None for value in ids):
+        raise ValueError(f"{label} must contain positive GitHub account IDs")
+    return list(dict.fromkeys(ids))
 
 
 def campaign_source_digest(campaign: dict[str, Any]) -> str:
@@ -203,8 +194,8 @@ def canonical_creation_baseline(reaction_ids: Iterable[str] | None) -> dict[str,
 def creation_baseline_reaction_ids(
     snapshot: dict[str, Any],
     *,
-    reviewer_logins: Iterable[str],
-    approval_logins: Iterable[str],
+    reviewer_ids: Iterable[int],
+    approval_ids: Iterable[int],
 ) -> list[str]:
     """Applicable pre-existing lifecycle reaction IDs for the creation baseline.
 
@@ -214,16 +205,16 @@ def creation_baseline_reaction_ids(
     its per-head request allowance. PR-level THUMBS_UP approval is independent
     of this lifecycle baseline.
     """
-    reviewer_keys = set(reviewer_logins)
-    approval_keys = set(approval_logins)
+    reviewer_keys = set(reviewer_ids)
+    approval_keys = set(approval_ids)
     ids: set[str] = set()
     for reaction in snapshot.get("reactions", []):
         if not isinstance(reaction, dict) or not isinstance(reaction.get("id"), str):
             continue
         content = reaction.get("content")
-        login = reaction.get("login")
-        if (content == EYES and login in reviewer_keys) or (
-            content == THUMBS_UP and login in approval_keys
+        account_id = github_account_id(reaction.get("account_id"))
+        if (content == EYES and account_id in reviewer_keys) or (
+            content == THUMBS_UP and account_id in approval_keys
         ):
             ids.add(reaction["id"])
     return sorted(ids)
@@ -239,8 +230,8 @@ def new_campaign(
     model: str,
     reasoning_level: str,
     interval_minutes: int,
-    reviewer_logins: Iterable[str],
-    approval_logins: Iterable[str],
+    reviewer_ids: Iterable[int],
+    approval_ids: Iterable[int],
     creation_baseline: Iterable[str] | None = None,
     run_full_tests: bool = False,
 ) -> dict[str, Any]:
@@ -284,8 +275,8 @@ def new_campaign(
             "reasoning_level": reasoning_level.strip(),
             "interval_minutes": interval_minutes,
             "run_full_tests": run_full_tests,
-            "reviewer_logins": unique_logins(reviewer_logins, label="reviewer"),
-            "approval_logins": unique_logins(approval_logins, label="approval"),
+            "reviewer_ids": unique_account_ids(reviewer_ids, label="reviewer_ids"),
+            "approval_ids": unique_account_ids(approval_ids, label="approval_ids"),
         },
         "guards": [],
     }
@@ -421,10 +412,10 @@ def validate_campaign(
     for key in ("model", "reasoning_level"):
         if not _is_nonempty_str(config.get(key)):
             raise ValueError(f"Campaign {key} is invalid")
-    for key in ("reviewer_logins", "approval_logins"):
-        logins = config.get(key)
-        if not isinstance(logins, list) or not logins or not all(
-            isinstance(item, str) and normalize_login(item) == item for item in logins
+    for key in ("reviewer_ids", "approval_ids"):
+        ids = config.get(key)
+        if not isinstance(ids, list) or not ids or not all(
+            github_account_id(item) is not None for item in ids
         ):
             raise ValueError(f"Campaign {key} is invalid")
     status = campaign.get("status")
@@ -764,22 +755,23 @@ def hard_fail(
 
 
 def applicable_unresolved_threads(
-    snapshot: dict[str, Any], reviewer_logins: Iterable[str]
+    snapshot: dict[str, Any], reviewer_ids: Iterable[int]
 ) -> list[dict[str, Any]]:
     """Applicable unresolved threads with their frozen identity fields.
 
     Emitted fields are the Python-owned frozen evidence the external mutation
     boundaries revalidate before every externalization: exact thread path,
-    root review-comment ID, normalized root-author identity, exact root body,
-    and root ``updatedAt``. Boundaries derive these fields from the snapshot
+    root review-comment ID, root-author account ID, exact root body, and
+    root ``updatedAt``. Boundaries derive these fields from the snapshot
     themselves; the model never supplies or retypes them.
     """
-    keys = set(reviewer_logins)
+    keys = set(reviewer_ids)
     threads: list[dict[str, Any]] = []
     for thread in snapshot.get("threads", []):
         if not isinstance(thread, dict) or thread.get("is_resolved") is True:
             continue
-        if thread.get("root_login") in keys and isinstance(thread.get("id"), str):
+        author_id = github_account_id(thread.get("root_account_id"))
+        if author_id in keys and isinstance(thread.get("id"), str):
             threads.append(
                 {
                     "id": thread["id"],
@@ -788,6 +780,7 @@ def applicable_unresolved_threads(
                     "body": thread.get("body"),
                     "root_comment_id": thread.get("root_comment_id"),
                     "root_author": thread.get("root_login"),
+                    "root_author_id": author_id,
                     "root_updated_at": thread.get("root_updated_at"),
                 }
             )
@@ -908,14 +901,14 @@ def evaluate(
 ) -> dict[str, Any]:
     """Normalize current-state evidence for the current head."""
     config = campaign["config"]
-    reviewer_keys = set(config["reviewer_logins"])
-    approval_keys = set(config["approval_logins"])
+    reviewer_keys = set(config["reviewer_ids"])
+    approval_keys = set(config["approval_ids"])
     actor_keys = reviewer_keys | approval_keys
     head_oid = snapshot.get("head_oid")
     guard = guard_for_head(campaign, head_oid) if isinstance(head_oid, str) else None
     floor = _temporal_floor(guard)
 
-    threads = applicable_unresolved_threads(snapshot, config["reviewer_logins"])
+    threads = applicable_unresolved_threads(snapshot, config["reviewer_ids"])
 
     # PR-level thumbs-up approves the whole PR, independently of commits,
     # campaign/request baselines, timestamps, and request windows. Prefer its
@@ -925,7 +918,7 @@ def evaluate(
         if (
             isinstance(reaction, dict)
             and reaction.get("content") == THUMBS_UP
-            and reaction.get("login") in approval_keys
+            and github_account_id(reaction.get("account_id")) in approval_keys
             and isinstance(reaction.get("id"), str)
         ):
             approval = {
@@ -941,7 +934,7 @@ def evaluate(
             if (
                 isinstance(review, dict)
                 and review.get("state") == APPROVED
-                and review.get("login") in approval_keys
+                and github_account_id(review.get("account_id")) in approval_keys
                 and review.get("commit_oid") == head_oid
             ):
                 approval = {"kind": "review", "id": review.get("id")}
@@ -953,7 +946,7 @@ def evaluate(
             if (
                 isinstance(reaction, dict)
                 and reaction.get("content") == EYES
-                and reaction.get("login") in reviewer_keys
+                and github_account_id(reaction.get("account_id")) in reviewer_keys
                 and _eligible(
                     reaction,
                     created_field="created_at",
@@ -969,7 +962,10 @@ def evaluate(
     completed_reviews: list[dict[str, Any]] = []
     ambiguous_artifacts: list[dict[str, Any]] = []
     for review in snapshot.get("reviews", []):
-        if not isinstance(review, dict) or review.get("login") not in actor_keys:
+        if (
+            not isinstance(review, dict)
+            or github_account_id(review.get("account_id")) not in actor_keys
+        ):
             continue
         if review.get("commit_oid") != head_oid:
             continue
@@ -1005,7 +1001,10 @@ def evaluate(
     # be a completion signal and always blocks a "no response" conclusion.
     codex_comments: list[dict[str, Any]] = []
     for comment in snapshot.get("comments", []):
-        if not isinstance(comment, dict) or comment.get("login") not in actor_keys:
+        if (
+            not isinstance(comment, dict)
+            or github_account_id(comment.get("account_id")) not in actor_keys
+        ):
             continue
         if _in_baseline(campaign, guard, comment.get("id")):
             continue
@@ -1028,7 +1027,7 @@ def evaluate(
     for reaction in snapshot.get("reactions", []):
         if (
             isinstance(reaction, dict)
-            and reaction.get("login") in actor_keys
+            and github_account_id(reaction.get("account_id")) in actor_keys
             and reaction.get("content") in (THUMBS_UP, EYES)
             and not _in_baseline(campaign, guard, reaction.get("id"))
             and floor is not None
@@ -1059,7 +1058,7 @@ def evaluate(
             if _in_baseline(campaign, None, reaction.get("id")):
                 continue
             content = reaction.get("content")
-            if content == EYES and reaction.get("login") in reviewer_keys:
+            if content == EYES and github_account_id(reaction.get("account_id")) in reviewer_keys:
                 unattributable_reactions.append(
                     {
                         "id": reaction["id"],

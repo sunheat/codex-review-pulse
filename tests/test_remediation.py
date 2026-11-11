@@ -68,6 +68,7 @@ def raw_thread(
         "path": path,
         "root_comment_id": f"{thread_id}-rc1",
         "root_login": author,
+        "root_account_id": 71 if author == CODEX else 72 if author else None,
         "body": body,
         "root_updated_at": updated_at,
         "replies": [],
@@ -154,8 +155,8 @@ class RemediationFixture(unittest.TestCase):
                 model="a-model",
                 reasoning_level="medium",
                 interval_minutes=30,
-                reviewer_logins=[CODEX],
-                approval_logins=[CODEX],
+                reviewer_ids=[71],
+                approval_ids=[71],
             ),
             repository_path=self.clone,
         )

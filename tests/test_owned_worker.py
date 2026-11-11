@@ -84,6 +84,7 @@ def thread(thread_id: str, *, login: str = CODEX, resolved: bool = False) -> dic
         "id": thread_id,
         "is_resolved": resolved,
         "root_login": login,
+        "root_account_id": 71 if login == CODEX else 72,
         "path": "x.py",
         "body": "change",
         "root_comment_id": f"{thread_id}-rc1",
@@ -97,7 +98,7 @@ def reaction(content: str, rid: str, *, created_at: str = T_EARLY) -> dict:
     return {
         "id": rid,
         "content": content,
-        "login": CODEX,
+        "login": CODEX, "account_id": 71,
         "created_at": created_at,
     }
 
@@ -106,7 +107,7 @@ def review(*, state: str = "APPROVED", review_id: str = "rv1", head: str = H1, s
     return {
         "id": review_id,
         "state": state,
-        "login": CODEX,
+        "login": CODEX, "account_id": 71,
         "commit_oid": head,
         "submitted_at": submitted_at,
     }
@@ -134,8 +135,8 @@ class WorkerDecisionFixture(unittest.TestCase):
             model="a-model",
             reasoning_level="medium",
             interval_minutes=30,
-            reviewer_logins=[CODEX],
-            approval_logins=[CODEX],
+            reviewer_ids=[71],
+            approval_ids=[71],
         )
         storage.save_json(self.campaign_path(), self.campaign)
         result = storage.acquire_worker_lock(
@@ -724,6 +725,7 @@ def raw_thread(
         "id": thread_id,
         "is_resolved": resolved,
         "root_login": login,
+        "root_account_id": 71 if login == CODEX else 72,
         "root_comment_id": root_comment or f"{thread_id}-rc1",
         "root_updated_at": updated_at,
         "replies": [],

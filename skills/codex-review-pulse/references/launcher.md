@@ -149,9 +149,15 @@ Append `--run-full-tests` only for an explicit setup request to run the full
 suite before each remediation push. Use the same rule for `prepare-rollover`
 when creating a replacement campaign.
 
-Reviewer and approval identities default to `chatgpt-codex-connector`; pass
-explicit `--reviewer-login` / `--approval-login` repeats only when the target
-Codex identity genuinely differs.
+Reviewer and approval bot logins default to `chatgpt-codex-connector`; pass
+repeatable `--reviewer-login` / `--approval-login` options when the target
+Codex identity differs. Creation and rollover verify the configured GitHub
+App bot accounts and bind their numeric account IDs for the new campaign.
+Each delivery matches GitHub evidence against those IDs. If setup cannot
+verify a configured bot, it rejects the new campaign. To use a replacement
+bot, verify its login and select it when creating a new campaign.
+Use the previous runtime to finish or retire any campaign created before
+account-ID binding.
 
 The helper itself: verifies the setup ownership condition, fetches one fresh
 complete authoritative GitHub snapshot while the lock stays held, validates the

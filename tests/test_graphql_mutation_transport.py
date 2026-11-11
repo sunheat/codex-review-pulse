@@ -356,7 +356,7 @@ class OwnedRequestRepository:
                 campaign_id=CAMPAIGN_ID, repository="owner/repo",
                 pull_request_number=7, created_at=T0, max_rounds=6,
                 model="a-model", reasoning_level="medium", interval_minutes=30,
-                reviewer_logins=[CODEX], approval_logins=[CODEX],
+                reviewer_ids=[71], approval_ids=[71],
             ),
             repository_path=self.path,
         )
@@ -398,8 +398,8 @@ class HigherLevelClassificationTests(unittest.TestCase):
                     campaign_id=CAMPAIGN_ID, repository="owner/repo",
                     pull_request_number=7, created_at=T0, max_rounds=6,
                     model="a-model", reasoning_level="medium",
-                    interval_minutes=30, reviewer_logins=[CODEX],
-                    approval_logins=[CODEX],
+                    interval_minutes=30, reviewer_ids=[71],
+                    approval_ids=[71],
                 ),
                 kind="remediation",
             )
@@ -416,7 +416,7 @@ class HigherLevelClassificationTests(unittest.TestCase):
                 "threads": [{
                     "id": "T1", "is_resolved": False, "is_outdated": False,
                     "path": "src/a.py", "root_comment_id": "T1-c1",
-                    "root_login": CODEX, "body": "Fix this.",
+                    "root_login": CODEX, "root_account_id": 71, "body": "Fix this.",
                     "root_updated_at": T0, "url": "https://example.test/T1",
                     "replies": [],
                 }],

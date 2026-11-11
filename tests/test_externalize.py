@@ -52,6 +52,7 @@ def thread(
         "path": path,
         "root_comment_id": root_comment or f"{tid}-c1",
         "root_login": author,
+        "root_account_id": 71 if author == CODEX else 72 if author else None,
         "body": body,
         "root_updated_at": updated_at,
         "replies": [],
@@ -115,8 +116,8 @@ class OwnedRepository:
                 model="a-model",
                 reasoning_level="medium",
                 interval_minutes=30,
-                reviewer_logins=[CODEX],
-                approval_logins=[CODEX],
+                reviewer_ids=[71],
+                approval_ids=[71],
             ),
             kind="remediation",
         )
@@ -312,7 +313,7 @@ class FrozenEvidenceAuthorityTests(ExternalizeTests):
         ):
             parameters = inspect.signature(boundary).parameters
             for forbidden in (
-                "root_comment_id", "root_author", "root_updated_at",
+                "root_comment_id", "root_author", "root_author_id", "root_updated_at",
                 "frozen_body", "body_fingerprint", "classification",
             ):
                 self.assertNotIn(forbidden, parameters, boundary.__name__)
@@ -433,7 +434,7 @@ class IssueIdentityTests(ExternalizeTests):
             repository="owner/repo", pr_number=7, triage_head=H2, target=target
         )
         self.assertNotEqual(first, second)
-        self.assertTrue(first.startswith("crpf1-"))
+        self.assertTrue(first.startswith("crpf2-"))
 
     def test_fingerprint_changes_with_any_frozen_field(self) -> None:
         base = externalize._frozen_thread(self.frozen, "T1")
@@ -442,7 +443,7 @@ class IssueIdentityTests(ExternalizeTests):
         )
         for mutation in (
             {"root_comment_id": "other"},
-            {"root_author": "someone-else"},
+            {"root_author_id": 72},
             {"body": "edited"},
             {"root_updated_at": "2026-09-14T23:59:59Z"},
             {"path": "src/b.py"},
@@ -459,21 +460,45 @@ class EnsureDeferredIssueTests(ExternalizeTests):
     def marker(self) -> str:
         return externalize.deferred_issue_marker("owner/repo", 7, "T1")
 
-    def test_exact_marker_fingerprint_author_and_open_reuses(self) -> None:
+    def test_renamed_bot_reuses_existing_deferred_issue(self) -> None:
+        renamed = snapshot(threads=[dict(thread(), root_login="renamed-connector")])
+        self.fixture.write_frozen(renamed)
         issue = {
             "number": 42,
             "url": "https://example.test/issues/42",
-            "body": (
-                f"text\n{self.marker()}\n"
-                f"<!-- codex-review-pulse-fingerprint: {self.fingerprint} -->"
-            ),
+            "body": f"{self.marker()}\n<!-- codex-review-pulse-fingerprint: {self.fingerprint} -->",
             "author": {"login": VIEWER},
         }
-        result, created = self.ensure_issue(list_issues=lambda: [issue])
-        self.assertEqual(result["classification"], "confirmed_success")
+
+        result, created = self.ensure_issue(
+            fetch_snapshot=lambda: renamed, list_issues=lambda: [issue],
+        )
+
         self.assertEqual(result["action"], "reused")
         self.assertEqual(result["issue_number"], 42)
         self.assertEqual(created, [])
+
+    def test_exact_marker_fingerprint_author_and_open_reuses(self) -> None:
+        legacy = externalize.deferred_issue_fingerprint(
+            repository="owner/repo", pr_number=7, triage_head=H1,
+            target=externalize._frozen_thread(self.frozen, "T1"), legacy=True,
+        )
+        for fingerprint in (self.fingerprint, legacy):
+            with self.subTest(fingerprint=fingerprint):
+                issue = {
+                    "number": 42,
+                    "url": "https://example.test/issues/42",
+                    "body": (
+                        f"text\n{self.marker()}\n"
+                        f"<!-- codex-review-pulse-fingerprint: {fingerprint} -->"
+                    ),
+                    "author": {"login": VIEWER},
+                }
+                result, created = self.ensure_issue(list_issues=lambda: [issue])
+                self.assertEqual(result["classification"], "confirmed_success")
+                self.assertEqual(result["action"], "reused")
+                self.assertEqual(result["issue_number"], 42)
+                self.assertEqual(created, [])
 
     def test_title_similarity_alone_does_not_reuse(self) -> None:
         result, created = self.ensure_issue(
@@ -625,6 +650,18 @@ class EnsureDeferredIssueTests(ExternalizeTests):
 
 
 class ResolveReviewThreadTests(ExternalizeTests):
+    def test_resolution_revalidates_account_id_after_bot_rename(self) -> None:
+        renamed = dict(thread(), root_login="renamed-connector")
+        result, resolved = self.resolve(current=snapshot(threads=[renamed]))
+        self.assertEqual(result["classification"], "confirmed_success")
+        self.assertEqual(resolved, ["T1"])
+
+    def test_resolution_refuses_a_different_account_with_the_same_login(self) -> None:
+        impostor = dict(thread(), root_account_id=72)
+        result, resolved = self.resolve(current=snapshot(threads=[impostor]))
+        self.assertEqual(result["classification"], "refused")
+        self.assertEqual(resolved, [])
+
     def test_no_fix_resolution_is_confirmed(self) -> None:
         result, resolved = self.resolve()
         self.assertEqual(result["classification"], "confirmed_success")

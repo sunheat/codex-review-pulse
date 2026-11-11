@@ -38,8 +38,8 @@ def campaign(
         model="a-model",
         reasoning_level="medium",
         interval_minutes=interval,
-        reviewer_logins=[CODEX],
-        approval_logins=[CODEX],
+        reviewer_ids=[71],
+        approval_ids=[71],
     )
     campaign_data["rounds_used"] = rounds_used
     campaign_data["guards"] = list(guards or [])
@@ -75,6 +75,7 @@ def thread(thread_id: str, *, resolved: bool = False, login: str = CODEX) -> dic
         "id": thread_id,
         "is_resolved": resolved,
         "root_login": login,
+        "root_account_id": 71 if login == CODEX else 72,
         "path": "x.py",
         "body": "change",
     }
@@ -87,6 +88,7 @@ def reaction(
         "id": rid or f"r-{content}",
         "content": content,
         "login": login,
+        "account_id": 71 if login == CODEX else 72,
         "created_at": created_at,
     }
 
@@ -103,6 +105,7 @@ def review(
         "id": review_id,
         "state": state,
         "login": login,
+        "account_id": 71 if login == CODEX else 72,
         "commit_oid": commit,
         "submitted_at": submitted_at,
     }
@@ -412,7 +415,7 @@ class DecisionTests(unittest.TestCase):
                     snapshot(
                         reactions=[reaction(m.EYES, created_at=T_PLUS_15)],
                         comments=[
-                            {"id": "codex-comment", "login": CODEX,
+                            {"id": "codex-comment", "login": CODEX, "account_id": 71,
                              "created_at": T_PLUS_30, "body": "Review complete"},
                         ],
                         server_time=T_PLUS_45,
@@ -432,7 +435,7 @@ class DecisionTests(unittest.TestCase):
             snapshot(
                 reactions=[reaction(m.EYES, created_at=T_PLUS_15)],
                 comments=[
-                    {"id": "codex-comment", "login": CODEX,
+                    {"id": "codex-comment", "login": CODEX, "account_id": 71,
                      "created_at": T_PLUS_30, "body": "Review complete"},
                 ],
                 server_time=T_PLUS_30,
@@ -449,7 +452,7 @@ class DecisionTests(unittest.TestCase):
                     snapshot(
                         reactions=[reaction(m.EYES, created_at=eyes_at)],
                         comments=[
-                            {"id": "codex-comment", "login": CODEX,
+                            {"id": "codex-comment", "login": CODEX, "account_id": 71,
                              "created_at": T_PLUS_30, "body": "Review complete"},
                         ],
                         server_time=T_PLUS_45,
@@ -459,7 +462,7 @@ class DecisionTests(unittest.TestCase):
 
     def test_inapplicable_comments_cannot_supersede_eyes(self) -> None:
         baseline_comment = {
-            "id": "baseline-comment", "login": CODEX,
+            "id": "baseline-comment", "login": CODEX, "account_id": 71,
             "created_at": T_PLUS_30, "body": "Old activity",
         }
         c = reserve_and_open(campaign(), baseline={"comments": [baseline_comment]})
@@ -467,9 +470,9 @@ class DecisionTests(unittest.TestCase):
             baseline_comment,
             {"id": "human-comment", "login": "a-human",
              "created_at": T_PLUS_30, "body": "Review complete"},
-            {"id": "old-comment", "login": CODEX,
+            {"id": "old-comment", "login": CODEX, "account_id": 71,
              "created_at": T0, "body": "Review complete"},
-            {"id": "equal-comment", "login": CODEX,
+            {"id": "equal-comment", "login": CODEX, "account_id": 71,
              "created_at": T_PLUS_15, "body": "Review complete"},
         ):
             with self.subTest(comment=comment["id"]):
@@ -556,7 +559,7 @@ class DecisionTests(unittest.TestCase):
             campaign(rounds_used=1),
             baseline={
                 "reactions": [
-                    {"id": "eyes-old", "content": m.EYES, "login": CODEX,
+                    {"id": "eyes-old", "content": m.EYES, "login": CODEX, "account_id": 71,
                      "created_at": "2026-09-14T11:59:00Z"},
                 ]
             },
@@ -566,7 +569,7 @@ class DecisionTests(unittest.TestCase):
             snapshot(
                 server_time=T_PLUS_15,
                 reactions=[
-                    {"id": "eyes-old", "content": m.EYES, "login": CODEX,
+                    {"id": "eyes-old", "content": m.EYES, "login": CODEX, "account_id": 71,
                      "created_at": "2026-09-14T11:59:00Z"},
                 ],
             ),
@@ -710,8 +713,8 @@ class CreationBaselineTests(unittest.TestCase):
             model="a-model",
             reasoning_level="medium",
             interval_minutes=30,
-            reviewer_logins=[CODEX],
-            approval_logins=[CODEX],
+            reviewer_ids=[71],
+            approval_ids=[71],
             creation_baseline=["r-EYES", "r-THUMBS_UP"],
         )
 
@@ -754,17 +757,17 @@ class CreationBaselineTests(unittest.TestCase):
     def test_baseline_reaction_ids_are_derived_from_one_snapshot(self) -> None:
         snap = {
             "reactions": [
-                {"id": "r-b", "content": m.EYES, "login": CODEX, "created_at": T0},
-                {"id": "r-a", "content": m.THUMBS_UP, "login": CODEX, "created_at": T0},
+                {"id": "r-b", "content": m.EYES, "login": CODEX, "account_id": 71, "created_at": T0},
+                {"id": "r-a", "content": m.THUMBS_UP, "login": CODEX, "account_id": 71, "created_at": T0},
                 {"id": "r-human", "content": m.EYES, "login": "a-human", "created_at": T0},
-                {"id": "r-heart", "content": "HEART", "login": CODEX, "created_at": T0},
+                {"id": "r-heart", "content": "HEART", "login": CODEX, "account_id": 71, "created_at": T0},
             ]
         }
         self.assertEqual(
             m.creation_baseline_reaction_ids(
                 snap,
-                reviewer_logins=[CODEX],
-                approval_logins=[CODEX],
+                reviewer_ids=[71],
+                approval_ids=[71],
             ),
             ["r-a", "r-b"],
         )
@@ -890,8 +893,8 @@ class GuardTransitionTests(unittest.TestCase):
             model="m",
             reasoning_level="medium",
             interval_minutes=30,
-            reviewer_logins=[CODEX],
-            approval_logins=[CODEX],
+            reviewer_ids=[71],
+            approval_ids=[71],
         )
         for bad in (0, 11):
             with self.assertRaises(ValueError):
@@ -901,10 +904,8 @@ class GuardTransitionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             m.new_campaign(**{**kwargs, "model": "  "})
         self.assertEqual(
-            m.new_campaign(**{**kwargs, "reviewer_logins": ["ChatGPT-Codex-Connector[bot]"]})["config"][
-                "reviewer_logins"
-            ],
-            ["chatgpt-codex-connector"],
+            m.new_campaign(**{**kwargs, "reviewer_ids": [71, 71]})["config"]["reviewer_ids"],
+            [71],
         )
 
     def test_strict_temporal_ordering(self) -> None:

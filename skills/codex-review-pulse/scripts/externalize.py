@@ -52,7 +52,7 @@ import github_api
 import storage
 
 
-ISSUE_FINGERPRINT_VERSION = "crpf1"
+ISSUE_FINGERPRINT_VERSION = "crpf2"
 
 OUTCOMES = ("fix_now", "fix_later", "no_fix_required")
 
@@ -114,11 +114,13 @@ def _frozen_thread(snapshot: dict[str, Any], thread_id: str) -> dict[str, Any]:
     if thread.get("is_resolved") is True:
         raise FrozenEvidenceError(f"Frozen thread is already resolved: {thread_id}")
     root_comment_id = thread.get("root_comment_id")
+    # Keep the login for exact lookup of legacy deferred-issue fingerprints.
     root_author = thread.get("root_login")
+    root_author_id = model.github_account_id(thread.get("root_account_id"))
     root_updated_at = thread.get("root_updated_at")
     if not isinstance(root_comment_id, str) or not root_comment_id:
         raise FrozenEvidenceError(f"Frozen thread has no root comment ID: {thread_id}")
-    if not isinstance(root_author, str) or not root_author:
+    if root_author_id is None or not isinstance(root_author, str) or not root_author:
         raise FrozenEvidenceError(
             f"Frozen thread has no applicable root author: {thread_id}"
         )
@@ -136,6 +138,7 @@ def _frozen_thread(snapshot: dict[str, Any], thread_id: str) -> dict[str, Any]:
         "path": thread["path"],
         "root_comment_id": root_comment_id,
         "root_author": root_author,
+        "root_author_id": root_author_id,
         "body": thread["body"],
         "root_updated_at": root_updated_at,
         "replies": replies,
@@ -200,7 +203,7 @@ def _frozen_consistent(
         current.get("is_resolved") is False
         and current.get("path") == target["path"]
         and current.get("root_comment_id") == target["root_comment_id"]
-        and current.get("root_login") == target["root_author"]
+        and model.github_account_id(current.get("root_account_id")) == target["root_author_id"]
         and current.get("body") == target["body"]
         and current.get("root_updated_at") == target["root_updated_at"]
         and current.get("replies") == target["replies"]
@@ -270,22 +273,24 @@ def deferred_issue_marker(repository: str, pr_number: int, thread_id: str) -> st
 
 
 def deferred_issue_fingerprint(
-    *, repository: str, pr_number: int, triage_head: str, target: dict[str, Any]
+    *, repository: str, pr_number: int, triage_head: str, target: dict[str, Any],
+    legacy: bool = False,
 ) -> str:
     """Versioned SHA-256 evidence fingerprint from canonical frozen evidence.
 
     Deterministic Python computes it; the model never supplies it. Changing the
     expected triage head or frozen root evidence changes the fingerprint.
     """
+    version = "crpf1" if legacy else ISSUE_FINGERPRINT_VERSION
     canonical = json.dumps(
         {
-            "version": ISSUE_FINGERPRINT_VERSION,
+            "version": version,
             "repository": model.canonical_repository(repository),
             "pull_request": pr_number,
             "triage_head": triage_head,
             "thread_id": target["id"],
             "root_comment_id": target["root_comment_id"],
-            "root_author": target["root_author"],
+            "root_author": target["root_author" if legacy else "root_author_id"],
             "root_body": target["body"],
             "root_updated_at": target["root_updated_at"],
             "thread_path": target["path"],
@@ -295,7 +300,20 @@ def deferred_issue_fingerprint(
         ensure_ascii=False,
     )
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return f"{ISSUE_FINGERPRINT_VERSION}-{digest}"
+    return f"{version}-{digest}"
+
+
+def _issue_lookup_fingerprints(
+    *, repository: str, pr_number: int, triage_head: str, target: dict[str, Any]
+) -> tuple[str, ...]:
+    """Match current issues and exact pre-binding issues without rewriting them."""
+    return tuple(
+        deferred_issue_fingerprint(
+            repository=repository, pr_number=pr_number, triage_head=triage_head,
+            target=target, legacy=legacy,
+        )
+        for legacy in (False, True)
+    )
 
 
 def deferred_issue_body(
@@ -344,7 +362,7 @@ def _find_matching_issue(
     list_issues: Callable[[], list[dict[str, Any]]],
     *,
     marker: str,
-    fingerprint: str,
+    fingerprints: tuple[str, ...],
     viewer: str,
 ) -> dict[str, Any] | None:
     """Cooperative provenance match: exact marker, fingerprint, author, open."""
@@ -352,7 +370,9 @@ def _find_matching_issue(
         if not isinstance(issue, dict):
             continue
         issue_body = issue.get("body") or ""
-        if marker not in issue_body or fingerprint not in issue_body:
+        if marker not in issue_body or not any(
+            fingerprint in issue_body for fingerprint in fingerprints
+        ):
             continue
         author = model.normalize_login((issue.get("author") or {}).get("login"))
         if author != viewer:
@@ -421,13 +441,13 @@ def ensure_deferred_issue(
         target = _frozen_thread(frozen, thread_id)
     except TargetSelectionError as error:
         return _result("ensure_deferred_issue", "refused", reason=str(error))
-    if target["root_author"] not in set(campaign["config"]["reviewer_logins"]):
+    if target["root_author_id"] not in set(campaign["config"]["reviewer_ids"]):
         raise FrozenEvidenceError(
             f"Frozen thread root author is not an applicable Codex identity: {thread_id}"
         )
 
     marker = deferred_issue_marker(canonical, pr_number, thread_id)
-    fingerprint = deferred_issue_fingerprint(
+    fingerprints = _issue_lookup_fingerprints(
         repository=canonical, pr_number=pr_number, triage_head=triage_head, target=target
     )
     try:
@@ -435,7 +455,7 @@ def ensure_deferred_issue(
         if viewer is None:
             raise FrozenEvidenceError("Authenticated GitHub identity is unavailable")
         match = _find_matching_issue(
-            list_issues, marker=marker, fingerprint=fingerprint, viewer=viewer
+            list_issues, marker=marker, fingerprints=fingerprints, viewer=viewer
         )
     except Exception as error:  # noqa: BLE001 - provenance cannot be established
         return _result(
@@ -488,7 +508,7 @@ def ensure_deferred_issue(
         # complete. A visible matching issue proves the creation happened.
         try:
             confirmed = _find_matching_issue(
-                list_issues, marker=marker, fingerprint=fingerprint, viewer=viewer
+                list_issues, marker=marker, fingerprints=fingerprints[:1], viewer=viewer
             )
         except Exception:  # noqa: BLE001 - outcome cannot be established
             confirmed = None
@@ -599,7 +619,7 @@ def resolve_review_thread(
         target = _frozen_thread(frozen, thread_id)
     except TargetSelectionError as error:
         return _result("resolve_review_thread", "refused", reason=str(error))
-    if target["root_author"] not in set(campaign["config"]["reviewer_logins"]):
+    if target["root_author_id"] not in set(campaign["config"]["reviewer_ids"]):
         raise FrozenEvidenceError(
             f"Frozen thread root author is not an applicable Codex identity: {thread_id}"
         )
@@ -690,7 +710,7 @@ def resolve_review_thread(
                 reason="Fix-later resolution requires the confirmed deferred issue",
             )
         marker = deferred_issue_marker(canonical, pr_number, thread_id)
-        fingerprint = deferred_issue_fingerprint(
+        fingerprints = _issue_lookup_fingerprints(
             repository=canonical,
             pr_number=pr_number,
             triage_head=expected_head,
@@ -700,7 +720,7 @@ def resolve_review_thread(
             viewer = model.normalize_login(viewer_call() or "")
             match = (
                 _find_matching_issue(
-                    list_issues, marker=marker, fingerprint=fingerprint, viewer=viewer or ""
+                    list_issues, marker=marker, fingerprints=fingerprints, viewer=viewer or ""
                 )
                 if viewer
                 else None

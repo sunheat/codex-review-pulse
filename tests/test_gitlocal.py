@@ -109,8 +109,8 @@ class PublishTests(unittest.TestCase):
                 model="a-model",
                 reasoning_level="medium",
                 interval_minutes=30,
-                reviewer_logins=["chatgpt-codex-connector"],
-                approval_logins=["chatgpt-codex-connector"],
+                reviewer_ids=[71],
+                approval_ids=[71],
             ),
             repository_path=self.env.clone,
         )

@@ -70,8 +70,8 @@ class WorkerCliFlowTests(unittest.TestCase):
             model="m",
             reasoning_level="low",
             interval_minutes=30,
-            reviewer_logins=["chatgpt-codex-connector"],
-            approval_logins=["chatgpt-codex-connector"],
+            reviewer_ids=[71],
+            approval_ids=[71],
             **kwargs,
         )
         storage.save_json(

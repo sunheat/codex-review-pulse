@@ -114,8 +114,8 @@ class ResponseGraceTests(unittest.TestCase):
             model="a-model",
             reasoning_level="medium",
             interval_minutes=interval,
-            reviewer_logins=[self.CODEX],
-            approval_logins=[self.CODEX],
+            reviewer_ids=[71],
+            approval_ids=[71],
         )
 
     def _opened(self, *, interval: int) -> dict:
@@ -233,8 +233,8 @@ class TerminalProofClassificationTests(unittest.TestCase):
             model="a-model",
             reasoning_level="medium",
             interval_minutes=30,
-            reviewer_logins=[self.CODEX],
-            approval_logins=[self.CODEX],
+            reviewer_ids=[71],
+            approval_ids=[71],
         )
         c["guards"] = guards or []
         return c
@@ -271,7 +271,7 @@ class TerminalProofClassificationTests(unittest.TestCase):
                 {
                     "id": "rv1",
                     "state": m.APPROVED,
-                    "login": self.CODEX,
+                    "login": self.CODEX, "account_id": 71,
                     "commit_oid": self.H,
                     "submitted_at": self.T_PLUS,
                 }
@@ -303,7 +303,7 @@ class TerminalProofClassificationTests(unittest.TestCase):
                     {
                         "id": "rv1",
                         "state": "COMMENTED",
-                        "login": self.CODEX,
+                        "login": self.CODEX, "account_id": 71,
                         "commit_oid": self.H,
                         "submitted_at": self.T_PLUS,
                     }
@@ -918,8 +918,8 @@ class ExhaustedBudgetPrecedenceTests(unittest.TestCase):
             model="a-model",
             reasoning_level="medium",
             interval_minutes=30,
-            reviewer_logins=[self.CODEX],
-            approval_logins=[self.CODEX],
+            reviewer_ids=[71],
+            approval_ids=[71],
         )
         c["rounds_used"] = rounds_used
         return c
@@ -973,7 +973,7 @@ class ExhaustedBudgetPrecedenceTests(unittest.TestCase):
                     {
                         "id": "rv1",
                         "state": "COMMENTED",
-                        "login": self.CODEX,
+                        "login": self.CODEX, "account_id": 71,
                         "commit_oid": self.H,
                         "submitted_at": self.T_GRACE,
                     }
@@ -996,7 +996,7 @@ class ExhaustedBudgetPrecedenceTests(unittest.TestCase):
                     {
                         "id": "e1",
                         "content": m.EYES,
-                        "login": self.CODEX,
+                        "login": self.CODEX, "account_id": 71,
                         "created_at": "2026-09-14T12:05:00Z",
                     }
                 ]
@@ -1010,7 +1010,7 @@ class ExhaustedBudgetPrecedenceTests(unittest.TestCase):
             c,
             self._snap(
                 threads=[
-                    {"id": "t1", "is_resolved": False, "root_login": self.CODEX}
+                    {"id": "t1", "is_resolved": False, "root_login": self.CODEX, "root_account_id": 71}
                 ]
             ),
         )

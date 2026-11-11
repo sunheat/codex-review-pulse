@@ -120,27 +120,17 @@ def _validate_creation_target(
         raise OwnedBoundaryError("Owned observation has no supported head ref")
 
 
-def _campaign_config(
-    *,
-    max_rounds: int,
-    model_name: str,
-    reasoning_level: str,
-    interval_minutes: int,
+def _campaign_actor_ids(
     reviewer_logins: list[str] | None,
     approval_logins: list[str] | None,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Normalized configuration plus the resolved identity collections."""
-    reviewers = model.unique_logins(reviewer_logins, label="reviewer")
-    approvers = model.unique_logins(approval_logins, label="approval")
-    config = {
-        "max_rounds": max_rounds,
-        "model": model_name,
-        "reasoning_level": reasoning_level,
-        "interval_minutes": interval_minutes,
-        "reviewer_logins": reviewers,
-        "approval_logins": approvers,
+) -> tuple[list[int], list[int]]:
+    reviewers = model.DEFAULT_CODEX_LOGINS if reviewer_logins is None else reviewer_logins
+    approvers = model.DEFAULT_CODEX_LOGINS if approval_logins is None else approval_logins
+    lookup = {
+        login: github_api.resolve_bot_account_id(login)
+        for login in dict.fromkeys((*reviewers, *approvers))
     }
-    return config, reviewers, approvers
+    return [lookup[login] for login in reviewers], [lookup[login] for login in approvers]
 
 
 def create_campaign_owned(
@@ -184,31 +174,24 @@ def create_campaign_owned(
             "Campaign record already exists; setup ownership no longer applies"
         )
 
-    config, reviewers, approvers = _campaign_config(
-        max_rounds=max_rounds,
-        model_name=model_name,
-        reasoning_level=reasoning_level,
-        interval_minutes=interval_minutes,
-        reviewer_logins=reviewer_logins,
-        approval_logins=approval_logins,
-    )
     try:
         snapshot = fetch_snapshot()
         _validate_creation_target(snapshot, repository=canonical, pr_number=pr_number)
+        reviewers, approvers = _campaign_actor_ids(reviewer_logins, approval_logins)
         campaign = model.new_campaign(
             campaign_id=campaign_id,
             repository=canonical,
             pull_request_number=pr_number,
             created_at=snapshot["server_time"],
-            max_rounds=config["max_rounds"],
-            model=config["model"],
-            reasoning_level=config["reasoning_level"],
-            interval_minutes=config["interval_minutes"],
+            max_rounds=max_rounds,
+            model=model_name,
+            reasoning_level=reasoning_level,
+            interval_minutes=interval_minutes,
             run_full_tests=run_full_tests,
-            reviewer_logins=reviewers,
-            approval_logins=approvers,
+            reviewer_ids=reviewers,
+            approval_ids=approvers,
             creation_baseline=model.creation_baseline_reaction_ids(
-                snapshot, reviewer_logins=reviewers, approval_logins=approvers
+                snapshot, reviewer_ids=reviewers, approval_ids=approvers
             ),
         )
         model.validate_campaign(
@@ -298,17 +281,10 @@ def prepare_rollover_owned(
     if not model.is_rollover_eligible(c1):
         raise OwnedBoundaryError("Campaign is not an eligible rollover source")
 
-    config, reviewers, approvers = _campaign_config(
-        max_rounds=max_rounds,
-        model_name=model_name,
-        reasoning_level=reasoning_level,
-        interval_minutes=interval_minutes,
-        reviewer_logins=reviewer_logins,
-        approval_logins=approval_logins,
-    )
     try:
         snapshot = fetch_snapshot()
         _validate_creation_target(snapshot, repository=canonical, pr_number=pr_number)
+        reviewers, approvers = _campaign_actor_ids(reviewer_logins, approval_logins)
         campaign_id = model.new_campaign_id(snapshot["server_time"])
         if campaign_id == c1["campaign_id"]:
             raise OwnedBoundaryError("Generated C2 identity collides with C1")
@@ -317,15 +293,15 @@ def prepare_rollover_owned(
             repository=canonical,
             pull_request_number=pr_number,
             created_at=snapshot["server_time"],
-            max_rounds=config["max_rounds"],
-            model=config["model"],
-            reasoning_level=config["reasoning_level"],
-            interval_minutes=config["interval_minutes"],
+            max_rounds=max_rounds,
+            model=model_name,
+            reasoning_level=reasoning_level,
+            interval_minutes=interval_minutes,
             run_full_tests=run_full_tests,
-            reviewer_logins=reviewers,
-            approval_logins=approvers,
+            reviewer_ids=reviewers,
+            approval_ids=approvers,
             creation_baseline=model.creation_baseline_reaction_ids(
-                snapshot, reviewer_logins=reviewers, approval_logins=approvers
+                snapshot, reviewer_ids=reviewers, approval_ids=approvers
             ),
         )
         model.validate_campaign(

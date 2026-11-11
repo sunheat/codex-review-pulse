@@ -23,7 +23,6 @@ H2 = "head-oid-2"
 T0 = "2026-09-14T12:00:00Z"
 T1 = "2026-09-14T12:05:00Z"
 T2 = "2026-09-14T12:10:00Z"
-CODEX = "chatgpt-codex-connector"
 
 
 def base_campaign() -> dict:
@@ -36,8 +35,8 @@ def base_campaign() -> dict:
         model="a-model",
         reasoning_level="medium",
         interval_minutes=30,
-        reviewer_logins=[CODEX],
-        approval_logins=[CODEX],
+        reviewer_ids=[71],
+        approval_ids=[71],
     )
 
 
@@ -275,8 +274,8 @@ class ValidatorRejectsCorruption(unittest.TestCase):
                 model="m",
                 reasoning_level="medium",
                 interval_minutes=30,
-                reviewer_logins=[CODEX],
-                approval_logins=[CODEX],
+                reviewer_ids=[71],
+                approval_ids=[71],
                 creation_baseline=["b", "a", "b"],
             )
         )
@@ -289,13 +288,11 @@ class ValidatorRejectsCorruption(unittest.TestCase):
         self.corrupt(lambda c: c["config"].update(model=""))
         self.corrupt(lambda c: c["config"].update(reasoning_level="   "))
 
-    def test_non_normalized_logins_are_rejected(self) -> None:
-        self.corrupt(
-            lambda c: c["config"].update(reviewer_logins=["ChatGPT-Codex-Connector"])
-        )
-        self.corrupt(
-            lambda c: c["config"].update(approval_logins=["chatgpt-codex-connector[bot]"])
-        )
+    def test_invalid_account_ids_are_rejected(self) -> None:
+        for ids in ([], ["71"], [True], [0], [-1]):
+            with self.subTest(ids=ids):
+                self.corrupt(lambda c: c["config"].update(reviewer_ids=ids))
+                self.corrupt(lambda c: c["config"].update(approval_ids=ids))
 
     def test_active_campaign_must_not_carry_terminal_metadata(self) -> None:
         self.corrupt(lambda c: c.update(terminal_at=T1))

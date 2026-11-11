@@ -57,7 +57,7 @@ import github_api
 import storage
 
 
-PACKET_SCHEMA_VERSION = 1
+PACKET_SCHEMA_VERSION = 2
 PROPOSAL_SCHEMA_VERSION = 1
 PACKET_KIND = "crp-remediation-packet"
 PROPOSAL_KIND = "crp-remediation-proposal"
@@ -276,6 +276,8 @@ def load_packet(packet_path: str | Path) -> dict[str, Any]:
                 raise RemediationRefused(
                     f"preparation packet target field {key} is missing or invalid"
                 )
+        if model.github_account_id(target.get("root_author_id")) is None:
+            raise RemediationRefused("preparation packet target root author ID is missing or invalid")
         if target["id"] in seen:
             raise RemediationRefused("preparation packet selects a duplicate target ID")
         seen.add(target["id"])

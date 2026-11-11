@@ -202,7 +202,7 @@ class ExecutionTests(unittest.TestCase):
                 campaign_id="crp-20261021T000000Z-abc123", repository="owner/repo",
                 pull_request_number=7, created_at="2026-10-21T00:00:00Z", max_rounds=3,
                 model="test", reasoning_level="medium", interval_minutes=30,
-                reviewer_logins=["codex"], approval_logins=["codex"],
+                reviewer_ids=[71], approval_ids=[71],
             ),
         )
         storage.release_lock("owner/repo", 7, owner_token=acquired["owner_token"], repository_path=self.repo)

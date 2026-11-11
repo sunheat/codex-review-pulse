@@ -53,8 +53,8 @@ class HardFailureModelTests(unittest.TestCase):
             model="m",
             reasoning_level="low",
             interval_minutes=30,
-            reviewer_logins=["chatgpt-codex-connector"],
-            approval_logins=["chatgpt-codex-connector"],
+            reviewer_ids=[71],
+            approval_ids=[71],
         )
 
     def test_hard_fail_forfeits_budget_and_terminalizes(self) -> None:
@@ -184,8 +184,8 @@ class HandoffFixture(unittest.TestCase):
             model="m",
             reasoning_level="low",
             interval_minutes=30,
-            reviewer_logins=["chatgpt-codex-connector"],
-            approval_logins=["chatgpt-codex-connector"],
+            reviewer_ids=[71],
+            approval_ids=[71],
         )
         storage.save_json(self.campaign_path(), campaign)
 
@@ -308,8 +308,8 @@ class HardFailureHandoffTests(HandoffFixture):
                 campaign_id="crp-20260914T120000Z-ffffff", repository="owner/repo",
                 pull_request_number=7, created_at=T0, max_rounds=3,
                 model="m", reasoning_level="low", interval_minutes=30,
-                reviewer_logins=["chatgpt-codex-connector"],
-                approval_logins=["chatgpt-codex-connector"],
+                reviewer_ids=[71],
+                approval_ids=[71],
             ),
         ):
             with self.subTest(record=record):
@@ -413,8 +413,9 @@ class HardFailureHandoffTests(HandoffFixture):
         self.assertEqual(self.lock_status(), "absent")
 
     def test_malformed_campaign_state_is_preserved_fail_closed(self) -> None:
+        malformed = {"schema_version": model.SCHEMA_VERSION, "campaign_id": CAMPAIGN_ID}
         self.campaign_path().write_text(
-            json.dumps({"schema_version": 3, "campaign_id": CAMPAIGN_ID}),
+            json.dumps(malformed),
             encoding="utf-8",
         )
         result = self.handoff(
@@ -431,7 +432,7 @@ class HardFailureHandoffTests(HandoffFixture):
         self.assertEqual(payload["acquisition_status"], "campaign_malformed")
         self.assertEqual(
             json.loads(self.campaign_path().read_text(encoding="utf-8")),
-            {"schema_version": 3, "campaign_id": CAMPAIGN_ID},
+            malformed,
         )
         self.assertEqual(self.lock_status(), "absent")
 

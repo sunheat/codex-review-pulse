@@ -60,8 +60,8 @@ def make_campaign(
         model="a-model",
         reasoning_level="medium",
         interval_minutes=30,
-        reviewer_logins=["chatgpt-codex-connector"],
-        approval_logins=["chatgpt-codex-connector"],
+        reviewer_ids=[71],
+        approval_ids=[71],
     )
     data["rounds_used"] = rounds_used
     if status is not None and status != model.ACTIVE:
