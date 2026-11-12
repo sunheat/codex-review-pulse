@@ -999,6 +999,44 @@ class DefinitiveFailureTests(RemediationFixture):
         self.assertEqual(result["ownership"], "released")
         self.assertEqual(self.lock_status(), "absent")
 
+    def test_pre_push_observation_failure_releases_ownership(self) -> None:
+        self.prepare(threads=[raw_thread("T1"), raw_thread("T2")])
+        (self.worktree / "f.txt").write_text("v2\n", encoding="utf-8")
+        real_push = gitlocal.push_publication_commit
+        pushes = []
+
+        def unavailable_before_push(**kwargs):
+            with patch.object(gitlocal, "remote_head", side_effect=RuntimeError("remote head unavailable")):
+                return real_push(**kwargs)
+
+        def recording_runner(command, **kwargs):
+            if "push" in command:
+                pushes.append(command)
+            return subprocess.run(command, **kwargs)
+
+        resolved, resolve_call = self.resolving()
+        with patch.object(gitlocal, "push_publication_commit", side_effect=unavailable_before_push):
+            result = self.finalize(
+                proposal_text=proposal_json(
+                    disposition("T1", "fix_now", mode=externalize.FIX_NOW_PROSPECTIVE),
+                    disposition("T2", "fix_later"),
+                ),
+                runner=recording_runner,
+                resolve_call=resolve_call,
+            )
+
+        self.assertEqual(result["outcome"], "remediation_failed_definitive")
+        self.assertEqual(result["publication"]["status"], "pre_push_observation_failed")
+        self.assertTrue(result["round_committed"])
+        self.assertEqual(self.on_disk()["rounds_used"], 1)
+        self.assertEqual(self.on_disk()["status"], model.ACTIVE)
+        self.assertEqual(result["ownership"], "released")
+        self.assertEqual(self.lock_status(), "absent")
+        self.assertEqual(pushes, [])
+        self.assertEqual(self.remote_head(), self.h1)
+        self.assertEqual(self.created_issues, [])
+        self.assertEqual(resolved, [])
+
     def test_definitive_publication_failure_stops_the_external_suffix(self) -> None:
         self.prepare(threads=[raw_thread("T1"), raw_thread("T2")])
         (self.worktree / "f.txt").write_text("v2\n", encoding="utf-8")

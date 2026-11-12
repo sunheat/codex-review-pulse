@@ -251,7 +251,15 @@ def push_publication_commit(
         repository, pr_number, owner_token, repository_path=repository_path
     )
 
-    second = remote_head(repository_path, branch, remote=remote)
+    try:
+        second = remote_head(repository_path, branch, remote=remote)
+    except RuntimeError as error:
+        return {
+            "published": False,
+            "status": "pre_push_observation_failed",
+            "local_commit": local_commit,
+            "error": storage.error_text(error),
+        }
     if second != expected_head:
         return {
             "published": False,
