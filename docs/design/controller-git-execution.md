@@ -1,20 +1,10 @@
 # Controller-owned Git execution boundary
 
-## Investigation and decision
-
-Integration HEAD verified by `git fetch origin feature/v2-runtime` on
-2026-10-21: `06f8b9b5bc7165d8dd3cdef0f0697f280abe9cc4`. PR #9 remains open;
-this refactor is development work, not a live campaign.
-
-The defect was execution policy distributed across business callers. Six
-helpers independently created empty hook directories, while storage had a
-second subprocess implementation and test runners replaced policy rather than
-receiving protected process requests. The baseline `stage_complete_delta`
-executed a real `core.fsmonitor` sentinel despite its empty hook directory.
+## Execution policy
 
 Use one standard-library-only `gitexec.run_controller_git` boundary. `gitlocal`
 keeps its `git` import alias for business callers. Storage imports the same
-boundary directly, without a dependency cycle. Injectable runners now receive
+boundary directly, without a dependency cycle. Injectable runners receive
 `subprocess.run`-shaped `(command, **context)` requests **after** policy. They
 are trusted test facilities, not a callable sandbox or product bypass.
 
@@ -24,7 +14,7 @@ options still require focused reachability/support review. Shared execution
 policy changes belong here, not in business callers. The small reviewed
 command surface is not a general Git policy engine.
 
-## Reachable operations inspected
+## Reachable operations
 
 | Caller / operation | Local effects | Network / executable mechanisms | Business authority |
 | --- | --- | --- | --- |
@@ -45,18 +35,13 @@ command surface is not a general Git policy engine.
 `externalize` uses `remote_head` indirectly; `owned` delegates fetching and
 preparation; all these paths inherit the boundary. Product-facing `gitlocal`
 CLIs remain fetch, remote-head, worktree-add/remove, with their existing
-business checks. No publication CLI was added. `github_api` subprocesses are
+business checks. There is no publication CLI. `github_api` subprocesses are
 `gh`, not Git. The development-only repository validator's `ls-files -s -z`
-is not an active product controller and is not a new runtime bypass.
+is not an active product controller and is not a runtime bypass.
 
 ## Common controls and versions
 
-Supported installation baseline remains Git 2.36+. No minimum bump. Tested
-locally with Git **2.54.0.windows.1**, Python **3.12.10**, LFS **3.7.1**.
-A proposed official Git-for-Windows 2.36.1 compatibility distribution download
-was denied by host approval policy and was not executed. Git 2.36 was not
-locally exercised. Older/newer host coverage comes from CI; a skipped version-specific test is
-not positive evidence for configuration-hook suppression.
+The supported installation baseline is Git 2.36+.
 
 - Fresh absolute empty `core.hooksPath` for every invocation, including policy
   observations. One centralized lifetime; cleanup cannot overwrite results.
@@ -160,28 +145,3 @@ commitment retains existing fail-closed semantics and never refunds the round.
 Remote-head advancement, nonzero push/re-observation, one attempt, ambiguous
 publication retention, CAS, mutation order, exhaustion and scheduler semantics
 remain in the existing controllers.
-
-Removed six independently maintained hook-directory lifetimes plus storage's
-raw process path. No new persistent state, scheduler, transaction phases,
-credential service or dependency.
-
-Tests use real temporary repositories/bare remotes and executable positive
-controls: baseline/protected fsmonitor, traditional/configuration/included hooks,
-clean/smudge filters despite hook suppression, target nested attributes,
-speculatively changed/info/global attributes, real LFS conversion, required
-signing, implicit maintenance trace and recent-object hook, expanded push
-settings/multiple destinations, transport helper refusal, and release with
-unsupported features. Finalizer tests prove zero-round clean refusal for new
-filters/LFS/signing. Injection and AST process-call inventory guard the common
-boundary. The older locale test now patches the shared subprocess layer rather
-than the removed `storage.subprocess` implementation; hook fixtures now have
-executable permissions and positive controls.
-
-CI retains Ubuntu/macOS/Windows × Python 3.11/3.12, logs actual Git/LFS versions,
-and adds one Windows Git 2.54+ policy job which fails rather than silently skips
-when its Git lacks configured hooks. The timeout is 25 minutes because the
-full local suite with additional protected config observations takes about
-15 minutes; this is CI resource allowance, not runtime lifecycle machinery.
-
-Automated tests do not establish unattended native Codex Desktop operation.
-A live canary remains separately authorized and was not run.

@@ -20,7 +20,7 @@ validation, and proposal submission also consume no round: the deterministic
 remediation finalizer commits the remediation round itself, after complete
 validation and before any external mutation.
 
-## Current runtime status
+## Runtime responsibilities
 
 The remediation transaction is deterministic around semantic/model work:
 preparation freezes the targets and releases ownership before speculative work;
@@ -32,14 +32,13 @@ Core campaign/worker routing, reaction/review lifecycle evaluation, and terminal
 decisions (including S2 confirmation of observation-derived outcomes) are
 deterministic. Review-request decision/reservation and committed request
 execution are composed deterministically inside one `owned.py worker-decision`
-invocation. After durable reservation it immediately enters the existing
+invocation. After durable reservation it immediately enters the
 committed-request executor and returns its final classified/disposed result.
-The durable RESERVED guard remains the authority boundary; the executor's
-transaction semantics are unchanged. No second request CLI invocation is needed.
+The durable RESERVED guard is the authority boundary. Do not invoke a second
+request CLI.
 
-Native Codex Automations already deliver workers. Parts of creation/configuration
-verification, terminal cleanup, and retained-lock quarantine/pause remain
-host/model-mediated; lifecycle hardening is deferred.
+Native Automation creation/configuration verification, terminal cleanup, and
+retained-lock quarantine/pause are partly host/model-mediated.
 
 ## Runtime skill boundary
 
@@ -266,11 +265,9 @@ only the exact-token read-only retained-lock quarantine rules where applicable.
 The boundary released the permanent lock before returning
 `remediation_prepared`. From here you hold no ownership and no owner token:
 never call `lock.py` again, never invoke the owned-worker boundary again, and
-never sequence external mutation helpers yourself — the legacy
-model-orchestrated externalization commands no longer exist. If you
-disappear at any point before the finalizer completes, the only residue is
-disposable speculative local state: no external product mutation, no consumed
-round, no held lock, and no campaign state claiming you are still alive. A
+never sequence external mutation helpers yourself. If you stop before invoking
+the finalizer, only disposable speculative local artifacts remain. This attempt
+has not mutated the remote, consumed a round, or retained ownership. A
 later delivery never resumes your work; it starts from fresh authoritative
 GitHub and Git state.
 

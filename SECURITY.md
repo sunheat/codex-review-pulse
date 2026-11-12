@@ -12,8 +12,7 @@ disclosure timing will be agreed after the report is reproduced and scoped.
 
 ## Supported scope
 
-Security reports are accepted for the `1.0.0` runtime being prepared for the
-first public release. Relevant issues include incorrect Codex account identity
+Security reports are accepted for the `1.0.0` runtime. Relevant issues include incorrect Codex account identity
 attribution or thread targeting; campaign identity, PR-scoped ownership, or
 stale-delivery bypasses; unsafe Git or GitHub mutation scope or ordering; and
 failures to preserve ownership when publication or another mutation is
@@ -26,5 +25,4 @@ using a trusted local repository and same-repository GitHub pull requests.
 Long-term unattended operation, cross-host coordination, fork-PR publication,
 automatic connector detection, generic reviewers, non-GitHub forges,
 Raspberry Pi portability, and plugin marketplace packaging are not supported
-capabilities. The runtime retained under `legacy/v0.3.1/` is historical, not
-the supported current runtime.
+capabilities.

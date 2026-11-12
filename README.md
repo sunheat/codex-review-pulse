@@ -12,41 +12,38 @@ effective rounds, and one automatic `@codex review` request per campaign and
 head. It is not a generic workflow engine, scheduler, multi-host platform, or
 multi-reviewer framework.
 
-The canonical behavior contract is [`AGENTS.md`](AGENTS.md);
-[ADR 0008](docs/adr/0008-v2-runtime-architecture-reset.md) records the v2
-architecture reset.
+## Requirements and installation
 
-## Status: 1.0.0 release preparation
+- Codex app / Codex desktop with native Codex Automations and Agent Skills;
+- Codex mode and Full access when the host exposes the effective mode and
+  permissions; see the [environment gate](skills/codex-review-pulse/references/launcher.md#0-environment-gate);
+- Git 2.36+, with a local clone of the target repository and a matching `origin`
+  remote (same-repository PRs only); see [Git support limits](skills/codex-review-pulse/references/setup.md#controller-git-support);
+- authenticated [GitHub CLI](https://cli.github.com/) with access to read the
+  PR, push its head branch, resolve threads, create issues, and post comments;
+- Python 3.11 or newer.
 
-The first public release is being prepared as version `1.0.0`, recorded in
-[`VERSION`](skills/codex-review-pulse/VERSION). The internal name “v2” refers
-to the second-generation runtime architecture, not the public release number
-or the versions of its stored state formats. This release scope includes:
+The complete skill package is [`skills/codex-review-pulse/`](skills/codex-review-pulse/).
+Replace `REF` with the branch or tag for the version you want to install:
 
-- a skill-driven launcher and scheduled-worker path for the Codex app;
-- deterministic helpers for observation, ownership, round accounting,
-  publication, deferred issues, exact thread resolution, and review requests;
-- deterministic owned worker decisions, reaction/review evaluation and terminal
-  confirmation, plus a remediation transaction around speculative model work;
-- external mutation boundaries that revalidate authority and classify results;
-- network-free tests for the high-frequency branches and safety invariants.
+```text
+git clone --branch REF https://github.com/sunheat/codex-review-pulse.git
+```
 
-Semantic judgment and code repair remain model work; native Automation
-lifecycle hardening remains deferred. Network-free checks do not prove native
-host integration. A live run requires explicit user authorization; discovery
-metadata alone never authorizes one.
-
-The previous 0.3.1 runtime is retained as quarantined historical evidence under
-[`legacy/v0.3.1/`](legacy/v0.3.1/README.md). It is not an active entry point and
-is not the v2 architecture.
+Check [`VERSION`](skills/codex-review-pulse/VERSION) in the cloned package
+before installing it.
+Copy the entire `skills/codex-review-pulse` directory, including its references
+and scripts, into the target project's `.agents/skills/` directory so that
+`.agents/skills/codex-review-pulse/SKILL.md` exists. Start a new Codex
+app conversation with the target repository open as a project. This follows the
+[official manual skill installation guidance](https://developers.openai.com/api/reference/cli#use-the-cli-from-a-coding-agent).
 
 ## One-sentence invocation
 
-In the Codex app, with this skill installed and the target repository open as a
-project:
+In the new Codex app conversation, invoke the installed skill:
 
 ```text
-Run Codex Review Pulse on https://github.com/OWNER/REPO/pull/NUMBER for at most
+$codex-review-pulse Run Codex Review Pulse on https://github.com/OWNER/REPO/pull/NUMBER for at most
 6 effective rounds, using MODEL with REASONING_LEVEL every 30 minutes.
 ```
 
@@ -70,13 +67,7 @@ scheduled delivery. Full procedures:
 - [setup and host requirements](skills/codex-review-pulse/references/setup.md);
 - [manual lock recovery](skills/codex-review-pulse/references/recovery.md).
 
-## Requirements
-
-- the Codex app / Codex desktop with native Codex Automations and Agent Skills;
-- Git 2.36+, with a local clone of the target repository (same-repository PRs only);
-  see [enforced Git support limits](skills/codex-review-pulse/references/setup.md#controller-git-support);
-- authenticated [GitHub CLI](https://cli.github.com/);
-- Python 3.11 or newer.
+## Operating requirements
 
 Campaign state and the ownership lock live under the repository's Git common
 directory (`<git-common-dir>/codex-review-pulse/v2/`), shared by all worktrees,
@@ -144,8 +135,7 @@ and complete final-head CI acceptance.
 Contributions are welcome within the documented scope; see
 [CONTRIBUTING.md](CONTRIBUTING.md). Report security-sensitive findings through
 the private path in [SECURITY.md](SECURITY.md). Project direction and deferred
-work are in [ROADMAP.md](ROADMAP.md); historical context is in
-[RELATED-WORK.md](RELATED-WORK.md).
+work are in [ROADMAP.md](ROADMAP.md).
 
 ## License
 
