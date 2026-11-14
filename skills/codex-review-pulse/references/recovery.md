@@ -245,7 +245,7 @@ A later delivery creates a fresh worktree and never resumes an abandoned one.
 | `codex_review_service_unresponsive` | Response grace elapsed (at least the configured interval, never under 20 minutes), complete evidence shows no Codex response | released |
 | `rounds_exhausted` | No effective round remains and no asynchronous result is pending | released |
 | `request_creation_failed` | Request creation definitively failed with proven absence of a comment | released |
-| `manual_intervention_required` | E.g. unbracketed request, inconclusive temporal evidence, no automatic action remains | released |
+| `manual_intervention_required` | E.g. unbracketed request, inconclusive temporal evidence such as a possible Codex response timestamped in the same second as the request, no automatic action remains | released |
 | `target_unavailable` | PR closed/merged or another definite platform condition | released |
 | `hard_failed` | Positively identified unsupported execution environment (`unsupported_execution_mode`, `insufficient_effective_access`) or explicit host authorization denial (`host_authorization_denied`); entire remaining round budget forfeited | released |
 | `ambiguous_interruption` | A product mutation may or may not have happened | **retained** |

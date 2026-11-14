@@ -554,6 +554,42 @@ class DecisionTests(unittest.TestCase):
         directive = m.decide(c, snapshot(server_time=T_PLUS_30))
         self.assertEqual(directive["status"], m.CODEX_REVIEW_SERVICE_UNRESPONSIVE)
 
+    def test_same_second_codex_comment_is_ambiguous_after_grace(self) -> None:
+        c = reserve_and_open(campaign())
+        comment = {
+            "id": "possible-response",
+            "account_id": 71,
+            "created_at": "2026-09-14T22:00:00+10:00",
+        }
+        before_grace = m.decide(c, snapshot(comments=[comment]))
+        self.assertEqual(before_grace["action"], "wait_request_outstanding")
+
+        after_grace = m.decide(
+            c, snapshot(comments=[comment], server_time=T_PLUS_30)
+        )
+        self.assertEqual(after_grace["status"], m.MANUAL_INTERVENTION_REQUIRED)
+        self.assertEqual(
+            after_grace["artifacts"],
+            [{"kind": "comment", "id": comment["id"], "created_at": comment["created_at"]}],
+        )
+
+    def test_same_second_request_baseline_and_human_comments_are_not_responses(self) -> None:
+        baseline_comment = {"id": "known", "account_id": 71, "created_at": T0}
+        c = reserve_and_open(campaign(), baseline={"comments": [baseline_comment]})
+        directive = m.decide(
+            c,
+            snapshot(
+                comments=[
+                    baseline_comment,
+                    {"id": "req1", "account_id": 71, "created_at": T0},
+                    {"id": "human", "account_id": 72, "created_at": T0},
+                    {"id": "older", "account_id": 71, "created_at": "2026-09-14T11:59:59Z"},
+                ],
+                server_time=T_PLUS_30,
+            ),
+        )
+        self.assertEqual(directive["status"], m.CODEX_REVIEW_SERVICE_UNRESPONSIVE)
+
     def test_baseline_reactions_are_not_responses(self) -> None:
         c = reserve_and_open(
             campaign(rounds_used=1),

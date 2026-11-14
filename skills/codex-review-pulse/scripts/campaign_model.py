@@ -997,20 +997,31 @@ def evaluate(
         )
     ]
 
-    # Codex conversation activity (never the viewer's own request comment) can
-    # be a completion signal and always blocks a "no response" conclusion.
+    # Codex conversation activity can prove completion only when it follows the request.
     codex_comments: list[dict[str, Any]] = []
+    request = (guard or {}).get("request") or {}
     for comment in snapshot.get("comments", []):
         if (
             not isinstance(comment, dict)
             or github_account_id(comment.get("account_id")) not in actor_keys
         ):
             continue
-        if _in_baseline(campaign, guard, comment.get("id")):
+        comment_id = comment.get("id")
+        if not isinstance(comment_id, str) or comment_id == request.get("node_id"):
             continue
-        if floor is not None and strictly_after(comment.get("created_at"), floor):
-            codex_comments.append(
-                {"id": comment.get("id"), "created_at": comment.get("created_at")}
+        if floor is None or _in_baseline(campaign, guard, comment_id):
+            continue
+        created_at = comment.get("created_at")
+        try:
+            comment_time = parse_timestamp(created_at)
+            floor_time = parse_timestamp(floor)
+        except ValueError:
+            continue
+        if comment_time > floor_time:
+            codex_comments.append({"id": comment_id, "created_at": created_at})
+        elif comment_time == floor_time:
+            ambiguous_artifacts.append(
+                {"kind": "comment", "id": comment_id, "created_at": created_at}
             )
 
     if guard is not None and guard.get("state") == GUARD_ACTIVE and _response_grace_elapsed(
