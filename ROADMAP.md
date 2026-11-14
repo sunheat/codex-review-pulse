@@ -1,58 +1,21 @@
 # Roadmap
 
-## v2 architecture reset accepted; v2 runtime not implemented (current)
+Codex Review Pulse supports bounded Codex review remediation for same-repository
+GitHub pull requests in the Codex app, using native Codex Automations. The
+[product contract](AGENTS.md) defines its scope and safety boundaries.
 
-[`AGENTS.md`](AGENTS.md) is the accepted v2 repository contract and
-[ADR 0008](docs/adr/0008-v2-runtime-architecture-reset.md) records the v2
-architecture reset and the supersession of ADR 0001 through ADR 0007. The v2
-runtime is a greenfield redesign and has not been implemented; this Phase 0
-contract/discovery reset is not a v2 release and does not authorize any live
-campaign or canary.
+## Deferred scope
 
-The milestones below record the retained legacy 0.3.1 lineage. They remain
-historical and implementation evidence, but are superseded as governing
-architecture by ADR 0008.
+- Native Automation lifecycle hardening for creation and configuration
+  verification, terminal cleanup, and retained-lock quarantine or pause;
+  these operations remain partly host/model-mediated.
+- Fork pull-request publication and cross-host coordination.
+- Operational notifications and pause integrations beyond native controls.
+- Marketplace distribution and plugin packaging.
+- Connectors beyond the GitHub CLI and GraphQL evidence surface.
+- Generic reviewer and multi-forge support.
 
-## Completed core model
-
-The core state phase implements Codex-only thread targeting, current-head
-approval checkpoints, commit-bound approved-review evidence, frozen-batch
-recovery, and PR-scoped exact resolution.
-
-## Controlled live-pilot readiness
-
-The clean-commit independent installation, read-only preflight, and first
-manually supervised live pilot are complete. The pilot processed five exact
-threads in one frozen batch and one push without widening mutation scope.
-
-## Bounded recurring pilot evidence and release hardening
-
-Version `0.3.1` records a successful two-wake live pilot, makes alternate
-commit-pinned installations self-verifying in preflight, and binds recurring
-state to a canonical digest of the complete normalized run contract. Contract
-changes after wake one now fail closed without state rewrite or retained lease.
-
-This supports repeatable, manually reviewed bounded pilots. It remains a
-bounded pilot release, not a long-term unattended heartbeat.
-
-## Public release candidate
-
-Version `0.3.1` is the first public release candidate. The repository includes
-network-free Windows and Ubuntu CI, public contribution and security guidance,
-and the evidence from the manually reviewed one- and two-wake pilots. The
-self-hosted publication PR is the review boundary for this candidate; opening
-that PR does not itself establish connector approval or production readiness.
-
-## Deferred milestones
-
-- public-API connector and automatic-review detection bound to a head OID;
-- long-term unattended heartbeat approval and operational evidence;
-- broader production notification/pause integration and multi-wake recovery
-  history beyond the completed bounded evidence;
-- Codex plugin packaging and marketplace distribution;
-- Pi portability validation;
-- generic reviewer and multi-forge support; and
-- evaluation of whether to integrate, reuse, or vendor OpenAI
-  `gh-address-comments`.
-
-These remain deferred and are not claims about current functionality.
+Network-free checks do not establish native Automation integration or live
+GitHub mutation behavior. A live run requires explicit user authorization; see
+[CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) for validation
+and canary boundaries.

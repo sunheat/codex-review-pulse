@@ -110,6 +110,9 @@ def validate_repository(root: Path = ROOT, *, run_cli_help: bool = True) -> list
     for path in sorted(root.rglob("*.md")):
         if ".git" in path.parts or path.is_relative_to(root / "notes"):
             continue
+        # Quarantined legacy runtime evidence is not a packaged surface.
+        if path.is_relative_to(root / "legacy"):
+            continue
         errors.extend(markdown_errors(path, root=root))
     errors.extend(workflow_errors(root / ".github" / "workflows" / "ci.yml"))
     errors.extend(tracked_hygiene_errors(root))
