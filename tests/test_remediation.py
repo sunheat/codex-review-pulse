@@ -681,6 +681,40 @@ class CampaignCasTests(RemediationFixture):
 
 
 class TreeBindingTests(RemediationFixture):
+    def test_existing_and_new_fixes_share_the_published_tree(self) -> None:
+        self.prepare(threads=[raw_thread("T1"), raw_thread("T2", path="new.txt")])
+        (self.worktree / "new.txt").write_text("new fix\n", encoding="utf-8")
+        resolutions: list[tuple[str, str]] = []
+
+        def resolve_at_remote_head(thread_id: str) -> dict:
+            resolutions.append((thread_id, self.remote_head()))
+            return {"id": thread_id, "isResolved": True}
+
+        with patch.object(
+            gitlocal, "push_publication_commit", wraps=gitlocal.push_publication_commit
+        ) as push:
+            result = self.finalize(
+                proposal_text=proposal_json(
+                    disposition("T1", "fix_now", mode=externalize.FIX_NOW_PROSPECTIVE),
+                    disposition("T2", "fix_now", mode=externalize.FIX_NOW_PROSPECTIVE),
+                ),
+                resolve_call=resolve_at_remote_head,
+            )
+
+        published = self.remote_head()
+        self.assertEqual(result["outcome"], "remediation_completed")
+        self.assertEqual(result["published_head"], published)
+        self.assertEqual(result["ownership"], "released")
+        self.assertEqual(self.lock_status(), "absent")
+        self.assertEqual(self.on_disk()["rounds_used"], 1)
+        self.assertEqual(push.call_count, 1)
+        self.assertEqual(rev_parse(self.clone, f"{published}^"), self.h1)
+        self.assertEqual(git(self.clone, "show", f"{published}:f.txt").stdout, "v1\n")
+        self.assertEqual(git(self.clone, "show", f"{published}:new.txt").stdout, "new fix\n")
+        self.assertEqual(resolutions, [("T1", published), ("T2", published)])
+        for thread_id in ("T1", "T2"):
+            self.assertEqual(result["resolutions"][thread_id]["classification"], "confirmed_success")
+
     def test_publication_carries_the_complete_non_ignored_delta(self) -> None:
         self.prepare()
         (self.worktree / "f.txt").write_text("v2\n", encoding="utf-8")

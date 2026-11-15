@@ -554,6 +554,19 @@ def _collapsed(path: Path) -> str:
 class BatchMembershipContractTests(unittest.TestCase):
     """One authoritative batch: the committed directive is the only target list."""
 
+    def test_worker_selects_one_fix_now_mode_for_the_complete_batch(self) -> None:
+        worker = _collapsed(REFERENCES / "worker.md")
+        self.assertIn("If any Fix-now finding needs publication", worker)
+        self.assertIn(
+            "use `satisfied_by_prospective_tree` for every Fix-now target", worker
+        )
+        self.assertIn("verify the final tree preserves the existing fixes", worker)
+        self.assertIn(
+            "If all Fix-now findings are already satisfied on the prepared head", worker
+        )
+        self.assertIn("leave the worktree delta empty", worker)
+        self.assertIn("Never convert \"already fixed\" into `no_fix_required`", worker)
+
     def test_projection_is_the_persisted_remediation_snapshot(self) -> None:
         source = (SCRIPTS / "remediation.py").read_text(encoding="utf-8")
         self.assertIn("model.project_remediation_batch(", source)

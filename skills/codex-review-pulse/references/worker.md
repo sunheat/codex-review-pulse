@@ -313,8 +313,8 @@ enumeration is not part of this batch and waits for a later delivery.
      Treat a test failure as evidence when deciding whether the fix is ready.
      This is speculative local work. It publishes nothing and consumes nothing.
    - **Fix later** — draft a concise issue title and body.
-   - **No fix required** — establish concrete evidence (already fixed on the
-     prepared head, false positive, or explicitly unsupported).
+   - **No fix required** — establish concrete evidence (for example, a false
+     positive or an explicitly unsupported case).
 
    The complete non-ignored worktree delta relative to the prepared head is
    what the finalizer publishes: the controller derives it mechanically
@@ -327,17 +327,32 @@ enumeration is not part of this batch and waits for a later delivery.
    affected Fix-now change: abandon the unpublished local work and end the
    delivery (nothing was consumed and no ownership is held).
 
-   Classify each prepared target as exactly one outcome:
+   Classify each prepared target as exactly one outcome. Choose the Fix-now
+   mode for the whole proposal after inspecting every target:
+
+   - If any Fix-now finding needs publication, make only the missing edits and
+     use `satisfied_by_prospective_tree` for every Fix-now target. Check each
+     finding against the complete proposed worktree and verify the final tree
+     preserves the existing fixes. For example, if one fix is already on the
+     prepared head and another needs an edit, both use this mode.
+   - If all Fix-now findings are already satisfied on the prepared head and
+     no publication is needed, use `already_present_on_prepared_head` for
+     every Fix-now target and leave the worktree delta empty.
+
+   Fix-later and No-fix-required targets keep their independent dispositions.
+   Submit one proposal covering the entire prepared batch. Never convert
+   "already fixed" into `no_fix_required`. Do not mix the two Fix-now modes
+   in one proposal: they authorize different heads, so the finalizer rejects
+   the proposal before staging or round commitment.
+
+   The outcomes are:
 
    - `fix_now` with `mode` `satisfied_by_prospective_tree` — the finding is
      fixed by the complete worktree state you are proposing (including a fix
      made for another target).
    - `fix_now` with `mode` `already_present_on_prepared_head` — the finding
-     is already satisfied by the prepared head itself; no new publication is
-     needed for it. Never convert "already fixed" into `no_fix_required`.
-     Do not mix the two Fix-now modes in one proposal: they authorize
-     different heads, so the finalizer rejects the proposal before staging or
-     round commitment.
+     is already satisfied by the prepared head itself and no Fix-now target
+     needs publication.
    - `fix_later` — with bounded `issue_title` and `issue_body`.
    - `no_fix_required` — with bounded `rationale`.
 
