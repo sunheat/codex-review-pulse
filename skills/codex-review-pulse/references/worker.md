@@ -429,9 +429,10 @@ is the actual completed disposition.
   the response window. The matching pre/post head OIDs are a bounded safety
   approximation, not proof of an atomic binding between the comment and the
   head; do not claim stronger attribution to the user or in reports.
-- `invalidated`: conditions changed before the POST; no post happened. The
-  committed round and per-head allowance are not refunded, and the guard records
-  invalidation. Ownership normally releases; trust the returned disposition.
+- `invalidated`: conditions changed or re-observation failed before the POST;
+  no post happened. The committed round and per-head allowance are not refunded,
+  and the guard records invalidation. Ownership normally releases; trust the
+  returned disposition.
 - `creation_failed` (terminal) and `unbracketed` (terminal manual
   intervention): perform the Automation cleanup (section 8) only when
   `ownership: released` and `scheduler_cleanup_authorized: true` are returned.

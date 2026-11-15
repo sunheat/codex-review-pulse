@@ -287,6 +287,28 @@ class RequestBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(self.fixture.lock_status(), "absent")
 
+    def test_pre_post_observation_error_invalidates_without_post_and_releases(self) -> None:
+        posted = []
+
+        def observer() -> dict:
+            raise RuntimeError("observation unavailable")
+
+        result = self.run_boundary(
+            observer=observer,
+            commenter=lambda *args: posted.append(args) or {},
+        )
+        self.assertEqual(posted, [])
+        self.assertEqual(result["outcome"], "invalidated")
+        self.assertEqual(result["ownership"], "released")
+        self.assertFalse(result["scheduler_cleanup_authorized"])
+        record = self.fixture.campaign_on_disk()
+        self.assertEqual(record["status"], m.ACTIVE)
+        self.assertEqual(record["rounds_used"], 1)
+        guard = m.guard_for_head(record, H)
+        self.assertEqual(guard["state"], m.INVALIDATED)
+        self.assertEqual(guard["invalidation_reason"], "pre_post_observation_failed")
+        self.assertEqual(self.fixture.lock_status(), "absent")
+
     def test_existing_pr_thumbs_up_prevents_another_review_post(self) -> None:
         posted = []
         result = self.run_boundary(
@@ -412,6 +434,26 @@ class RequestBoundaryTests(unittest.TestCase):
         # Re-observation failed outright, so the ambiguity timestamp can only
         # come from the durable reservation, not from any replayed snapshot.
         self.assertEqual(self.fixture.campaign_on_disk()["terminal_at"], T0)
+
+    def test_observation_error_after_successful_post_retains_ownership(self) -> None:
+        posted = []
+
+        def observer() -> dict:
+            if posted:
+                raise RuntimeError("observation unavailable")
+            return snap(time=T1)
+
+        def commenter(subject: str, body: str) -> dict:
+            posted.append((subject, body))
+            return {"node_id": "c1", "created_at": T1, "url": "https://x/c1"}
+
+        result = self.run_boundary(observer=observer, commenter=commenter)
+        self.assertEqual(posted, [("pr-node-1", "@codex review")])
+        self.assertEqual(result["outcome"], "local_fail_closed")
+        self.assertEqual(result["ownership"], "retained")
+        self.assertEqual(self.fixture.lock_status(), "active")
+        guard = m.guard_for_head(self.fixture.campaign_on_disk(), H)
+        self.assertEqual(guard["state"], m.RESERVED)
 
     def test_incomplete_post_evidence_fails_closed(self) -> None:
         sequence = [snap(time=T1), snap(time=T2, complete=False)]

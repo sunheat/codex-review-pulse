@@ -258,12 +258,19 @@ def execute_request_attempt(
     }
 
     # 2. Authoritative revalidation after the durable commitment.
-    reobserved = observer()
-    invalidation = _revalidation_reason(campaign, reobserved, head_oid)
+    try:
+        reobserved = observer()
+    except Exception:  # noqa: BLE001 - the read failed before any POST was attempted
+        invalidation = "pre_post_observation_failed"
+        invalidated_at = reserved_at
+    else:
+        invalidation = _revalidation_reason(campaign, reobserved, head_oid)
+        if invalidation is not None:
+            invalidated_at = reobserved["server_time"]
     if invalidation is not None:
         campaign = persist_transition(
             lambda record: model.invalidate_reserved_request(
-                record, head_oid=head_oid, at=reobserved["server_time"], reason=invalidation
+                record, head_oid=head_oid, at=invalidated_at, reason=invalidation
             )
         )
         result.update(
