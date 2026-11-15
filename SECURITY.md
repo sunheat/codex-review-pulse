@@ -12,11 +12,17 @@ disclosure timing will be agreed after the report is reproduced and scoped.
 
 ## Supported scope
 
-Security reports are accepted for the current `0.3.1` public release candidate,
-especially authorization-boundary bypasses, incorrect Codex thread targeting,
-unsafe GraphQL mutation scope, checkpoint or lease integrity failures, and
-commit-pinned installation verification failures.
+Security reports are accepted for the `1.0.0` runtime. Relevant issues include incorrect Codex account identity
+attribution or thread targeting; campaign identity, PR-scoped ownership, or
+stale-delivery bypasses; unsafe Git or GitHub mutation scope or ordering; and
+failures to preserve ownership when publication or another mutation is
+ambiguous. Reports about campaign or lock state integrity, untrusted input
+crossing authority boundaries, and unsafe handling of unsupported state are
+also welcome.
 
-Long-term unattended operation, automatic connector detection, generic
-reviewers, non-GitHub forges, Raspberry Pi portability, and plugin marketplace
-packaging are not supported capabilities.
+The supported end-to-end host is the Codex app with native Codex Automations,
+using a trusted local repository and same-repository GitHub pull requests.
+Long-term unattended operation, cross-host coordination, fork-PR publication,
+automatic connector detection, generic reviewers, non-GitHub forges,
+Raspberry Pi portability, and plugin marketplace packaging are not supported
+capabilities.
